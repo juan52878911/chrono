@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/chrono-core"]
+
+[workspace.package]
+version = "0.2.0-dev"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/juan52878911/chrono"
+
+# Perfil de release: binario pequeño y rápido (objetivo del port a Rust).
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

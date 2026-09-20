@@ -1,0 +1,12 @@
+[package]
+name = "chrono-core"
+description = "Núcleo de dominio de chrono: modelo de evento temporal general y puertos (sin I/O)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# El núcleo NO tiene dependencias a propósito: dominio puro, sin I/O, para no
+# inflar el binario ni acoplar a ninguna librería. La serialización, SQLite,
+# git, etc. viven en los crates adaptadores.
+[dependencies]
