@@ -38,16 +38,33 @@ func Slug(repo string) (string, bool) {
 	return "", false
 }
 
-// Available indica si hay `gh` autenticado y un remoto GitHub (upstream u origin).
-func Available(repo string) bool {
+// Status explica por qué el forge está (o no) disponible, para poder avisar
+// al usuario con precisión en vez de omitirlo en silencio.
+type Status int
+
+const (
+	OK       Status = iota // gh instalado, autenticado y con remoto GitHub.
+	NoGh                   // `gh` no está en el PATH.
+	NoRemote               // no hay remoto GitHub (upstream/origin).
+	NoAuth                 // `gh` está pero no autenticado.
+)
+
+// Check devuelve el estado del forge para este repo.
+func Check(repo string) Status {
 	if _, err := exec.LookPath("gh"); err != nil {
-		return false
+		return NoGh
 	}
 	if _, ok := Slug(repo); !ok {
-		return false
+		return NoRemote
 	}
-	return exec.Command("gh", "auth", "status").Run() == nil
+	if exec.Command("gh", "auth", "status").Run() != nil {
+		return NoAuth
+	}
+	return OK
 }
+
+// Available indica si hay `gh` autenticado y un remoto GitHub (upstream u origin).
+func Available(repo string) bool { return Check(repo) == OK }
 
 func ownerRepo(remoteURL string) string {
 	u := strings.TrimSpace(remoteURL)

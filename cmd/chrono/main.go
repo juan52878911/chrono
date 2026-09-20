@@ -173,6 +173,7 @@ func main() {
 
 	switch cmd {
 	case "sync":
+		requireGit()
 		repo := f.pos
 		if repo == "" {
 			if rp, ok, _ := st.Meta("repo_path"); ok {
@@ -251,6 +252,7 @@ func runMCP(f flags) {
 
 // cmdInit prepara el índice del repo actual (o el indicado) sin más ceremonia.
 func cmdInit(f flags) {
+	requireGit()
 	start := f.pos
 	if start == "" {
 		start, _ = os.Getwd()
@@ -350,6 +352,16 @@ func emit(st *store.Store, question, since string, maxItems, returned int, resul
 func requirePos(p, msg string) {
 	if p == "" {
 		fatal(fmt.Errorf("%s", msg))
+	}
+}
+
+// requireGit aborta con un mensaje accionable si git no está instalado. Solo
+// init/sync lo necesitan; las consultas leen el índice y funcionan sin git.
+func requireGit() {
+	if _, err := exec.LookPath("git"); err != nil {
+		fatal(fmt.Errorf("%s", i18n.T(
+			"git is not installed, and chrono needs it to read history.\n  Install it: https://git-scm.com/downloads  (macOS: xcode-select --install, or brew install git)",
+			"git no está instalado y chrono lo necesita para leer el historial.\n  Instálalo: https://git-scm.com/downloads  (macOS: xcode-select --install, o brew install git)")))
 	}
 }
 

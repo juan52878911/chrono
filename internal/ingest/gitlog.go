@@ -290,7 +290,20 @@ func finalize(repo string, st *store.Store, cfg config.Config) error {
 		return fmt.Errorf("saving tags: %w", err)
 	}
 	// Puerto Tracker (opcional): PRs/issues del forge (upstream si es un fork).
-	if tracker.Available(repo) {
+	switch tracker.Check(repo) {
+	case tracker.NoGh:
+		fmt.Fprintln(os.Stderr, i18n.T(
+			"  warning: 'gh' not found — skipping PRs/issues (bug-by-label). Install GitHub CLI to enable: https://cli.github.com",
+			"  aviso: no está 'gh' — se omiten PRs/issues (bug por label). Instala GitHub CLI para activarlo: https://cli.github.com"))
+	case tracker.NoRemote:
+		fmt.Fprintln(os.Stderr, i18n.T(
+			"  warning: no GitHub remote (upstream/origin) — skipping PRs/issues.",
+			"  aviso: no hay remoto GitHub (upstream/origin) — se omiten PRs/issues."))
+	case tracker.NoAuth:
+		fmt.Fprintln(os.Stderr, i18n.T(
+			"  warning: 'gh' is not authenticated — skipping PRs/issues. Run: gh auth login",
+			"  aviso: 'gh' no está autenticado — se omiten PRs/issues. Ejecuta: gh auth login"))
+	case tracker.OK:
 		fmt.Fprintln(os.Stderr, i18n.T("  fetching PRs/issues…", "  trayendo PRs/issues…"))
 		items, nwo, err := tracker.Fetch(repo, 1000)
 		if err != nil {
