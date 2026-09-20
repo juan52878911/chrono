@@ -261,3 +261,46 @@ predicción; embeddings/LLM en el binario (fase B, proveedor externo); JEV sin d
 **Decisiones abiertas** (menores, para más adelante): caps por defecto a validar con un log
 real; definición de "problema" en fuentes no git (`level`/`status` por config); override de
 modelos en `.chrono/models/` (recomendado sí).
+
+---
+
+## 9. Historia de símbolos (barata) — decisión 2026-09-20
+
+Revoca `DECISIONS.md §4` a "**símbolos baratos sí, AST no**". Ruta elegida: **S0+S1**
+(sin tree-sitter). El coste real es tiempo de `init`, no tamaño de binario → va **opt-in**.
+
+**Distinción clave**:
+- **Ver el diff** ≠ **entender el símbolo**. Ver es gratis (shell-out); el símbolo exacto por
+  AST es carísimo en ingesta (parsear cada blob antes/después de cada commit: bun = minutos, GB).
+- El **nombre de la función del hunk** es gratis: git ya emite `@@ -a,b +c,d @@ <funcname>`.
+
+**Modelo** (sin tocar el struct): un símbolo es **otro `Touch`**.
+```
+Touch { entity: "src/bun.js/socket.zig#connect", entity_type: "symbol",
+        weight: added+deleted de sus hunks,
+        attrs: { file, sym_kind: fn|type|test, hunks, origin: funcname|decl } }
+```
+Separador **`#`** (no `/`): así el `LIKE 'dir/%'` de owners/hotspots **no** cuenta doble el
+touch de fichero y el de símbolo. El fichero sigue siendo su propio `Touch` (`type="file"`);
+`is_bulk` se calcula solo sobre ficheros. `entities.type` (ya en v2) filtra: las consultas
+llevan `WHERE type='file'` por defecto y `--by symbol` cambia el filtro → **consultas nuevas
+gratis**: `hotspots --by symbol`, `coupling "socket.zig#connect"`, `owners "socket.zig#"`.
+
+**Determinismo del funcname**: no fiarse de los drivers `xfuncname` builtin de la versión de
+git del usuario; chrono inyecta **sus propias regex por lenguaje** vía
+`-c core.attributesFile=.chrono/attributes -c diff.<lang>.xfuncname='…'` y **hashea esas
+regex en el manifiesto** (`symbols_rules_hash`). Cambio de regex → reindex de touches símbolo.
+
+**Fases**:
+
+| Fase | Contenido | Binario | Cuándo |
+| --- | --- | --- | --- |
+| **S0 · Ver diffs** | `chrono show <id> [--entity p]` → `git show` acotado por `token_budget`. NO indexa (respeta §2). | +0 | con R2 |
+| **S1 · Símbolos por hunk** | `init --symbols` (default off): stream `git log --numstat -p -U0` + regex propias (rust/go/python/js-ts/c-cpp/zig/java) → `Touch{type:"symbol"}`; `--by symbol`. Test: mismos touches de fichero que sin `-p`. Features JEV `n_sym`, `sym_kind`, `sym_test` (nunca el nombre del símbolo). | +~0,1 MB | R3 |
+| **S2 · Tamaño de símbolos** | regex sobre los blobs de HEAD que ya se leen → `entities.size` de símbolos → hotspots ponderados. | +0 | R3/R5 |
+| **S3 · tree-sitter** (condicional, NO por defecto) | feature Cargo `ast`, runtime+rust+go+python+c (~3,7 MB), **solo si S1 mide >15–20 % de hunks mal atribuidos**. Build oficial sin la feature. | +3,7 MB solo en esa build | tras R4 |
+
+**Anti-scope** (además del §8): no embeber 40 gramáticas ni TS/C++; no `.so`/`.wasm` ni
+descargas; no parsear la historia por defecto; no call graph / renames de función /
+complejidad / LSP; no indexar diffs; nombres de símbolo no son features de JEV.
+

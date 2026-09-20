@@ -20,7 +20,7 @@ These decisions are **stored in the `.db`** so two machines produce the same ind
 1. **One SQLite file, not Memgraph/Qdrant.** Personal scale; a portable `.db` beats distributed infra. **Firm.**
 2. **Never embed diffs.** They embed poorly and cost; only NL text (messages/PRs), and only in v2. **Firm.**
 3. **Stream `git log`, not libgit2.** git already handles the edge cases; constant RAM. **Firm.**
-4. **Permanently out of scope:** mass `git blame`, symbol-level history, predicted "regression risk". That's where these projects die. **Firm.**
+4. **Symbol history: cheap yes, AST no** *(revised 2026-09-20)*. Symbol-level metrics are IN scope **only via the hunk's function name** (git's `@@ … @@ <funcname>`, with chrono's own `xfuncname` regex so results don't depend on the user's git version). A symbol is another `Touch` with `entity_type="symbol"` (`file#func`); opt-in (`init --symbols`), off by default (the cost is `init` time from `-p`, not binary size). **Still permanently out of scope:** parsing the AST of every blob in history, mass `git blame`, call graphs / function renames / complexity, predicted "regression risk". tree-sitter, if ever, is an opt-in Cargo feature for a few languages, only if measured misattribution warrants it. See `DESIGN-GENERAL-CORE.md §7 (S0–S3)`.
 5. **"Most common bugs" = relational (where) + keyword taxonomy (what kind).** Token-frequency clustering was too weak; a configurable `bug_categories` map yields semantic categories (memory-safety, crash, network…). *(Recalibrated after a real opencode test.)*
 6. **Classifier: rules (Level 0) in v1.** A trained local classifier and Jev need a labeled dataset + eval metric first; v2.
 7. **`serve` is a second product** → scaling phase, not v1.
@@ -30,6 +30,7 @@ These decisions are **stored in the `.db`** so two machines produce the same ind
 11. **Positioning by capabilities, not "99% fewer tokens".** Honest saving vs `git log --grep`+LLM is ~3–5×; the big win is determinism + not saturating context.
 12. **English by default** (OSS standard), Spanish via locale/`--lang`/`CHRONO_LANG`. JSON output never localized.
 13. **Forge prefers `upstream`** on forks (PRs live upstream); drops heavy fields to avoid GitHub's GraphQL node limit; surfaces errors (no silent zero).
+14. **Rust for the general core** *(2026-09-20, supersedes #9 for v2)*. The Go v0.1.1 binary stays the stable one until the Rust port reaches parity; the port lives in `rust/`. Rust buys parallel ingest with controlled memory for million-line traces and bit-stable integer JEV inference. Contract renamed to `entity`/`id` (`schema_version: 2`); v1→v2 migration is **reindex**, not in-place. See `DESIGN-GENERAL-CORE.md`.
 
 ## Deterministic classification (bugs/tickets)
 
