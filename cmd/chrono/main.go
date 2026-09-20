@@ -39,6 +39,7 @@ Queries (JSON, see docs/OUTPUT-CONTRACT.md):
   churn                Lines +/- per file.
   tickets <id>         Commits/files/PRs linked to a ticket.
   prs                  Forge pull requests (state, merge, bug by label).
+  branches [base]      Branch status vs base: ahead/behind, merged, stale, authors.
   phases               Project phases (tags/releases).
   search <text>        Search commits by meaning (FTS5, LIKE fallback).
   similar <sha>        Near-duplicate commits (by SimHash).
@@ -72,6 +73,7 @@ Consulta (JSON según docs/OUTPUT-CONTRACT.md):
   churn                Líneas +/- por fichero.
   tickets <id>         Commits/ficheros/PRs ligados a un ticket.
   prs                  PRs del forge (estado, merge, si es bug por label).
+  branches [base]      Estado de ramas vs base: ahead/behind, mergeada, stale, autores.
   phases               Fases del proyecto (etiquetas).
   search <texto>       Busca commits por significado (FTS5, con fallback a LIKE).
   similar <sha>        Commits casi-duplicados (por SimHash).
@@ -207,6 +209,14 @@ func main() {
 		requirePos(f.pos, i18n.T("tickets needs an <id>", "tickets necesita un <id>"))
 		res, err := metrics.Ticket(st.DB(), f.pos)
 		emit(st, "tickets", "", 1, 1, res, err)
+	case "branches":
+		requireGit()
+		rp, ok, _ := st.Meta("repo_path")
+		if !ok || rp == "" {
+			fatal(fmt.Errorf("%s", i18n.T("no repo_path in the index; run 'chrono init' first", "no hay repo_path en el índice; ejecuta 'chrono init' primero")))
+		}
+		base, cur, res, err := metrics.Branches(rp, f.pos)
+		emit(st, "branches", "", len(res), len(res), map[string]any{"base": base, "current": cur, "branches": res}, err)
 	case "phases":
 		res, err := metrics.Phases(st.DB())
 		emit(st, "phases", "", len(res), len(res), map[string]any{"phases": res}, err)

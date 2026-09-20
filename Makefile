@@ -1,4 +1,4 @@
-VERSION ?= v0.1.0
+VERSION ?= v0.1.1
 LDFLAGS := -s -w -X main.version=$(VERSION)
 PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
 

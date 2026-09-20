@@ -120,6 +120,7 @@ Every query accepts `--json` (default) and `--since DATE`. The index is
 | `churn` | Lines +/− per file. |
 | `tickets <id>` | Commits, files and PRs for a ticket. |
 | `prs` | Forge pull requests (state, merge, bug by label). |
+| `branches [base]` | Branch status vs base: ahead/behind, merged, stale, authors. |
 | `phases` | Project phases (tags/releases). |
 | `search <text>` | Search commits by meaning (full-text). |
 | `similar <sha>` | Near-duplicate commits (by SimHash fingerprint). |

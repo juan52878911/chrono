@@ -101,6 +101,7 @@ func tools() []toolDef {
 		{"tickets", "Commits y ficheros ligados a un ticket.", map[string]any{"type": "object", "properties": map[string]any{"id": strProp("Id del ticket, p.ej. PROJ-123 o #45")}, "required": []string{"id"}}},
 		{"phases", "Fases del proyecto (etiquetas/releases).", map[string]any{"type": "object", "properties": map[string]any{}}},
 		{"prs", "Pull requests del forge (estado, merge, si es bug).", map[string]any{"type": "object", "properties": map[string]any{"since": since}}},
+		{"branches", "Estado de ramas vs base: ahead/behind, mergeada, stale, autores.", map[string]any{"type": "object", "properties": map[string]any{"base": strProp("Rama base (opcional; por defecto main/master)")}}},
 		{"search", "Busca commits por significado (texto completo).", map[string]any{"type": "object", "properties": map[string]any{"query": strProp("Texto a buscar")}, "required": []string{"query"}}},
 		{"similar", "Commits casi-duplicados de un SHA (por SimHash).", map[string]any{"type": "object", "properties": map[string]any{"sha": strProp("SHA del commit")}, "required": []string{"sha"}}},
 	}
@@ -123,6 +124,7 @@ func call(st *store.Store, params json.RawMessage) (map[string]any, error) {
 			Since string `json:"since"`
 			Query string `json:"query"`
 			SHA   string `json:"sha"`
+			Base  string `json:"base"`
 		} `json:"arguments"`
 	}
 	if err := json.Unmarshal(params, &p); err != nil {
@@ -154,6 +156,16 @@ func call(st *store.Store, params json.RawMessage) (map[string]any, error) {
 		result, err = metrics.Phases(db)
 	case "prs":
 		result, err = metrics.PullRequests(db, a.Since, 30)
+	case "branches":
+		rp, ok, _ := st.Meta("repo_path")
+		if !ok || rp == "" {
+			err = fmt.Errorf("no repo_path in the index")
+			break
+		}
+		var base, cur string
+		var brs any
+		base, cur, brs, err = metrics.Branches(rp, a.Base)
+		result = map[string]any{"base": base, "current": cur, "branches": brs}
 	case "search":
 		result, err = metrics.Search(db, st.HasFTS(), a.Query, 25)
 	case "similar":

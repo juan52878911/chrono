@@ -31,6 +31,7 @@ This is **the product contract**: which questions chrono answers and their exact
 | `churn` | What's moving now? | list of `{path, added, deleted}` in the window |
 | `tickets <id>` | What code resolved ticket X? | `{ticket, commits:[…], files:[…], prs:[…]}` |
 | `prs` | Which PRs exist and their state? | list of `{number, title, state, merged, is_bug, labels}` |
+| `branches [base]` | What's the state of each branch? | `{base, current, branches:[{name, current, tip, age_days, ahead, behind, merged, stale, authors, bus_factor}]}` |
 | `phases` | What were the project phases? | list of `{tag, date}` from tags/releases |
 | `search <text>` | Which commits talk about X? | list of `{sha, subject, date}` (FTS5/BM25) |
 | `similar <sha>` | Which commits are near-identical? | list of `{sha, subject, distance}` (SimHash) |
@@ -59,6 +60,16 @@ This is **the product contract**: which questions chrono answers and their exact
 ```json
 { "for": "auth/session.go", "coupled": [
   { "b": "auth/token.go", "support": 41, "confidence": 0.85 }
+]}
+```
+
+**branches** (live from git, not the index)
+```json
+{ "base": "main", "current": "feature/x", "branches": [
+  { "name": "feature/x", "current": true,
+    "tip": { "sha": "a1b2c3d", "author": "Ada", "date": "2026-08-30 12:00:00 -0500", "subject": "add cache" },
+    "age_days": 3, "ahead": 5, "behind": 12, "merged": false, "stale": false,
+    "authors": [{ "name": "Ada", "commits": 5 }], "bus_factor": 1 }
 ]}
 ```
 

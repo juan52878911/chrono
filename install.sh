@@ -13,7 +13,7 @@
 #   3. Build from source with Go
 #
 # Env overrides:
-#   VERSION=v0.1.0   pin a release (default: latest)
+#   VERSION=v0.1.1   pin a release (default: latest)
 #   PREFIX=/usr/local/bin   install dir (default: /usr/local/bin if writable, else ~/.local/bin)
 set -eu
 
@@ -91,7 +91,7 @@ install_from_tarball() { # install_from_tarball TARBALL
 }
 
 # --- 1) local tarball from a checkout ---------------------------------------
-localtar="dist/chrono-${VERSION:-v0.1.0}-$os-$arch.tar.gz"
+localtar="dist/chrono-${VERSION:-v0.1.1}-$os-$arch.tar.gz"
 if [ -f "$localtar" ]; then
   echo "Installing prebuilt binary from $localtar ($os/$arch)..."
   install_from_tarball "$localtar"
@@ -100,7 +100,7 @@ if [ -f "$localtar" ]; then
 elif have curl || have wget; then
   if [ -z "$VERSION" ]; then
     VERSION=$(resolve_latest || true)
-    [ -n "$VERSION" ] || VERSION="v0.1.0"
+    [ -n "$VERSION" ] || VERSION="v0.1.1"
   fi
   asset="chrono-$VERSION-$os-$arch.tar.gz"
   base="https://github.com/$REPO/releases/download/$VERSION"

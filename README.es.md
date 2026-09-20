@@ -108,6 +108,7 @@ El índice se **auto-descubre** subiendo desde el directorio actual, como git co
 | `churn` | Líneas +/− por fichero. |
 | `tickets <id>` | Commits, ficheros y PRs de un ticket. |
 | `prs` | Pull requests del forge (estado, merge, si es bug por label). |
+| `branches [base]` | Estado de ramas vs base: ahead/behind, mergeada, stale, autores. |
 | `phases` | Fases del proyecto (etiquetas/releases). |
 | `search <texto>` | Busca commits por significado (texto completo). |
 | `similar <sha>` | Commits casi-duplicados (por huella SimHash). |
