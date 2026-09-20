@@ -1,0 +1,17 @@
+# binarios
+/chrono
+/dist/
+*.exe
+
+# índices locales
+*.db
+*.db-wal
+*.db-shm
+
+# Go
+/vendor/
+
+# editores
+.DS_Store
+.idea/
+.vscode/
