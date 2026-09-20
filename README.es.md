@@ -30,9 +30,23 @@ chrono **no** necesita base de datos, servidor ni conexión (salvo `gh` para PRs
 
 ## Instalación
 
-### Opción A — Binario precompilado (lo más rápido)
+### Opción A — Una sola línea (recomendada, macOS y Linux)
 
-Descarga el `.tar.gz` de tu plataforma (carpeta `dist/` o la sección *Releases*) y colócalo en tu `PATH`:
+Detecta tu plataforma, descarga el binario correcto del último release, **verifica su SHA-256** e instala en un directorio de tu `PATH`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/juan52878911/chrono/main/install.sh | sh
+```
+
+Sin clonar, sin Go, sin compilador. Funciona en macOS (Apple Silicon e Intel) y Linux (x86-64 y arm64).
+
+- Fijar una versión: `curl -fsSL https://raw.githubusercontent.com/juan52878911/chrono/main/install.sh | VERSION=v0.1.0 sh`
+- Elegir el directorio de instalación: `... | PREFIX="$HOME/.local/bin" sh`
+- Por defecto instala en `/usr/local/bin` si tiene permisos; si no, en `~/.local/bin` (el script te avisa si hay que añadirlo al `PATH`).
+
+### Opción B — Binario precompilado (manual)
+
+Descarga el `.tar.gz` de tu plataforma desde la [página de Releases](https://github.com/juan52878911/chrono/releases/latest) y colócalo en tu `PATH`:
 
 **macOS (Apple Silicon / M1–M4):**
 ```bash
@@ -48,17 +62,14 @@ sudo install -m755 chrono-v0.1.0-linux-amd64/chrono /usr/local/bin/chrono
 ```
 > El binario de Linux es **estático** (sin dependencias de sistema): el mismo archivo vale para Debian, Ubuntu, Arch, Alpine, etc.
 
-O deja que el script elija por ti (instala en `~/.local/bin`):
-```bash
-./install.sh
-```
+Desde un checkout también puedes ejecutar `./install.sh` (el mismo script; usa `./dist` si existe).
 
-### Opción B — Desde código (con Go)
+### Opción C — Desde código (con Go)
 ```bash
 make install     # instala en ~/go/bin
 ```
 
-### Opción C — Nix
+### Opción D — Nix
 ```bash
 nix run   github:juan52878911/chrono
 nix profile install github:juan52878911/chrono
