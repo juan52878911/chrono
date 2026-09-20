@@ -147,4 +147,4 @@ Más detalle en [`docs/`](docs/).
 
 ## Licencia
 
-Open source (por definir: MIT o Apache-2.0).
+MIT — ver [LICENSE](LICENSE).

@@ -177,4 +177,4 @@ More detail in [`docs/`](docs/): architecture, output contract, decisions and ro
 
 ## License
 
-Open source (TBD: MIT or Apache-2.0).
+MIT — see [LICENSE](LICENSE).
