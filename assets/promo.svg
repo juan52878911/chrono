@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1350" width="1080" height="1350" role="img" aria-labelledby="pt">
+  <title id="pt">chrono — cualquier historial, destilado para IA</title>
+  <defs>
+    <pattern id="p-hatch" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="9" height="9" fill="#d7d2c7"/><line x1="0" y1="0" x2="0" y2="9" stroke="#17140d" stroke-width="2.4"/>
+    </pattern>
+    <pattern id="p-facade" width="60" height="76" patternUnits="userSpaceOnUse">
+      <rect width="60" height="76" fill="url(#p-hatch)"/><rect x="12" y="14" width="26" height="40" fill="#17140d"/>
+    </pattern>
+    <filter id="p-noise"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" result="n"/>
+      <feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0.7 0.7 0.7 0 0"/></filter>
+    <clipPath id="p-clip"><rect width="1080" height="1350"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#p-clip)">
+    <rect width="1080" height="1350" fill="#e7e3da"/>
+
+    <!-- concrete accent, top-right, bleeding -->
+    <g transform="rotate(15 1030 10)">
+      <rect x="880" y="-140" width="300" height="380" fill="url(#p-facade)" stroke="#17140d" stroke-width="3"/>
+    </g>
+
+    <!-- mark -->
+    <g transform="translate(56,86)">
+      <rect x="0" y="-19" width="21" height="21" fill="#d43d2a"/>
+      <text x="32" y="0" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="30" fill="#17140d">chrono</text>
+    </g>
+
+    <!-- wordmark + tagline -->
+    <text x="50" y="252" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="150" fill="#d43d2a" letter-spacing="-3">CHRONO</text>
+    <text x="56" y="300" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="22" letter-spacing="1" fill="#17140d">/ CUALQUIER HISTORIAL, DESTILADO PARA IA</text>
+    <line x1="56" y1="328" x2="1024" y2="328" stroke="#17140d" stroke-width="4"/>
+
+    <!-- what -->
+    <text x="56" y="378" font-family="'Helvetica Neue',Arial,sans-serif" font-weight="700" font-size="27" fill="#17140d">Indexa el historial de tu repo y responde preguntas de código:</text>
+    <text x="56" y="412" font-family="'Helvetica Neue',Arial,sans-serif" font-weight="700" font-size="27" fill="#17140d">determinista, local y en un solo binario. Sin servidor.</text>
+
+    <!-- features -->
+    <text x="56" y="474" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="20" fill="#d43d2a">// QUÉ HACE</text>
+    <g font-family="'Helvetica Neue',Arial,sans-serif" font-size="21" fill="#17140d">
+      <rect x="56" y="500" width="14" height="14" fill="#d43d2a"/><text x="82" y="513">Hotspots — qué es peligroso tocar</text>
+      <rect x="56" y="552" width="14" height="14" fill="#d43d2a"/><text x="82" y="565">Coupling — qué se rompe junto</text>
+      <rect x="56" y="604" width="14" height="14" fill="#d43d2a"/><text x="82" y="617">Owners + bus factor</text>
+      <rect x="56" y="656" width="14" height="14" fill="#d43d2a"/><text x="82" y="669">Bugs por categoría</text>
+
+      <rect x="572" y="500" width="14" height="14" fill="#d43d2a"/><text x="598" y="513">PRs · issues · tickets</text>
+      <rect x="572" y="552" width="14" height="14" fill="#d43d2a"/><text x="598" y="565">Búsqueda por significado</text>
+      <rect x="572" y="604" width="14" height="14" fill="#d43d2a"/><text x="598" y="617">Habla MCP (opencode/Claude)</text>
+      <rect x="572" y="656" width="14" height="14" fill="#d43d2a"/><text x="598" y="669">Determinista · local · MIT</text>
+    </g>
+
+    <!-- stat band -->
+    <rect x="56" y="712" width="968" height="82" fill="none" stroke="#17140d" stroke-width="4"/>
+    <text x="76" y="774" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="58" fill="#d43d2a">≈60×</text>
+    <text x="240" y="748" font-family="'Helvetica Neue',Arial,sans-serif" font-weight="800" font-size="30" fill="#17140d">MENOS TOKENS</text>
+    <text x="240" y="780" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="18" fill="#17140d">que leer el historial crudo · medido en repo real</text>
+
+    <!-- commands box -->
+    <rect x="56" y="820" width="968" height="182" fill="#17140d"/>
+    <g font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="26" fill="#e7e3da">
+      <text x="82" y="878"><tspan fill="#d43d2a">$</tspan> chrono init</text>
+      <text x="82" y="926"><tspan fill="#d43d2a">$</tspan> chrono bugs</text>
+      <text x="82" y="974"><tspan fill="#d43d2a">$</tspan> chrono coupling src/auth.ts</text>
+    </g>
+
+    <!-- install + concept -->
+    <text x="56" y="1052" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="19" fill="#17140d">INSTALA:  go install …/chrono  ·  nix run github:…  ·  binario del release</text>
+    <text x="56" y="1092" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="19" fill="#17140d">PARA:  git · logs · changelogs · incidencias · cualquier línea temporal</text>
+
+    <!-- footer -->
+    <rect x="0" y="1230" width="1080" height="120" fill="#d43d2a"/>
+    <text x="56" y="1300" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="46" fill="#e7e3da" letter-spacing="0">GITHUB.COM/JUAN52878911/CHRONO</text>
+    <text x="56" y="1332" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="19" letter-spacing="1" fill="#e7e3da">OPEN SOURCE · MIT · UN BINARIO · SIN SERVIDOR</text>
+
+    <rect width="1080" height="1350" filter="url(#p-noise)" opacity="0.16"/>
+  </g>
+</svg>

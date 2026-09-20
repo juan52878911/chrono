@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-labelledby="bt">
+  <title id="bt">chrono — any history, distilled for AI</title>
+  <defs>
+    <pattern id="b-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="8" height="8" fill="#d7d2c7"/>
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#17140d" stroke-width="2.4"/>
+    </pattern>
+    <pattern id="b-hatch2" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
+      <rect width="9" height="9" fill="#e0dcd2"/>
+      <line x1="0" y1="0" x2="0" y2="9" stroke="#17140d" stroke-width="1.6"/>
+    </pattern>
+    <pattern id="b-facade" width="66" height="86" patternUnits="userSpaceOnUse">
+      <rect width="66" height="86" fill="url(#b-hatch)"/>
+      <rect x="12" y="15" width="28" height="44" fill="#17140d"/>
+    </pattern>
+    <filter id="b-noise"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" result="n"/>
+      <feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0.7 0.7 0.7 0 0"/></filter>
+    <clipPath id="b-clip"><rect width="1280" height="640"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#b-clip)">
+    <rect width="1280" height="640" fill="#e7e3da"/>
+
+    <!-- secondary slab, top-right, bleeding -->
+    <g transform="rotate(17 1180 30)">
+      <rect x="980" y="-160" width="360" height="360" fill="url(#b-hatch2)" stroke="#17140d" stroke-width="3"/>
+      <g fill="#17140d">
+        <rect x="1004" y="20" width="34" height="20"/><rect x="1058" y="20" width="34" height="20"/><rect x="1112" y="20" width="34" height="20"/>
+        <rect x="1004" y="66" width="34" height="20"/><rect x="1058" y="66" width="34" height="20"/><rect x="1112" y="66" width="34" height="20"/>
+        <rect x="1004" y="112" width="34" height="20"/><rect x="1058" y="112" width="34" height="20"/><rect x="1112" y="112" width="34" height="20"/>
+      </g>
+    </g>
+
+    <!-- main slab, bottom-right, bleeding -->
+    <g transform="rotate(-13 1000 560)">
+      <polygon points="742,300 760,296 760,900 742,900" fill="#17140d"/>
+      <rect x="760" y="296" width="560" height="620" fill="url(#b-facade)" stroke="#17140d" stroke-width="3"/>
+    </g>
+
+    <!-- brand mark -->
+    <g transform="translate(70,78)">
+      <rect x="0" y="-16" width="18" height="18" fill="#d43d2a"/>
+      <text x="28" y="0" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="26" fill="#17140d" letter-spacing="1">chrono</text>
+    </g>
+
+    <!-- eyebrow -->
+    <text x="70" y="176" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="22" letter-spacing="1" fill="#17140d">/ ANY HISTORY, DISTILLED FOR AI</text>
+
+    <!-- huge word -->
+    <text x="60" y="360" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="210" fill="#d43d2a" letter-spacing="-2">CHRONO</text>
+
+    <!-- brutalist rule = timeline -->
+    <g>
+      <line x1="70" y1="402" x2="720" y2="402" stroke="#17140d" stroke-width="4"/>
+      <g stroke="#17140d" stroke-width="4">
+        <line x1="150" y1="392" x2="150" y2="412"/>
+        <line x1="310" y1="392" x2="310" y2="412"/>
+        <line x1="470" y1="392" x2="470" y2="412"/>
+        <line x1="590" y1="392" x2="590" y2="412"/>
+      </g>
+      <line x1="700" y1="388" x2="700" y2="416" stroke="#d43d2a" stroke-width="6"/>
+    </g>
+
+    <!-- subhead -->
+    <text x="68" y="452" font-family="'Helvetica Neue',Arial,sans-serif" font-weight="800" font-size="34" fill="#17140d" letter-spacing="0">GIT · LOGS · CHANGELOGS · INCIDENTS</text>
+    <text x="70" y="492" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="21" fill="#d43d2a">/DETERMINISTIC · LOCAL · ONE BINARY · NO SERVER</text>
+
+    <!-- footer url -->
+    <text x="70" y="600" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="20" letter-spacing="1" fill="#17140d">GITHUB.COM/JUAN52878911/<tspan fill="#d43d2a">CHRONO</tspan></text>
+
+    <!-- grain -->
+    <rect width="1280" height="640" filter="url(#b-noise)" opacity="0.18"/>
+  </g>
+</svg>

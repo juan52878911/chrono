@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1080" width="1080" height="1080" role="img" aria-labelledby="ct">
+  <title id="ct">AI on your repo history — with vs without chrono</title>
+  <defs>
+    <pattern id="c-hatch" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="9" height="9" fill="#d7d2c7"/>
+      <line x1="0" y1="0" x2="0" y2="9" stroke="#17140d" stroke-width="2.4"/>
+    </pattern>
+    <filter id="c-noise"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" result="n"/>
+      <feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0.7 0.7 0.7 0 0"/></filter>
+    <clipPath id="c-clip"><rect width="1080" height="1080"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#c-clip)">
+    <rect width="1080" height="1080" fill="#e7e3da"/>
+
+    <!-- header -->
+    <g transform="translate(56,82)">
+      <rect x="0" y="-19" width="21" height="21" fill="#d43d2a"/>
+      <text x="32" y="0" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="30" fill="#17140d">chrono</text>
+    </g>
+    <text x="880" y="76" text-anchor="end" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="18" fill="#17140d">AI × YOUR HISTORY</text>
+    <text x="56" y="150" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="21" fill="#17140d">/ SAME ANALYSIS SESSION · REAL 876-COMMIT REPO</text>
+    <line x1="56" y1="172" x2="1024" y2="172" stroke="#17140d" stroke-width="4"/>
+
+    <!-- divider + VS -->
+    <line x1="540" y1="196" x2="540" y2="892" stroke="#17140d" stroke-width="6"/>
+    <rect x="500" y="512" width="80" height="80" fill="#d43d2a"/>
+    <text x="540" y="568" text-anchor="middle" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="40" fill="#e7e3da">VS</text>
+
+    <!-- LEFT: without -->
+    <text x="72" y="252" font-family="'Helvetica Neue',Arial,sans-serif" font-weight="800" font-size="40" fill="#17140d">WITHOUT</text>
+    <text x="72" y="288" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="22" fill="#17140d">/chrono — AI reads raw git</text>
+    <text x="66" y="460" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="180" fill="#17140d" letter-spacing="-2">187K</text>
+    <text x="76" y="500" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="22" fill="#17140d">TOKENS / SESSION</text>
+    <g font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="21" fill="#17140d">
+      <text x="72" y="640">· reads ~8,000 raw commits</text>
+      <text x="72" y="686">· non-reproducible answers</text>
+      <text x="72" y="732">· guesses coupling &amp; owners</text>
+      <text x="72" y="778">· context window saturated</text>
+    </g>
+
+    <!-- RIGHT: with -->
+    <text x="612" y="252" font-family="'Helvetica Neue',Arial,sans-serif" font-weight="800" font-size="40" fill="#d43d2a">WITH</text>
+    <text x="612" y="288" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="22" fill="#17140d">/chrono — one bounded call</text>
+    <text x="606" y="460" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="180" fill="#d43d2a" letter-spacing="-2">3K</text>
+    <text x="616" y="500" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="22" fill="#17140d">TOKENS / SESSION</text>
+    <g font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="21" fill="#17140d">
+      <text x="612" y="640">· one bounded JSON per query</text>
+      <text x="612" y="686">· same answer every run</text>
+      <text x="612" y="732">· exact coupling &amp; bus factor</text>
+      <text x="612" y="778">· ~90% context left free</text>
+    </g>
+
+    <!-- footer bar -->
+    <rect x="0" y="900" width="1080" height="180" fill="#d43d2a"/>
+    <text x="56" y="988" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="72" fill="#e7e3da" letter-spacing="-1">≈60× FEWER TOKENS</text>
+    <text x="56" y="1036" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="22" letter-spacing="1" fill="#e7e3da">DETERMINISTIC · LOCAL · GITHUB.COM/JUAN52878911/CHRONO</text>
+
+    <rect width="1080" height="1080" filter="url(#c-noise)" opacity="0.16"/>
+  </g>
+</svg>

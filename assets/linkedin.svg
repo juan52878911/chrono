@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 627" width="1200" height="627" role="img" aria-labelledby="lt">
+  <title id="lt">chrono — turn any timeline into answers</title>
+  <defs>
+    <pattern id="l-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="8" height="8" fill="#d7d2c7"/>
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#17140d" stroke-width="2.4"/>
+    </pattern>
+    <pattern id="l-facade" width="66" height="86" patternUnits="userSpaceOnUse">
+      <rect width="66" height="86" fill="url(#l-hatch)"/>
+      <rect x="12" y="15" width="28" height="44" fill="#17140d"/>
+    </pattern>
+    <filter id="l-noise"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" result="n"/>
+      <feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0.7 0.7 0.7 0 0"/></filter>
+    <clipPath id="l-clip"><rect width="1200" height="627"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#l-clip)">
+    <rect width="1200" height="627" fill="#e7e3da"/>
+
+    <!-- main slab, right, bleeding -->
+    <g transform="rotate(-12 980 540)">
+      <polygon points="864,150 882,146 882,760 864,760" fill="#17140d"/>
+      <rect x="882" y="146" width="440" height="640" fill="url(#l-facade)" stroke="#17140d" stroke-width="3"/>
+    </g>
+
+    <!-- brand mark -->
+    <g transform="translate(64,70)">
+      <rect x="0" y="-15" width="17" height="17" fill="#d43d2a"/>
+      <text x="26" y="0" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="24" fill="#17140d">chrono</text>
+    </g>
+
+    <text x="64" y="158" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="20" fill="#17140d">/ TURN ANY TIMELINE INTO ANSWERS</text>
+
+    <!-- huge word -->
+    <text x="56" y="322" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="184" fill="#d43d2a" letter-spacing="-2">CHRONO</text>
+
+    <!-- rule = timeline -->
+    <line x1="64" y1="360" x2="720" y2="360" stroke="#17140d" stroke-width="4"/>
+    <g stroke="#17140d" stroke-width="4">
+      <line x1="150" y1="351" x2="150" y2="369"/><line x1="320" y1="351" x2="320" y2="369"/><line x1="490" y1="351" x2="490" y2="369"/>
+    </g>
+    <line x1="700" y1="347" x2="700" y2="373" stroke="#d43d2a" stroke-width="6"/>
+
+    <text x="62" y="408" font-family="'Helvetica Neue',Arial,sans-serif" font-weight="800" font-size="30" fill="#17140d">INDEX GIT, LOGS, CHANGELOGS, INCIDENTS — ONCE.</text>
+    <text x="64" y="444" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="19" fill="#17140d">Then ask what's risky, what breaks together, who owns what.</text>
+
+    <!-- brutalist tags -->
+    <g font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="16" fill="#17140d">
+      <rect x="64" y="474" width="168" height="42" fill="none" stroke="#17140d" stroke-width="3"/><text x="80" y="501">DETERMINISTIC</text>
+      <rect x="244" y="474" width="92" height="42" fill="none" stroke="#17140d" stroke-width="3"/><text x="260" y="501">LOCAL</text>
+      <rect x="348" y="474" width="150" height="42" fill="none" stroke="#17140d" stroke-width="3"/><text x="364" y="501">ONE BINARY</text>
+      <rect x="510" y="474" width="70" height="42" fill="#d43d2a"/><text x="524" y="501" fill="#e7e3da">MCP</text>
+    </g>
+
+    <text x="64" y="586" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="19" letter-spacing="1" fill="#17140d">GITHUB.COM/JUAN52878911/<tspan fill="#d43d2a">CHRONO</tspan></text>
+
+    <rect width="1200" height="627" filter="url(#l-noise)" opacity="0.18"/>
+  </g>
+</svg>

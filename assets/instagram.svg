@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1080" width="1080" height="1080" role="img" aria-labelledby="it">
+  <title id="it">chrono — any history, distilled for AI</title>
+  <defs>
+    <pattern id="i-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="8" height="8" fill="#d7d2c7"/>
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#17140d" stroke-width="2.6"/>
+    </pattern>
+    <pattern id="i-facade" width="74" height="96" patternUnits="userSpaceOnUse">
+      <rect width="74" height="96" fill="url(#i-hatch)"/>
+      <rect x="14" y="17" width="32" height="50" fill="#17140d"/>
+    </pattern>
+    <filter id="i-noise"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" result="n"/>
+      <feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0.7 0.7 0.7 0 0"/></filter>
+    <clipPath id="i-clip"><rect width="1080" height="1080"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#i-clip)">
+    <rect width="1080" height="1080" fill="#e7e3da"/>
+
+    <!-- big monolith, bottom band, bleeding (kept below the text for legibility) -->
+    <g transform="rotate(-12 640 960)">
+      <polygon points="430,724 452,718 452,1260 430,1260" fill="#17140d"/>
+      <rect x="452" y="718" width="668" height="560" fill="url(#i-facade)" stroke="#17140d" stroke-width="3.5"/>
+      <rect x="486" y="752" width="32" height="50" fill="#d43d2a"/>
+    </g>
+
+    <!-- brand mark -->
+    <g transform="translate(56,86)">
+      <rect x="0" y="-20" width="22" height="22" fill="#d43d2a"/>
+      <text x="34" y="0" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="32" fill="#17140d">chrono</text>
+    </g>
+
+    <text x="56" y="180" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="24" letter-spacing="1" fill="#17140d">/ ANY HISTORY → ANSWERS</text>
+
+    <!-- huge stacked word, brutalist break -->
+    <text x="48" y="368" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="230" fill="#d43d2a" letter-spacing="-3">CHRO</text>
+    <text x="48" y="560" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="230" fill="#17140d" letter-spacing="-3">— NO</text>
+
+    <!-- rule = timeline -->
+    <line x1="56" y1="612" x2="720" y2="612" stroke="#17140d" stroke-width="5"/>
+    <g stroke="#17140d" stroke-width="5">
+      <line x1="170" y1="600" x2="170" y2="624"/><line x1="350" y1="600" x2="350" y2="624"/><line x1="530" y1="600" x2="530" y2="624"/>
+    </g>
+    <line x1="700" y1="596" x2="700" y2="628" stroke="#d43d2a" stroke-width="7"/>
+
+    <text x="54" y="672" font-family="'Helvetica Neue',Arial,sans-serif" font-weight="800" font-size="38" fill="#17140d">DISTILLED FOR AI.</text>
+    <text x="56" y="716" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="22" fill="#d43d2a">/DETERMINISTIC · LOCAL · ONE BINARY</text>
+
+    <!-- footer url on a red bar -->
+    <rect x="0" y="1012" width="1080" height="68" fill="#d43d2a"/>
+    <text x="56" y="1056" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="24" letter-spacing="1" fill="#e7e3da">GITHUB.COM/JUAN52878911/CHRONO</text>
+
+    <rect width="1080" height="1080" filter="url(#i-noise)" opacity="0.18"/>
+  </g>
+</svg>

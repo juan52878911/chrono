@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1080" width="1080" height="1080" role="img" aria-labelledby="ce">
+  <title id="ce">IA sobre tu historial — sin chrono vs con chrono</title>
+  <defs>
+    <pattern id="e-hatch" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="9" height="9" fill="#d7d2c7"/>
+      <line x1="0" y1="0" x2="0" y2="9" stroke="#17140d" stroke-width="2.4"/>
+    </pattern>
+    <pattern id="e-facade" width="52" height="66" patternUnits="userSpaceOnUse">
+      <rect width="52" height="66" fill="url(#e-hatch)"/>
+      <rect x="10" y="12" width="22" height="34" fill="#17140d"/>
+    </pattern>
+    <filter id="e-noise"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" result="n"/>
+      <feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0.7 0.7 0.7 0 0"/></filter>
+    <clipPath id="e-clip"><rect width="1080" height="1080"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#e-clip)">
+    <rect width="1080" height="1080" fill="#e7e3da"/>
+
+    <!-- header -->
+    <g transform="translate(56,80)">
+      <rect x="0" y="-19" width="21" height="21" fill="#d43d2a"/>
+      <text x="32" y="0" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="30" fill="#17140d">chrono</text>
+    </g>
+    <text x="1024" y="74" text-anchor="end" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="20" fill="#17140d">IA × TU HISTORIAL</text>
+    <line x1="56" y1="108" x2="1024" y2="108" stroke="#17140d" stroke-width="4"/>
+
+    <!-- baseline the buildings stand on -->
+    <line x1="56" y1="884" x2="1024" y2="884" stroke="#17140d" stroke-width="4"/>
+
+    <!-- LEFT: SIN — torre enorme -->
+    <text x="150" y="182" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="46" fill="#17140d">SIN</text>
+    <text x="150" y="212" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="19" fill="#17140d">lee el historial crudo</text>
+    <text x="150" y="330" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="120" fill="#17140d" letter-spacing="-2">187K</text>
+    <text x="152" y="366" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="18" fill="#17140d">TOKENS</text>
+    <g transform="rotate(-4 300 640)">
+      <polygon points="150,398 168,392 168,884 150,884" fill="#17140d"/>
+      <rect x="168" y="392" width="286" height="492" fill="url(#e-facade)" stroke="#17140d" stroke-width="3"/>
+    </g>
+
+    <!-- RIGHT: CON — bloque pequeño -->
+    <text x="620" y="182" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="46" fill="#d43d2a">CON</text>
+    <text x="620" y="212" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="19" fill="#17140d">una respuesta acotada</text>
+    <text x="620" y="330" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="120" fill="#d43d2a" letter-spacing="-2">3K</text>
+    <text x="622" y="366" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="18" fill="#17140d">TOKENS</text>
+    <g transform="rotate(-4 720 830)">
+      <polygon points="622,772 640,766 640,884 622,884" fill="#17140d"/>
+      <rect x="640" y="766" width="190" height="118" fill="url(#e-facade)" stroke="#17140d" stroke-width="3"/>
+      <rect x="662" y="792" width="22" height="34" fill="#d43d2a"/>
+    </g>
+    <!-- flecha de reducción -->
+    <text x="915" y="800" text-anchor="middle" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="120" fill="#d43d2a">↓</text>
+
+    <!-- footer -->
+    <rect x="0" y="912" width="1080" height="168" fill="#d43d2a"/>
+    <text x="56" y="998" font-family="Impact,'Haettenschweiler','Arial Narrow',sans-serif" font-size="76" fill="#e7e3da" letter-spacing="-1">≈60× MENOS</text>
+    <text x="56" y="1044" font-family="'Space Mono',ui-monospace,Menlo,monospace" font-size="22" letter-spacing="1" fill="#e7e3da">MISMA RESPUESTA SIEMPRE · GITHUB.COM/JUAN52878911/CHRONO</text>
+
+    <rect width="1080" height="1080" filter="url(#e-noise)" opacity="0.16"/>
+  </g>
+</svg>
