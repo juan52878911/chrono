@@ -29,7 +29,8 @@ Usage:
 
 Index:
   init [repo]          Zero-config: detect the repo, create .chrono/, ingest all.
-  sync [repo]          Process only the delta since the last watermark.
+  add <path>           Add another source (git repo or log file) to the index.
+  sync [path]          Process only the delta since the last watermark (all sources).
 
 Queries (JSON, schema_version 2: `entity`/`id`):
   hotspots             Entities that change most and weigh most.
@@ -43,6 +44,11 @@ Queries (JSON, schema_version 2: `entity`/`id`):
   phases               Project phases (tags/releases).
   search <text>        Search events by text (FTS5, LIKE fallback).
   similar <id>         Near-duplicate events (by SimHash).
+
+Log-native (multi-source):
+  timeline             Event counts per time bucket (--bucket 1h, --by level|kind).
+  top <dim>            Most frequent values of a dimension (level|kind|actor|entity|attr:<k>).
+  correlate <id>       Events from OTHER sources within ±Δt of an event (--delta 1h).
 
 Integration:
   mcp                  MCP server (wired separately).
@@ -63,7 +69,8 @@ Uso:
 
 Índice:
   init [repo]          Cero-config: detecta el repo, crea .chrono/ e ingiere todo.
-  sync [repo]          Procesa solo el delta desde la última marca de agua.
+  add <ruta>           Añade otra fuente (repo git o fichero de log) al índice.
+  sync [ruta]          Procesa solo el delta desde la última marca (todas las fuentes).
 
 Consulta (JSON, schema_version 2: `entity`/`id`):
   hotspots             Entidades que más cambian y más pesan.
@@ -77,6 +84,11 @@ Consulta (JSON, schema_version 2: `entity`/`id`):
   phases               Fases del proyecto (etiquetas).
   search <texto>       Busca eventos por texto (FTS5, con fallback a LIKE).
   similar <id>         Eventos casi-duplicados (por SimHash).
+
+Log-native (multi-fuente):
+  timeline             Conteo de eventos por bucket temporal (--bucket 1h, --by level|kind).
+  top <dim>            Valores más frecuentes de una dimensión (level|kind|actor|entity|attr:<c>).
+  correlate <id>       Eventos de OTRAS fuentes en ±Δt de un evento (--delta 1h).
 
 Integración:
   mcp                  Servidor MCP (se cablea aparte).
@@ -94,6 +106,11 @@ struct Flags {
     db: Option<String>,
     since: Option<String>,
     lang: Option<String>,
+    until: Option<String>,
+    bucket: Option<String>,
+    delta: Option<String>,
+    by: Option<String>,
+    limit: Option<String>,
     pos: Vec<String>,
 }
 
@@ -115,6 +132,26 @@ fn parse_args(args: &[String]) -> Flags {
             "--lang" if i + 1 < args.len() => {
                 i += 1;
                 f.lang = Some(args[i].clone());
+            }
+            "--until" if i + 1 < args.len() => {
+                i += 1;
+                f.until = Some(args[i].clone());
+            }
+            "--bucket" if i + 1 < args.len() => {
+                i += 1;
+                f.bucket = Some(args[i].clone());
+            }
+            "--delta" if i + 1 < args.len() => {
+                i += 1;
+                f.delta = Some(args[i].clone());
+            }
+            "--by" if i + 1 < args.len() => {
+                i += 1;
+                f.by = Some(args[i].clone());
+            }
+            "--limit" if i + 1 < args.len() => {
+                i += 1;
+                f.limit = Some(args[i].clone());
             }
             a if a.starts_with("--") && a != "--version" && a != "--help" => {}
             a => f.pos.push(a.to_string()),
@@ -216,6 +253,13 @@ fn main() {
         }
         return;
     }
+    if cmd == "add" {
+        let path = require_pos(&f, "add needs a <path> (a repo or a log file)", "add necesita una <ruta> (un repo o un fichero de log)");
+        if let Err(e) = index::add(&db, Path::new(&path)) {
+            fatal(e);
+        }
+        return;
+    }
 
     let store = chrono_store::Store::open(&db).unwrap_or_else(|e| fatal(e));
     let window = query::Window::from_flag(f.since.as_deref()).unwrap_or_else(|e| fatal(e));
@@ -257,6 +301,19 @@ fn main() {
         "similar" => {
             let id = require_pos(&f, "similar needs an <id>", "similar necesita un <id>");
             query::similar(&store, &id)
+        }
+        "timeline" => query::timeline(&store, &window, f.until.as_deref(), f.bucket.as_deref(), f.by.as_deref()),
+        "top" => {
+            let dim = require_pos(
+                &f,
+                "top needs a <dim> (level|kind|actor|entity|attr:<key>)",
+                "top necesita una <dim> (level|kind|actor|entity|attr:<clave>)",
+            );
+            query::top(&store, &window, &dim, f.limit.as_deref())
+        }
+        "correlate" => {
+            let id = require_pos(&f, "correlate needs an <id>", "correlate necesita un <id>");
+            query::correlate(&store, &id, f.delta.as_deref(), f.limit.as_deref())
         }
         other => {
             eprint!(

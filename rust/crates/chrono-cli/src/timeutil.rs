@@ -52,6 +52,28 @@ pub fn parse_since(s: &str) -> Option<i64> {
     Some(days_from_civil(y, m, d) * 86_400 + secs)
 }
 
+/// Parsea una duración: entero de segundos (`3600`) o con sufijo `s`/`m`/`h`/`d`
+/// (`90s`, `30m`, `1h`, `7d`). Devuelve segundos, o `None` si no lo entiende.
+/// Usado por `--bucket` (timeline) y `--delta` (correlate).
+pub fn parse_duration(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num, mult) = match s.as_bytes()[s.len() - 1] {
+        b's' | b'S' => (&s[..s.len() - 1], 1),
+        b'm' | b'M' => (&s[..s.len() - 1], 60),
+        b'h' | b'H' => (&s[..s.len() - 1], 3600),
+        b'd' | b'D' => (&s[..s.len() - 1], 86_400),
+        _ => (s, 1),
+    };
+    let n: i64 = num.trim().parse().ok()?;
+    if n <= 0 {
+        return None;
+    }
+    n.checked_mul(mult)
+}
+
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
@@ -87,5 +109,18 @@ mod tests {
         assert_eq!(parse_since("1970-01-01"), Some(0));
         assert_eq!(parse_since("ayer"), None);
         assert_eq!(parse_since("2024-13-01"), None);
+    }
+
+    #[test]
+    fn duraciones() {
+        assert_eq!(parse_duration("3600"), Some(3600));
+        assert_eq!(parse_duration("90s"), Some(90));
+        assert_eq!(parse_duration("30m"), Some(1800));
+        assert_eq!(parse_duration("1h"), Some(3600));
+        assert_eq!(parse_duration("7d"), Some(604_800));
+        assert_eq!(parse_duration("0"), None);
+        assert_eq!(parse_duration("-5"), None);
+        assert_eq!(parse_duration("h"), None);
+        assert_eq!(parse_duration(""), None);
     }
 }

@@ -8,7 +8,7 @@ use std::path::Path;
 use chrono_store::Store;
 
 use crate::json::Json;
-use crate::timeutil::{epoch_to_iso8601, now_epoch, parse_since};
+use crate::timeutil::{epoch_to_iso8601, now_epoch, parse_duration, parse_since};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -297,6 +297,112 @@ pub fn phases(store: &Store) -> Result<Json> {
         .collect();
     let n = items.len();
     envelope(store, "phases", &w, n, n, Json::obj().set("phases", Json::Arr(items)))
+}
+
+/// Parsea `--limit` a `usize` (>0), o cae al `default`. Error accionable si no
+/// es un entero positivo.
+fn parse_limit(limit: Option<&str>, default: usize) -> Result<usize> {
+    match limit {
+        None | Some("") => Ok(default),
+        Some(s) => match s.parse::<usize>() {
+            Ok(0) => Err("--limit debe ser > 0".into()),
+            Ok(n) => Ok(n),
+            Err(_) => Err(format!("--limit no válido: {s:?} (usa un entero > 0)").into()),
+        },
+    }
+}
+
+/// `timeline`: conteo de eventos por bucket temporal. `--bucket` (duración, por
+/// defecto 1h), `--until` (fecha), `--by level|kind` (desglose).
+pub fn timeline(
+    store: &Store,
+    w: &Window,
+    until: Option<&str>,
+    bucket: Option<&str>,
+    by: Option<&str>,
+) -> Result<Json> {
+    const DEFAULT_BUCKET: i64 = 3600;
+    let bucket_secs = match bucket {
+        None | Some("") => DEFAULT_BUCKET,
+        Some(s) => parse_duration(s)
+            .ok_or_else(|| format!("--bucket no válido: {s:?} (usa p.ej. 1h, 30m, 3600)"))?,
+    };
+    let until_epoch = match until {
+        None | Some("") => 0,
+        Some(s) => {
+            parse_since(s).ok_or_else(|| format!("--until no válido: {s:?} (usa YYYY-MM-DD)"))?
+        }
+    };
+    let group_by = match by {
+        None | Some("") => None,
+        Some(b) => Some(b),
+    };
+    let rows = chrono_metrics::timeline(store.conn(), w.since_epoch, until_epoch, bucket_secs, group_by)?;
+    let items: Vec<Json> = rows
+        .iter()
+        .map(|b| {
+            Json::obj()
+                .set("bucket_epoch", Json::Int(b.bucket_epoch))
+                .set("at", Json::str(&epoch_to_iso8601(b.bucket_epoch)))
+                .set("key", Json::str(&b.key))
+                .set("count", Json::Int(b.count))
+        })
+        .collect();
+    let n = items.len();
+    let until_json = if until_epoch == 0 { Json::Null } else { Json::str(&epoch_to_iso8601(until_epoch)) };
+    let result = Json::obj()
+        .set("bucket_secs", Json::Int(bucket_secs))
+        .set("by", group_by.map_or(Json::Null, Json::str))
+        .set("until", until_json)
+        .set("buckets", Json::Arr(items));
+    envelope(store, "timeline", w, n, n, result)
+}
+
+/// `top <dim>`: valores más frecuentes de una dimensión.
+pub fn top(store: &Store, w: &Window, dim: &str, limit: Option<&str>) -> Result<Json> {
+    const DEFAULT_LIMIT: usize = 25;
+    let limit = parse_limit(limit, DEFAULT_LIMIT)?;
+    let rows = chrono_metrics::top(store.conn(), dim, w.since_epoch, limit)?;
+    let items: Vec<Json> = rows
+        .iter()
+        .map(|v| Json::obj().set("value", Json::str(&v.value)).set("count", Json::Int(v.count)))
+        .collect();
+    let n = items.len();
+    envelope(store, "top", w, limit, n, Json::obj().set("dim", Json::str(dim)).set("top", Json::Arr(items)))
+}
+
+/// Serializa un `EventRef` de `correlate` a JSON.
+fn event_ref_json(e: &chrono_metrics::EventRef) -> Json {
+    Json::obj()
+        .set("id", Json::str(&e.id))
+        .set("source_id", Json::str(&e.source_id))
+        .set("kind", Json::str(&e.kind))
+        .set("at", Json::str(&e.at))
+        .set("level", Json::str(&e.level))
+        .set("title", Json::str(&e.title))
+        .set("delta_secs", Json::Int(e.delta_secs))
+}
+
+/// `correlate <id>`: eventos de OTRAS fuentes en ±Δt del evento ancla.
+/// `--delta` (duración, por defecto 1h), `--limit`.
+pub fn correlate(store: &Store, id: &str, delta: Option<&str>, limit: Option<&str>) -> Result<Json> {
+    const DEFAULT_DELTA: i64 = 3600;
+    const DEFAULT_LIMIT: usize = 25;
+    let w = no_window();
+    let delta_secs = match delta {
+        None | Some("") => DEFAULT_DELTA,
+        Some(s) => parse_duration(s)
+            .ok_or_else(|| format!("--delta no válido: {s:?} (usa p.ej. 1h, 30m, 3600)"))?,
+    };
+    let limit = parse_limit(limit, DEFAULT_LIMIT)?;
+    let corr = chrono_metrics::correlate(store.conn(), id, delta_secs, limit)?;
+    let related: Vec<Json> = corr.related.iter().map(event_ref_json).collect();
+    let n = related.len();
+    let result = Json::obj()
+        .set("delta_secs", Json::Int(delta_secs))
+        .set("anchor", event_ref_json(&corr.anchor))
+        .set("related", Json::Arr(related));
+    envelope(store, "correlate", &w, limit, n, result)
 }
 
 /// `branches [base]`: lee git EN VIVO (no el índice), usando `repo_path` de

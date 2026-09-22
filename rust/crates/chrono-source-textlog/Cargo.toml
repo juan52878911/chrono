@@ -1,0 +1,10 @@
+[package]
+name = "chrono-source-textlog"
+description = "Adaptador Source de logs de texto (syslog/nginx por presets) para chrono: una línea → un Event."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono-core = { path = "../chrono-core" }

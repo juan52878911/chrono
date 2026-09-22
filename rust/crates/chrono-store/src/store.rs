@@ -15,6 +15,17 @@ pub struct Store {
     pub(crate) conn: Connection,
 }
 
+/// Una fuente registrada en la tabla `sources` (multi-fuente en un `.chrono/`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceRow {
+    /// `source_id` canónico: `<kind>:<ruta abs>`, igual que `events.source_id`.
+    pub id: String,
+    pub kind: String,
+    pub path: String,
+    pub watermark: String,
+    pub manifest_json: String,
+}
+
 impl Store {
     /// Abre (o crea) el índice en `path`.
     ///
@@ -86,6 +97,79 @@ impl Store {
             .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0))
             .optional()?;
         Ok(v)
+    }
+
+    /// Registra o actualiza una fuente en la tabla `sources` (multi-fuente).
+    /// `manifest` se serializa a JSON determinista. `id` es el `source_id`
+    /// canónico (`<kind>:<ruta abs>`), el mismo que llevan los `events`.
+    pub fn upsert_source(
+        &self,
+        id: &str,
+        kind: &str,
+        path: &str,
+        watermark: &str,
+        manifest: &std::collections::BTreeMap<String, String>,
+        last_sync_at: &str,
+    ) -> Result<()> {
+        let manifest_json = crate::json::attrs_to_json(manifest);
+        self.conn.execute(
+            "INSERT INTO sources(id, kind, path, watermark, manifest_json, last_sync_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+               kind = excluded.kind, path = excluded.path, watermark = excluded.watermark,
+               manifest_json = excluded.manifest_json, last_sync_at = excluded.last_sync_at",
+            params![id, kind, path, watermark, manifest_json, last_sync_at],
+        )?;
+        Ok(())
+    }
+
+    /// Actualiza el watermark (y `last_sync_at`) de una fuente ya registrada.
+    pub fn set_source_watermark(&self, id: &str, watermark: &str, last_sync_at: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sources SET watermark = ?2, last_sync_at = ?3 WHERE id = ?1",
+            params![id, watermark, last_sync_at],
+        )?;
+        Ok(())
+    }
+
+    /// Lista las fuentes registradas, orden estable por `id`.
+    pub fn list_sources(&self) -> Result<Vec<SourceRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, path, COALESCE(watermark,''), COALESCE(manifest_json,'{}')
+             FROM sources ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(SourceRow {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                path: r.get(2)?,
+                watermark: r.get(3)?,
+                manifest_json: r.get(4)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Borra los eventos de una fuente (y sus `touches`/`labels`/`links`), para
+    /// re-ingesta tras divergencia. NO toca `entities`/`actors` (compartidos
+    /// entre fuentes; sus flags se recalculan en el enriquecimiento).
+    pub fn delete_source_events(&self, source_id: &str) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for child in ["touches", "labels", "links"] {
+            tx.execute(
+                &format!(
+                    "DELETE FROM {child} WHERE event_id IN (SELECT id FROM events WHERE source_id = ?1)"
+                ),
+                params![source_id],
+            )?;
+        }
+        tx.execute("DELETE FROM events WHERE source_id = ?1", params![source_id])?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Borra todos los datos de ingesta (para reindex). Conserva `meta`.

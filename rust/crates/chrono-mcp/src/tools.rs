@@ -110,6 +110,37 @@ pub fn tool_defs() -> Vec<Value> {
             json!({"since": since_prop()}),
             &[],
         ),
+        tool(
+            "timeline",
+            "Conteo de eventos por bucket temporal (log-native, multi-fuente).",
+            json!({
+                "since": since_prop(),
+                "until": str_prop("Fin de la ventana ISO (opcional)"),
+                "bucket_secs": json!({"type": "integer", "description": "Tamaño de bucket en segundos (por defecto 3600)"}),
+                "by": str_prop("Desglose: level | kind (opcional)")
+            }),
+            &[],
+        ),
+        tool(
+            "top",
+            "Valores más frecuentes de una dimensión (level|kind|actor|entity|attr:<clave>).",
+            json!({
+                "dim": str_prop("Dimensión: level|kind|actor|entity|attr:<clave>"),
+                "since": since_prop(),
+                "limit": json!({"type": "integer", "description": "Máximo de valores (por defecto 25)"})
+            }),
+            &["dim"],
+        ),
+        tool(
+            "correlate",
+            "Eventos de OTRAS fuentes cercanos en el tiempo a un evento (±Δt).",
+            json!({
+                "id": str_prop("Id del evento ancla"),
+                "delta_secs": json!({"type": "integer", "description": "Ventana ±Δ en segundos (por defecto 3600)"}),
+                "limit": json!({"type": "integer", "description": "Máximo de correlacionados (por defecto 25)"})
+            }),
+            &["id"],
+        ),
     ]
 }
 
@@ -175,6 +206,23 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
             branches(store, base)?
         }
         "prs" => prs(conn, since)?,
+        "timeline" => {
+            let until = args.get("until").and_then(Value::as_str).unwrap_or("");
+            let bucket_secs = arg_i64(args, "bucket_secs", 3600).max(1);
+            let by = args.get("by").and_then(Value::as_str).filter(|s| !s.is_empty());
+            timeline(conn, since_epoch, since_to_epoch(until), bucket_secs, by)?
+        }
+        "top" => {
+            let dim = arg_str(args, "dim")?;
+            let limit = arg_i64(args, "limit", 25).max(1) as usize;
+            top(conn, dim, since_epoch, limit)?
+        }
+        "correlate" => {
+            let id = arg_str(args, "id")?;
+            let delta_secs = arg_i64(args, "delta_secs", 3600).max(1);
+            let limit = arg_i64(args, "limit", 25).max(1) as usize;
+            correlate(conn, id, delta_secs, limit)?
+        }
         other => return Err(format!("herramienta desconocida: {other}").into()),
     };
     result_content(&result)
@@ -185,6 +233,11 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| format!("tools/call: falta el argumento requerido '{key}'").into())
+}
+
+/// Lee un entero de `args[key]`, o `default` si falta o no es entero.
+fn arg_i64(args: &Value, key: &str, default: i64) -> i64 {
+    args.get(key).and_then(Value::as_i64).unwrap_or(default)
 }
 
 fn hotspots(conn: &Connection, since_epoch: i64) -> Result<Value> {
@@ -355,4 +408,37 @@ fn prs(conn: &Connection, since: &str) -> Result<Value> {
         items.push(row?);
     }
     Ok(json!({"pull_requests": items}))
+}
+
+fn timeline(
+    conn: &Connection,
+    since_epoch: i64,
+    until_epoch: i64,
+    bucket_secs: i64,
+    by: Option<&str>,
+) -> Result<Value> {
+    let rows = chrono_metrics::timeline(conn, since_epoch, until_epoch, bucket_secs, by)?;
+    let buckets: Vec<Value> = rows
+        .iter()
+        .map(|b| json!({"bucket_epoch": b.bucket_epoch, "key": b.key, "count": b.count}))
+        .collect();
+    Ok(json!({"bucket_secs": bucket_secs, "by": by, "buckets": buckets}))
+}
+
+fn top(conn: &Connection, dim: &str, since_epoch: i64, limit: usize) -> Result<Value> {
+    let rows = chrono_metrics::top(conn, dim, since_epoch, limit)?;
+    let items: Vec<Value> = rows.iter().map(|v| json!({"value": v.value, "count": v.count})).collect();
+    Ok(json!({"dim": dim, "top": items}))
+}
+
+fn correlate(conn: &Connection, id: &str, delta_secs: i64, limit: usize) -> Result<Value> {
+    let corr = chrono_metrics::correlate(conn, id, delta_secs, limit)?;
+    let event_json = |e: &chrono_metrics::EventRef| {
+        json!({
+            "id": e.id, "source_id": e.source_id, "kind": e.kind, "at": e.at,
+            "level": e.level, "title": e.title, "delta_secs": e.delta_secs,
+        })
+    };
+    let related: Vec<Value> = corr.related.iter().map(event_json).collect();
+    Ok(json!({"delta_secs": delta_secs, "anchor": event_json(&corr.anchor), "related": related}))
 }

@@ -1,0 +1,10 @@
+[package]
+name = "chrono-source-csv"
+description = "Adaptador Source de CSV (con cabecera, columnas configurables) para chrono: una fila → un Event."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono-core = { path = "../chrono-core" }

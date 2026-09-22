@@ -240,7 +240,7 @@ adaptadores → JEV → escala. Cada fase verifica paridad contra el Go actual (
 | **R0 · Cimientos Rust** | Workspace Cargo; crate `chrono-core` (dominio `Event`/`Touch`/`Link`/`Label` con `entity`/`id` + traits `Source`/`Cursor`/`Classifier`), sin deps. | **hecho (este commit)** |
 | **R1 · Store + adaptador git + paridad** | `chrono-store` (SQLite v2), `chrono-source-git` (ingesta git tras `Cursor`), consultas hotspots/coupling/owners/churn; CLI mínima `init`+`hotspots`. Verificar 17.678=17.678 y top-15 vs Go. | pendiente |
 | **R2 · Resto de consultas + MCP + i18n** | bugs(rules)/tickets/prs/branches/search/similar/phases; servidor MCP; i18n EN/ES; contrato v2 `entity`/`id`; paridad total con Go → sustituye al binario Go. | pendiente |
-| **R3 · Adaptadores + multi-fuente + rollups** | jsonl/csv/textlog/changelog/journald; `sources`; templates+rollups; `timeline`/`top`/`correlate`/`events`. | pendiente |
+| **R3 · Adaptadores + multi-fuente + rollups** | **hecho:** jsonl, **csv**, **textlog** (syslog/nginx sin `regex`); **`sources` poblada + `chrono add` + `sync` multi-fuente** (paridad git verificada); consultas log-native **`timeline`/`top`/`correlate`** (leen eventos crudos) en metrics + CLI + MCP. **pendiente (oleada propia):** changelog/journald; templates+rollups+`event_dims` (logs de millones de líneas, con eval); `events`. | parcial |
 | **R4 · JEV Level-1** | crate `chrono-jev` (features+inferencia i16), `chrono-jev-train`, dataset, `JEV-EVAL.md`, opt-in. | pendiente |
 | **R5 · Escala medida** | bandas SimHash; `bench`; caps reales; paginación `gh` (cap 1000 pendiente). | pendiente |
 

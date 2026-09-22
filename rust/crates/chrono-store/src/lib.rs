@@ -8,7 +8,7 @@ mod json;
 mod store;
 mod writer;
 
-pub use store::Store;
+pub use store::{SourceRow, Store};
 pub use writer::Writer;
 
 /// SQL del esquema v2, embebido en el binario.

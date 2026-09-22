@@ -9,6 +9,7 @@
 
 mod bugs;
 mod churn;
+mod correlate;
 mod coupling;
 mod hotspots;
 mod owners;
@@ -16,9 +17,12 @@ mod phases;
 mod search;
 mod similar;
 mod ticket;
+mod timeline;
+mod top;
 
 pub use bugs::{bugs, BugArea, BugCategory, Bugs};
 pub use churn::{churn, ChurnRow};
+pub use correlate::{correlate, Correlation, EventRef};
 pub use coupling::{coupling, Coupled};
 pub use hotspots::{hotspots, Hotspot};
 pub use owners::{owners, Owner};
@@ -26,6 +30,8 @@ pub use phases::{phases, Phase};
 pub use search::{search, SearchHit};
 pub use similar::{similar, SimilarRow};
 pub use ticket::{ticket, Ticket};
+pub use timeline::{timeline, TimelineBucket};
+pub use top::{top, TopValue};
 
 /// Error de `chrono-metrics`: no exige un tipo concreto a los llamadores
 /// (CLI, tests...).

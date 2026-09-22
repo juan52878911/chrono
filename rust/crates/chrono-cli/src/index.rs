@@ -9,7 +9,7 @@
 //! sentido para git (tamaños de fichero, tags→markers, forge de GitHub)
 //! quedan gateados por `source.kind() == "git"` en `finalize`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -21,6 +21,21 @@ use chrono_tracker_github as tracker;
 
 use crate::glob;
 use crate::i18n::t;
+use crate::timeutil::{epoch_to_iso8601, now_epoch};
+
+/// `source_id` canónico de una fuente: `<kind>:<ruta absoluta canónica>`. Es el
+/// mismo valor que los adaptadores ponen en `events.source_id` (git usa la raíz
+/// del repo; las fuentes de fichero, el fichero), así que sirve de clave estable
+/// en la tabla `sources` y para `correlate`/consultas por fuente.
+fn canonical_source_id(kind: &str, ingest_path: &Path) -> String {
+    let abs = std::fs::canonicalize(ingest_path).unwrap_or_else(|_| ingest_path.to_path_buf());
+    format!("{kind}:{}", abs.to_string_lossy())
+}
+
+/// Marca de tiempo ISO-8601 UTC del momento actual (para `sources.last_sync_at`).
+fn now_iso() -> String {
+    epoch_to_iso8601(now_epoch())
+}
 
 /// Nº máximo de ficheros a los que se les calcula el tamaño (los más cambiados).
 const SIZE_CAP: usize = 4000;
@@ -61,7 +76,9 @@ fn build_registry() -> Registry {
     let mut r = Registry::new();
     r.register(Box::new(GitSource::new()));
     r.register(Box::new(chrono_source_jsonl::JsonlSource::new()));
-    // R3: registrar aquí más adaptadores (csv, textlog, journald…).
+    r.register(Box::new(chrono_source_csv::CsvSource::new()));
+    r.register(Box::new(chrono_source_textlog::TextlogSource::new()));
+    // R3: registrar aquí más adaptadores (journald…).
     r
 }
 
@@ -107,10 +124,31 @@ pub fn init(start: &Path) -> Result<()> {
 
     let mut store = open_or_recreate(&db)?;
     store.reset()?;
-    let cfg = chrono_classify_rules::load(&root);
-    let (n, _wm) =
+    let (n, wm, manifest) =
         ingest_source(src, &ingest_path, None, &mut store, &root).map_err(|e| e.into_boxed())?;
-    finalize(&root, &store, src, &cfg.bug_labels)?;
+
+    // Registra la fuente en la tabla `sources` (primera fuente del índice).
+    let source_id = canonical_source_id(src.kind(), &ingest_path);
+    store.upsert_source(
+        &source_id,
+        src.kind(),
+        &ingest_path.to_string_lossy(),
+        &wm.value,
+        &manifest,
+        &now_iso(),
+    )?;
+    // El manifiesto también va a `meta` (compat con el envelope de las consultas,
+    // que lee git_version/first_parent/…); `last_watermark` como respaldo legado.
+    for (k, v) in &manifest {
+        store.set_meta(k, v)?;
+    }
+    store.set_meta("last_watermark", &wm.value)?;
+
+    eprintln!("{}", t("  building search index…", "  construyendo índice de búsqueda…"));
+    store.rebuild_fts()?;
+    finalize(&root, &store)?;
+    write_meta(&store, src, &root)?;
+
     let unit = if src.kind() == "git" { ("commits", "commits") } else { ("events", "eventos") };
     eprintln!("{}", t(
         format!("chrono: index ready at .chrono/index.db ({n} {}).", unit.0),
@@ -123,66 +161,183 @@ pub fn init(start: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `chrono sync [repo]`: ingiere solo el delta desde el último watermark.
-/// Si la fuente diverge (rebase/force-push), avisa y reindexa entero.
-pub fn sync(db: &Path, repo_arg: Option<&Path>) -> Result<()> {
+/// Raíz del índice a partir de la ruta del `.db` (`<root>/.chrono/index.db` →
+/// `<root>`). Ahí vive `.chrono/config.json`, compartido por TODAS las fuentes.
+fn index_root_of(db: &Path) -> PathBuf {
+    db.parent()
+        .and_then(|chrono_dir| chrono_dir.parent())
+        .map(|r| r.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// `chrono add <path>`: añade una fuente MÁS al índice existente (git + logs +
+/// deploys en un mismo `.chrono/`, correlacionables por tiempo). No borra lo ya
+/// ingerido. Si la fuente ya estaba, la re-ingiere (borra sus eventos primero),
+/// así `add` es idempotente.
+pub fn add(db: &Path, start: &Path) -> Result<()> {
     let mut store = Store::open(db)?;
+    let index_root = index_root_of(db);
+    let registry = build_registry();
+    let (src, ingest_path, _root) = resolve_source(&registry, start)?;
+    let source_id = canonical_source_id(src.kind(), &ingest_path);
+
+    let already = store.list_sources()?.iter().any(|s| s.id == source_id);
+    if already {
+        eprintln!("{}", t(
+            format!("chrono: source {source_id} already indexed — re-ingesting"),
+            format!("chrono: la fuente {source_id} ya estaba — se re-ingiere"),
+        ));
+        store.delete_source_events(&source_id)?;
+    }
+
+    let (n, wm, manifest) = ingest_source(src, &ingest_path, None, &mut store, &index_root)
+        .map_err(|e| e.into_boxed())?;
+    store.upsert_source(
+        &source_id,
+        src.kind(),
+        &ingest_path.to_string_lossy(),
+        &wm.value,
+        &manifest,
+        &now_iso(),
+    )?;
+
+    eprintln!("{}", t("  building search index…", "  construyendo índice de búsqueda…"));
+    store.rebuild_fts()?;
+    finalize(&index_root, &store)?;
+
+    let total = store.list_sources()?.len();
+    eprintln!("{}", t(
+        format!("chrono: added {} source ({n} events). Index now has {total} sources.", src.kind()),
+        format!("chrono: añadida fuente {} ({n} eventos). El índice tiene ya {total} fuentes.", src.kind()),
+    ));
+    Ok(())
+}
+
+/// `chrono sync [path]`: sincroniza TODAS las fuentes registradas (o solo la de
+/// `path`, si se pasa), ingiriendo el delta desde el watermark de cada una. Si
+/// una fuente diverge (rebase/force-push, log rotado), reindexa SOLO esa fuente.
+pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
+    let mut store = Store::open(db)?;
+    let index_root = index_root_of(db);
     let registry = build_registry();
 
-    let start: PathBuf = match repo_arg {
-        Some(p) => p.to_path_buf(),
-        None => {
-            let stored = store
-                .meta("repo_path")?
-                .filter(|s| !s.is_empty())
-                .or(store.meta("source_path")?.filter(|s| !s.is_empty()));
-            match stored {
-                Some(s) => PathBuf::from(s),
-                None => {
-                    return Err(t(
-                        "don't know which repo to sync (no argument and no repo_path in the index)",
-                        "no sé qué repo sincronizar (ni argumento ni repo_path en el índice)",
-                    )
-                    .into())
-                }
-            }
-        }
-    };
-
-    let (src, ingest_path, root) = resolve_source(&registry, &start)?;
-    let wm = store.meta("last_watermark")?.map(|v| Watermark { kind: src.kind().to_string(), value: v });
-
-    let cfg = chrono_classify_rules::load(&root);
-
-    // Atajo de git: si el HEAD no cambió desde el último watermark, ni
-    // siquiera se abre el cursor (evita spawnear `git log` para nada).
-    if src.kind() == "git" {
-        let head = chrono_source_git::head_sha(&ingest_path)?;
-        if let Some(ref w) = wm {
-            if w.value == format!("sha:{head}") {
-                eprintln!("{}", t("sync: 0 new commits", "sync: 0 commits nuevos"));
-                return Ok(());
-            }
+    let mut sources = store.list_sources()?;
+    // Compat: índice anterior a multi-fuente (sin filas en `sources`). Se
+    // reconstruye una fuente desde `meta` (repo_path/source_path + kind) para
+    // que el primer `sync` tras actualizar se auto-cure.
+    if sources.is_empty() {
+        if let Some((id, kind, path, wm)) = legacy_source_from_meta(&store)? {
+            store.upsert_source(&id, &kind, &path, &wm, &BTreeMap::new(), &now_iso())?;
+            sources = store.list_sources()?;
+        } else {
+            return Err(t(
+                "no sources in the index — run 'chrono init' first",
+                "no hay fuentes en el índice — ejecuta 'chrono init' primero",
+            )
+            .into());
         }
     }
 
-    let n = match ingest_source(src, &ingest_path, wm.clone(), &mut store, &root) {
-        Ok((n, _wm)) => n,
-        Err(IngestError::Diverged) => {
-            eprintln!("{}", t(
-                "chrono: divergence detected (rebase/force-push) -> full reindex",
-                "chrono: divergencia detectada (rebase/force-push) -> reindex completo",
-            ));
-            store.reset()?;
-            ingest_source(src, &ingest_path, None, &mut store, &root)
-                .map(|(n, _wm)| n)
-                .map_err(|e| e.into_boxed())?
-        }
-        Err(e) => return Err(e.into_boxed()),
+    // Filtro opcional: si se pasa un path, solo se sincroniza esa fuente.
+    let filter_id: Option<String> = match source_arg {
+        Some(p) => match registry.pick(p) {
+            Some(src) => Some(canonical_source_id(src.kind(), p)),
+            None => Some(canonical_source_id("", p)), // no reconocida: no casará ninguna → aviso abajo.
+        },
+        None => None,
     };
-    finalize(&root, &store, src, &cfg.bug_labels)?;
-    eprintln!("{}", t(format!("sync: {n} new commits"), format!("sync: {n} commits nuevos")));
+
+    let now = now_iso();
+    let mut total = 0usize;
+    let mut synced_any = false;
+    let mut matched_any = false;
+    for s in &sources {
+        if let Some(ref want) = filter_id {
+            if &s.id != want {
+                continue;
+            }
+        }
+        matched_any = true;
+        let Some(adapter) = registry.by_kind(&s.kind) else {
+            eprintln!("{}", t(
+                format!("  warning: no adapter for source kind '{}' ({}) — skipping", s.kind, s.id),
+                format!("  aviso: no hay adaptador para la fuente '{}' ({}) — se omite", s.kind, s.id),
+            ));
+            continue;
+        };
+        let path = PathBuf::from(&s.path);
+
+        // Atajo de git: si el HEAD no cambió, no se abre el cursor.
+        if s.kind == "git" {
+            if let Ok(head) = chrono_source_git::head_sha(&path) {
+                if s.watermark == format!("sha:{head}") {
+                    continue;
+                }
+            }
+        }
+
+        let wm = if s.watermark.is_empty() {
+            None
+        } else {
+            Some(Watermark { kind: s.kind.clone(), value: s.watermark.clone() })
+        };
+
+        let (n, new_wm) = match ingest_source(adapter, &path, wm, &mut store, &index_root) {
+            Ok((n, new_wm, _manifest)) => (n, new_wm),
+            Err(IngestError::Diverged) => {
+                eprintln!("{}", t(
+                    format!("  divergence in {} — reindexing that source", s.id),
+                    format!("  divergencia en {} — se reindexa esa fuente", s.id),
+                ));
+                store.delete_source_events(&s.id)?;
+                ingest_source(adapter, &path, None, &mut store, &index_root)
+                    .map(|(n, new_wm, _)| (n, new_wm))
+                    .map_err(|e| e.into_boxed())?
+            }
+            Err(e) => return Err(e.into_boxed()),
+        };
+        store.set_source_watermark(&s.id, &new_wm.value, &now)?;
+        total += n;
+        synced_any = true;
+    }
+
+    if filter_id.is_some() && !matched_any {
+        eprintln!("{}", t(
+            "sync: no matching source in the index",
+            "sync: ninguna fuente del índice coincide",
+        ));
+        return Ok(());
+    }
+
+    // Nada nuevo en ninguna fuente: no se reconstruye FTS ni se compacta.
+    if !synced_any {
+        eprintln!("{}", t("sync: 0 new events", "sync: 0 eventos nuevos"));
+        return Ok(());
+    }
+
+    eprintln!("{}", t("  building search index…", "  construyendo índice de búsqueda…"));
+    store.rebuild_fts()?;
+    finalize(&index_root, &store)?;
+    eprintln!("{}", t(format!("sync: {total} new events"), format!("sync: {total} eventos nuevos")));
     Ok(())
+}
+
+/// Reconstruye una fila de fuente desde `meta` para índices anteriores a la
+/// tabla `sources`. Devuelve `(source_id, kind, path, watermark)` o `None`.
+fn legacy_source_from_meta(store: &Store) -> Result<Option<(String, String, String, String)>> {
+    let kind = store.meta("source_kind")?.filter(|s| !s.is_empty());
+    let path = store
+        .meta("repo_path")?
+        .filter(|s| !s.is_empty())
+        .or(store.meta("source_path")?.filter(|s| !s.is_empty()));
+    match (kind, path) {
+        (Some(kind), Some(path)) => {
+            let id = format!("{kind}:{path}");
+            let wm = store.meta("last_watermark")?.unwrap_or_default();
+            Ok(Some((id, kind, path, wm)))
+        }
+        _ => Ok(None),
+    }
 }
 
 enum IngestError {
@@ -239,7 +394,7 @@ fn ingest_source(
     watermark: Option<Watermark>,
     store: &mut Store,
     repo_for_config: &Path,
-) -> std::result::Result<(usize, Watermark), IngestError> {
+) -> std::result::Result<(usize, Watermark, BTreeMap<String, String>), IngestError> {
     let cfg = chrono_classify_rules::load(repo_for_config);
     let classifier = RulesClassifier::new(cfg);
 
@@ -276,23 +431,27 @@ fn ingest_source(
     }
 
     let wm = cur.watermark();
-    store.set_meta("last_watermark", &wm.value)?;
-    for (k, v) in cur.manifest() {
-        store.set_meta(&k, &v)?;
-    }
-    eprintln!("{}", t("  building search index…", "  construyendo índice de búsqueda…"));
-    store.rebuild_fts()?;
-    Ok((count, wm))
+    let manifest = cur.manifest();
+    Ok((count, wm, manifest))
 }
 
-/// Enriquecimiento tras la ingesta: exclusiones de ruido (genérico), y —solo
-/// para git— borrados/tamaños de HEAD, tags→markers y forge (PRs/issues de
-/// GitHub vía `gh`, si está disponible). Cierra con `meta` genérico y
-/// compactado.
-fn finalize(root: &Path, store: &Store, source: &dyn Source, bug_labels: &[String]) -> Result<()> {
-    if source.kind() == "git" {
-        finalize_git_sizes_and_deletions(root, store)?;
-        finalize_git_tags(root, store)?;
+/// Enriquecimiento tras la ingesta (multi-fuente): exclusiones de ruido
+/// (genérico), y —para cada fuente git registrada— borrados/tamaños de HEAD,
+/// tags→markers y forge (PRs/issues de GitHub vía `gh`, si está disponible).
+/// Cierra compactando. `index_root` es la raíz del índice (de ahí se lee la
+/// config de clasificación, compartida por todas las fuentes).
+///
+/// Nota: con MÁS DE UNA fuente git en el mismo índice, el cálculo de borrados
+/// (`deleted`) del último repo pisaría al del anterior (las entidades `file`
+/// son globales, no por fuente). El caso soportado es 1 git + N fuentes de log
+/// (cuyas entidades no son `type='file'`, así que no se ven afectadas).
+fn finalize(index_root: &Path, store: &Store) -> Result<()> {
+    let git_paths: Vec<String> =
+        store.list_sources()?.into_iter().filter(|s| s.kind == "git").map(|s| s.path).collect();
+
+    for path in &git_paths {
+        finalize_git_sizes_and_deletions(Path::new(path), store)?;
+        finalize_git_tags(Path::new(path), store)?;
     }
 
     // Exclusiones de ruido (globs por defecto del Go; sin config en R1).
@@ -322,11 +481,13 @@ fn finalize(root: &Path, store: &Store, source: &dyn Source, bug_labels: &[Strin
         tx.commit()?;
     }
 
-    if source.kind() == "git" {
-        finalize_git_forge(root, store, bug_labels)?;
+    if !git_paths.is_empty() {
+        let cfg = chrono_classify_rules::load(index_root);
+        for path in &git_paths {
+            finalize_git_forge(Path::new(path), store, &cfg.bug_labels)?;
+        }
     }
 
-    write_meta(store, source, root)?;
     store.optimize()?;
     Ok(())
 }
