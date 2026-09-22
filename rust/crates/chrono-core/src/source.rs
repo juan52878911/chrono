@@ -75,7 +75,7 @@ impl Registry {
         let mut best: Option<(&dyn Source, i32)> = None;
         for s in &self.sources {
             let score = s.detect(path);
-            if score > 0 && best.map_or(true, |(_, b)| score > b) {
+            if score > 0 && best.is_none_or(|(_, b)| score > b) {
                 best = Some((s.as_ref(), score));
             }
         }

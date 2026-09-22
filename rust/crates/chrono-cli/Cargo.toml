@@ -1,0 +1,19 @@
+[package]
+name = "chrono-cli"
+description = "Binario `chrono` (port Rust, R1): init/sync sobre git y consultas JSON acotadas."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "chrono"
+path = "src/main.rs"
+
+# Sin clap ni serde a propósito: el parseo de args y el JSON de salida son
+# pequeños y se hacen a mano para no inflar el binario.
+[dependencies]
+chrono-core = { path = "../chrono-core" }
+chrono-store = { path = "../chrono-store" }
+chrono-source-git = { path = "../chrono-source-git" }
+chrono-metrics = { path = "../chrono-metrics" }

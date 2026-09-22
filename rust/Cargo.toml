@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/chrono-core"]
+members = [
+    "crates/chrono-core",
+    "crates/chrono-store",
+    "crates/chrono-source-git",
+    "crates/chrono-metrics",
+    "crates/chrono-cli",
+]
 
 [workspace.package]
 version = "0.2.0-dev"

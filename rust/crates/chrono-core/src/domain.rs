@@ -103,15 +103,17 @@ mod tests {
 
     #[test]
     fn mark_bulk_respeta_el_umbral() {
-        let mut e = Event::default();
-        e.touches = (0..60)
-            .map(|i| Touch {
-                entity: format!("src/f{i}.rs"),
-                entity_type: "file".into(),
-                weight: 1,
-                ..Default::default()
-            })
-            .collect();
+        let mut e = Event {
+            touches: (0..60)
+                .map(|i| Touch {
+                    entity: format!("src/f{i}.rs"),
+                    entity_type: "file".into(),
+                    weight: 1,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
         e.mark_bulk(50);
         assert!(e.is_bulk);
         e.mark_bulk(100);
@@ -120,12 +122,14 @@ mod tests {
 
     #[test]
     fn top_segments_ordena_y_deduplica() {
-        let mut e = Event::default();
-        e.touches = vec![
-            Touch { entity: "src/a.rs".into(), ..Default::default() },
-            Touch { entity: "docs/x.md".into(), ..Default::default() },
-            Touch { entity: "src/b.rs".into(), ..Default::default() },
-        ];
+        let e = Event {
+            touches: vec![
+                Touch { entity: "src/a.rs".into(), ..Default::default() },
+                Touch { entity: "docs/x.md".into(), ..Default::default() },
+                Touch { entity: "src/b.rs".into(), ..Default::default() },
+            ],
+            ..Default::default()
+        };
         assert_eq!(e.top_segments(), vec!["docs".to_string(), "src".to_string()]);
     }
 }

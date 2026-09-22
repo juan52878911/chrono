@@ -1,0 +1,14 @@
+[package]
+name = "chrono-metrics"
+description = "Consultas deterministas de chrono sobre el índice v2 (hotspots, coupling, owners…)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono-core = { path = "../chrono-core" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+chrono-store = { path = "../chrono-store" }

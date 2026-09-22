@@ -1,0 +1,12 @@
+[package]
+name = "chrono-store"
+description = "Store SQLite v2 de chrono: esquema, migración/reindex y writer transaccional."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono-core = { path = "../chrono-core" }
+# SQLite estático embebido (bundled compila SQLite 3.46 con FTS5). Sin runtime externo.
+rusqlite = { version = "0.32", features = ["bundled"] }
