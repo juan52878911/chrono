@@ -57,6 +57,12 @@ pub struct Config {
     pub bug_labels: Vec<String>,
     /// Taxonomía de categorías de bug: categoría -> palabras clave que la marcan.
     pub bug_categories: BTreeMap<String, Vec<String>>,
+    /// Opciones por fuente para los adaptadores (columnas de CSV, `preset`/`year`
+    /// de textlog, `time_field` de jsonl…). Clave = ruta absoluta de la fuente o
+    /// su nombre de fichero (basename); valor = opciones planas que se pasan tal
+    /// cual a `SourceConfig.options` del adaptador. Vacío por defecto (los
+    /// adaptadores autodetectan). Ver [`Config::source_options_for`].
+    pub source_options: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Default for Config {
@@ -240,7 +246,25 @@ impl Config {
                     ],
                 ),
             ]),
+            source_options: BTreeMap::new(),
         }
+    }
+
+    /// Resuelve las opciones de adaptador para una fuente dada su ruta de
+    /// ingesta. Busca en `source_options` primero por la ruta completa (tal
+    /// cual se pasó) y, si no, por el nombre de fichero (basename). Devuelve un
+    /// mapa vacío si no hay entrada (el adaptador autodetecta). Determinista.
+    pub fn source_options_for(&self, ingest_path: &std::path::Path) -> BTreeMap<String, String> {
+        let full = ingest_path.to_string_lossy();
+        if let Some(opts) = self.source_options.get(full.as_ref()) {
+            return opts.clone();
+        }
+        if let Some(base) = ingest_path.file_name().and_then(|s| s.to_str()) {
+            if let Some(opts) = self.source_options.get(base) {
+                return opts.clone();
+            }
+        }
+        BTreeMap::new()
     }
 }
 
@@ -509,5 +533,34 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         let cfg = load(&dir);
         assert_eq!(cfg, Config::defaults());
+    }
+
+    #[test]
+    fn source_options_por_ruta_y_por_basename() {
+        let json = r#"{
+            "source_options": {
+                "/abs/incidents.csv": {"time_column": "when", "delimiter": ";"},
+                "app.syslog": {"preset": "syslog", "year": "2024"}
+            }
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+
+        // Coincidencia por ruta completa.
+        let by_path = cfg.source_options_for(std::path::Path::new("/abs/incidents.csv"));
+        assert_eq!(by_path.get("time_column").map(String::as_str), Some("when"));
+        assert_eq!(by_path.get("delimiter").map(String::as_str), Some(";"));
+
+        // Coincidencia por basename cuando la ruta completa no está.
+        let by_base = cfg.source_options_for(std::path::Path::new("/var/log/app.syslog"));
+        assert_eq!(by_base.get("preset").map(String::as_str), Some("syslog"));
+        assert_eq!(by_base.get("year").map(String::as_str), Some("2024"));
+
+        // Sin entrada: mapa vacío (el adaptador autodetecta).
+        assert!(cfg.source_options_for(std::path::Path::new("/x/otro.jsonl")).is_empty());
+
+        // Campo ausente del JSON: default vacío, resto de defaults intactos.
+        let empty: Config = serde_json::from_str("{}").unwrap();
+        assert!(empty.source_options.is_empty());
+        assert_eq!(empty.bug_labels, Config::defaults().bug_labels);
     }
 }

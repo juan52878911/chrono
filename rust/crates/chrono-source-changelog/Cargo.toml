@@ -1,0 +1,10 @@
+[package]
+name = "chrono-source-changelog"
+description = "Adaptador Source de CHANGELOG (Keep a Changelog) para chrono: cada release → un Event."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono-core = { path = "../chrono-core" }

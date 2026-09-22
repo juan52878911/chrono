@@ -22,4 +22,5 @@ chrono-tracker-github = { path = "../chrono-tracker-github" }
 chrono-source-jsonl = { path = "../chrono-source-jsonl" }
 chrono-source-csv = { path = "../chrono-source-csv" }
 chrono-source-textlog = { path = "../chrono-source-textlog" }
+chrono-source-changelog = { path = "../chrono-source-changelog" }
 chrono-mcp = { path = "../chrono-mcp" }

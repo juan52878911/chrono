@@ -78,6 +78,7 @@ fn build_registry() -> Registry {
     r.register(Box::new(chrono_source_jsonl::JsonlSource::new()));
     r.register(Box::new(chrono_source_csv::CsvSource::new()));
     r.register(Box::new(chrono_source_textlog::TextlogSource::new()));
+    r.register(Box::new(chrono_source_changelog::ChangelogSource::new()));
     // R3: registrar aquí más adaptadores (journald…).
     r
 }
@@ -403,9 +404,12 @@ fn ingest_source(
     repo_for_config: &Path,
 ) -> std::result::Result<(usize, Watermark, BTreeMap<String, String>), IngestError> {
     let cfg = chrono_classify_rules::load(repo_for_config);
+    // Opciones del adaptador desde .chrono/config.json (columnas CSV, preset/year
+    // de textlog…), resueltas por ruta/nombre de la fuente. Se toman antes de
+    // mover `cfg` al clasificador.
+    let source_cfg = SourceConfig { options: cfg.source_options_for(path) };
     let classifier = RulesClassifier::new(cfg);
 
-    let source_cfg = SourceConfig::default();
     let mut cur: Box<dyn Cursor> = match source.open(path, watermark, &source_cfg) {
         Ok(c) => c,
         Err(CoreError::Diverged(_)) => return Err(IngestError::Diverged),

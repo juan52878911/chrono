@@ -93,14 +93,32 @@ impl Source for JsonlSource {
         }
         let file_len = meta.len();
 
-        let start_offset = match watermark {
+        let start_offset = match &watermark {
             None => 0u64,
             Some(wm) => {
-                let off_str = wm.value.strip_prefix("off:").ok_or_else(|| CoreError::Diverged(wm.value.clone()))?;
-                let off: u64 = off_str.parse().map_err(|_| CoreError::Diverged(wm.value.clone()))?;
+                let (off, prefix_hex) = cursor::parse_watermark(&wm.value).ok_or_else(|| CoreError::Diverged(wm.value.clone()))?;
                 if file_len < off {
                     // Fichero más corto que el watermark: rotado o truncado.
                     return Err(CoreError::Diverged(wm.value.clone()));
+                }
+                // NUEVO: si el watermark trae hash de prefijo (formato
+                // `off:<n>|p:<hex>`), comprobar que los primeros bytes del
+                // fichero no cambiaron. Un watermark viejo (sin `|p:`) no
+                // trae `prefix_hex` -> se salta esta comprobación
+                // (retrocompatible, solo queda la de longitud de arriba).
+                if let Some(expected) = &prefix_hex {
+                    // Se hashea la MISMA región que produjo el watermark:
+                    // `min(4096, off)`, no `min(4096, file_len)` — si no, un
+                    // append a un fichero < 4 KB cambiaría la región y daría
+                    // divergencia falsa en cada sync.
+                    let actual = cursor::hash_prefix(path, off)?;
+                    if &actual != expected {
+                        // Mismo o mayor tamaño pero prefijo distinto: el
+                        // fichero se reescribió desde el principio (p.ej.
+                        // rotación in-place). Esto es lo que el chequeo de
+                        // longitud, solo, no detecta.
+                        return Err(CoreError::Diverged(wm.value.clone()));
+                    }
                 }
                 off
             }
@@ -144,6 +162,22 @@ mod tests {
 
         fn path(&self) -> &Path {
             &self.path
+        }
+
+        /// Añade `contents` al final del fichero (append puro, sin tocar lo
+        /// ya escrito).
+        fn append(&self, contents: &str) {
+            let mut f = fs::OpenOptions::new().append(true).open(&self.path).unwrap();
+            f.write_all(contents.as_bytes()).unwrap();
+        }
+
+        /// Reescribe los bytes desde el principio del fichero con `contents`
+        /// (sin truncar lo que sigue): simula una rotación in-place que
+        /// mantiene o aumenta la longitud del fichero pero cambia su
+        /// prefijo.
+        fn overwrite_start(&self, contents: &str) {
+            let mut f = fs::OpenOptions::new().write(true).open(&self.path).unwrap();
+            f.write_all(contents.as_bytes()).unwrap();
         }
     }
 
@@ -301,6 +335,89 @@ mod tests {
             Err(CoreError::Diverged(_)) => {}
             other => panic!("esperaba CoreError::Diverged, obtuve otra cosa (ok={})", other.is_ok()),
         }
+    }
+
+    #[test]
+    fn watermark_tiene_formato_off_pipe_p_hash() {
+        let f = TempJsonl::write(SAMPLE);
+        let src = JsonlSource::new();
+        let cfg = SourceConfig::default();
+
+        let mut cur = src.open(f.path(), None, &cfg).unwrap();
+        while cur.next().unwrap().is_some() {}
+        let wm = cur.watermark();
+
+        // Formato nuevo: "off:<n>|p:<hex de 16 dígitos>".
+        let (off_part, p_part) = wm.value.split_once('|').expect("watermark debe traer '|p:<hex>'");
+        assert!(off_part.starts_with("off:"));
+        let hex = p_part.strip_prefix("p:").expect("segunda parte debe empezar por 'p:'");
+        assert_eq!(hex.len(), 16, "hash fnv1a64 en hex son 16 dígitos");
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn reabrir_tras_append_no_diverge_y_lee_solo_el_delta() {
+        let f = TempJsonl::write(SAMPLE);
+        let src = JsonlSource::new();
+        let cfg = SourceConfig::default();
+
+        let mut cur = src.open(f.path(), None, &cfg).unwrap();
+        while cur.next().unwrap().is_some() {}
+        let wm = cur.watermark();
+
+        // Append puro: los primeros 4 KB del fichero no cambian.
+        f.append(r#"{"ts": 1704067220, "msg": "linea nueva", "level": "info", "service": "api"}"#);
+        f.append("\n");
+
+        let mut cur2 = src.open(f.path(), Some(wm), &cfg).unwrap();
+        let ev = cur2.next().unwrap().unwrap();
+        assert_eq!(ev.title, "linea nueva");
+        assert!(cur2.next().unwrap().is_none());
+    }
+
+    #[test]
+    fn reescribir_el_prefijo_manteniendo_longitud_da_diverged() {
+        let f = TempJsonl::write(SAMPLE);
+        let src = JsonlSource::new();
+        let cfg = SourceConfig::default();
+
+        let mut cur = src.open(f.path(), None, &cfg).unwrap();
+        while cur.next().unwrap().is_some() {}
+        let wm = cur.watermark();
+        let original_len = fs::metadata(f.path()).unwrap().len();
+
+        // Reescribe el principio del fichero con contenido de la MISMA
+        // longitud (mismo número de bytes que la primera línea original):
+        // el fichero no se acorta, pero su prefijo cambió. Este es el caso
+        // que el chequeo de solo longitud no detectaba.
+        let first_line_len = SAMPLE.lines().next().unwrap().len() + 1; // +1 por el '\n'.
+        let replacement: String = "x".repeat(first_line_len - 1) + "\n";
+        assert_eq!(replacement.len(), first_line_len);
+        f.overwrite_start(&replacement);
+        assert_eq!(fs::metadata(f.path()).unwrap().len(), original_len, "la longitud no debe cambiar");
+
+        match src.open(f.path(), Some(wm), &cfg) {
+            Err(CoreError::Diverged(_)) => {}
+            other => panic!("esperaba CoreError::Diverged (prefijo reescrito), obtuve otra cosa (ok={})", other.is_ok()),
+        }
+    }
+
+    #[test]
+    fn watermark_viejo_sin_hash_de_prefijo_es_retrocompatible() {
+        let f = TempJsonl::write(SAMPLE);
+        let src = JsonlSource::new();
+        let cfg = SourceConfig::default();
+
+        let mut cur = src.open(f.path(), None, &cfg).unwrap();
+        while cur.next().unwrap().is_some() {}
+        let wm = cur.watermark();
+        let off_part = wm.value.split('|').next().unwrap().to_string();
+
+        // Watermark en formato viejo (sin "|p:<hex>"): solo se comprueba la
+        // longitud, nunca el hash de prefijo.
+        let old_wm = Watermark { kind: "jsonl".to_string(), value: off_part };
+        let mut cur2 = src.open(f.path(), Some(old_wm), &cfg).unwrap();
+        assert!(cur2.next().unwrap().is_none(), "no debe divergir por falta de hash en formato viejo");
     }
 
     #[test]

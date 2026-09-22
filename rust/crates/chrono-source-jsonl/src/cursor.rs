@@ -8,7 +8,7 @@ use chrono_core::{CoreError, Cursor, Event, Result as CoreResult, SourceConfig, 
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 /// Lee la primera línea no vacía del fichero (para autodetectar la
@@ -34,6 +34,50 @@ fn source_id_for(path: &Path) -> String {
     format!("jsonl:{}", abs.to_string_lossy())
 }
 
+/// Tope de bytes que se hashean como "prefijo" del fichero.
+const PREFIX_CAP: u64 = 4096;
+
+/// Calcula el hash FNV-1a 64 (16 dígitos hex) de los primeros
+/// `min(PREFIX_CAP, limit)` bytes de `path`. `limit` es el offset del
+/// watermark (la región YA consumida): así un append (que solo añade bytes
+/// DESPUÉS del offset) no cambia el prefijo hasheado y NO dispara divergencia;
+/// una reescritura de los bytes ya consumidos SÍ. Se lee el fichero aparte
+/// (fichero nuevo, no el buffer del cursor), tanto en `watermark()` como al
+/// comprobar divergencia en `JsonlSource::open` (ver `docs/DESIGN-GENERAL-CORE.md §3`).
+pub(crate) fn hash_prefix(path: &Path, limit: u64) -> CoreResult<String> {
+    let want = limit.min(PREFIX_CAP) as usize;
+    let mut file =
+        File::open(path).map_err(|e| CoreError::Other(format!("abriendo {} para hash de prefijo: {e}", path.display())))?;
+    let mut buf = vec![0u8; want];
+    let mut total = 0usize;
+    while total < want {
+        match file.read(&mut buf[total..]) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(e) => return Err(CoreError::Other(format!("leyendo prefijo de {}: {e}", path.display()))),
+        }
+    }
+    Ok(format!("{:016x}", crate::simhash::fnv1a64(&buf[..total])))
+}
+
+/// Parsea el valor de un watermark de este adaptador: separa la parte
+/// `off:<n>` de la opcional `|p:<hex>` (hash del prefijo, formato nuevo).
+/// Devuelve `None` si no tiene el prefijo `off:` esperado o el número no es
+/// válido. Retrocompatible: un watermark viejo `off:<n>` a secas devuelve
+/// `(n, None)` — sin hash que comprobar.
+pub(crate) fn parse_watermark(value: &str) -> Option<(u64, Option<String>)> {
+    let (off_part, prefix_part) = match value.split_once('|') {
+        Some((off, rest)) => (off, Some(rest)),
+        None => (value, None),
+    };
+    let off: u64 = off_part.strip_prefix("off:")?.parse().ok()?;
+    let prefix_hex = match prefix_part {
+        Some(p) => Some(p.strip_prefix("p:")?.to_string()),
+        None => None,
+    };
+    Some((off, prefix_hex))
+}
+
 pub struct JsonlCursor {
     reader: BufReader<File>,
     source_id: String,
@@ -49,6 +93,9 @@ pub struct JsonlCursor {
     /// Bytes consumidos desde el principio del fichero (posición actual);
     /// arranca en el offset del watermark de entrada, si lo hay.
     bytes_read: u64,
+    /// Ruta del fichero, para recalcular el hash del prefijo en `watermark()`
+    /// sobre `min(4096, bytes_read)` (la región consumida hasta ese momento).
+    path: PathBuf,
 }
 
 impl JsonlCursor {
@@ -72,6 +119,7 @@ impl JsonlCursor {
             overrides,
             reported,
             bytes_read: start_offset,
+            path: path.to_path_buf(),
         })
     }
 
@@ -119,7 +167,13 @@ impl Cursor for JsonlCursor {
     }
 
     fn watermark(&self) -> Watermark {
-        Watermark { kind: "jsonl".to_string(), value: format!("off:{}", self.bytes_read) }
+        // Hash del prefijo sobre la región consumida (`min(4096, bytes_read)`).
+        // Si no se puede leer el fichero, se cae al formato antiguo `off:<n>`.
+        let value = match hash_prefix(&self.path, self.bytes_read) {
+            Ok(h) => format!("off:{}|p:{}", self.bytes_read, h),
+            Err(_) => format!("off:{}", self.bytes_read),
+        };
+        Watermark { kind: "jsonl".to_string(), value }
     }
 
     fn manifest(&self) -> BTreeMap<String, String> {

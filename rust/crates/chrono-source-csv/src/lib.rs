@@ -94,14 +94,32 @@ impl Source for CsvSource {
         }
         let file_len = meta.len();
 
-        let start_offset = match watermark {
+        let start_offset = match &watermark {
             None => 0u64,
             Some(wm) => {
-                let off_str = wm.value.strip_prefix("off:").ok_or_else(|| CoreError::Diverged(wm.value.clone()))?;
-                let off: u64 = off_str.parse().map_err(|_| CoreError::Diverged(wm.value.clone()))?;
+                let (off, prefix_hex) = cursor::parse_watermark(&wm.value).ok_or_else(|| CoreError::Diverged(wm.value.clone()))?;
                 if file_len < off {
                     // Fichero más corto que el watermark: rotado o truncado.
                     return Err(CoreError::Diverged(wm.value.clone()));
+                }
+                // NUEVO: si el watermark trae hash de prefijo (formato
+                // `off:<n>|p:<hex>`), comprobar que los primeros bytes del
+                // fichero no cambiaron. Un watermark viejo (sin `|p:`) no
+                // trae `prefix_hex` -> se salta esta comprobación
+                // (retrocompatible, solo queda la de longitud de arriba).
+                if let Some(expected) = &prefix_hex {
+                    // Se hashea la MISMA región que produjo el watermark:
+                    // `min(4096, off)`, no `min(4096, file_len)` — si no, un
+                    // append a un fichero < 4 KB cambiaría la región y daría
+                    // divergencia falsa en cada sync.
+                    let actual = cursor::hash_prefix(path, off)?;
+                    if &actual != expected {
+                        // Mismo o mayor tamaño pero prefijo distinto: el
+                        // fichero se reescribió desde el principio (p.ej.
+                        // rotación in-place). Esto es lo que el chequeo de
+                        // longitud, solo, no detecta.
+                        return Err(CoreError::Diverged(wm.value.clone()));
+                    }
                 }
                 off
             }

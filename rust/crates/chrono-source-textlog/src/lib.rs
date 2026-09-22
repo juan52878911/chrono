@@ -114,14 +114,32 @@ impl Source for TextlogSource {
         }
         let file_len = meta.len();
 
-        let start_offset = match watermark {
+        let start_offset = match &watermark {
             None => 0u64,
             Some(wm) => {
-                let off_str = wm.value.strip_prefix("off:").ok_or_else(|| CoreError::Diverged(wm.value.clone()))?;
-                let off: u64 = off_str.parse().map_err(|_| CoreError::Diverged(wm.value.clone()))?;
+                let (off, prefix_hex) = cursor::parse_watermark(&wm.value).ok_or_else(|| CoreError::Diverged(wm.value.clone()))?;
                 if file_len < off {
                     // Fichero más corto que el watermark: rotado o truncado.
                     return Err(CoreError::Diverged(wm.value.clone()));
+                }
+                // NUEVO: si el watermark trae hash de prefijo (formato
+                // `off:<n>|p:<hex>`), comprobar que los primeros bytes del
+                // fichero no cambiaron. Un watermark viejo (sin `|p:`) no
+                // trae `prefix_hex` -> se salta esta comprobación
+                // (retrocompatible, solo queda la de longitud de arriba).
+                if let Some(expected) = &prefix_hex {
+                    // Se hashea la MISMA región que produjo el watermark:
+                    // `min(4096, off)`, no `min(4096, file_len)` — si no, un
+                    // append a un fichero < 4 KB cambiaría la región y daría
+                    // divergencia falsa en cada sync.
+                    let actual = cursor::hash_prefix(path, off)?;
+                    if &actual != expected {
+                        // Mismo o mayor tamaño pero prefijo distinto: el
+                        // fichero se reescribió desde el principio (p.ej.
+                        // rotación in-place). Esto es lo que el chequeo de
+                        // longitud, solo, no detecta.
+                        return Err(CoreError::Diverged(wm.value.clone()));
+                    }
                 }
                 off
             }
@@ -176,6 +194,16 @@ mod tests {
 
         fn path(&self) -> &Path {
             &self.path
+        }
+
+        fn append(&self, contents: &str) {
+            let mut f = fs::OpenOptions::new().append(true).open(&self.path).unwrap();
+            f.write_all(contents.as_bytes()).unwrap();
+        }
+
+        /// Reescribe TODO el fichero (cambia el prefijo ya consumido).
+        fn overwrite(&self, contents: &str) {
+            fs::write(&self.path, contents).unwrap();
         }
     }
 
@@ -401,6 +429,50 @@ mod tests {
             Err(CoreError::Other(_)) => {}
             Ok(_) => panic!("esperaba error, obtuve Ok"),
             Err(_) => panic!("esperaba CoreError::Other"),
+        }
+    }
+
+    // --- divergencia por hash de prefijo -------------------------------
+
+    /// El watermark tras consumir trae la forma `off:<n>|p:<hex>`, y reabrir
+    /// tras un APPEND (líneas nuevas al final) NO diverge: lee solo el delta.
+    #[test]
+    fn watermark_con_prefijo_y_append_no_diverge() {
+        let f = TempTextlog::write(&format!("{SYSLOG_RFC5424_LINE}\n"));
+        let src = TextlogSource::new();
+        let cfg = cfg_with(&[("preset", "syslog")]);
+
+        let mut cur = src.open(f.path(), None, &cfg).unwrap();
+        while cur.next().unwrap().is_some() {}
+        let wm = cur.watermark();
+        assert!(wm.value.contains("|p:"), "el watermark debe traer hash de prefijo: {}", wm.value);
+
+        // Append de otra línea válida: al reabrir con el watermark, solo la nueva.
+        f.append("<34>1 2023-10-11T22:20:00Z host app - - - otra cosa\n");
+        let mut cur2 = src.open(f.path(), Some(wm), &cfg).unwrap();
+        let ev = cur2.next().unwrap().expect("debe leer la línea nueva");
+        assert!(ev.title.contains("otra cosa"));
+        assert!(cur2.next().unwrap().is_none());
+    }
+
+    /// Reescribir el prefijo YA consumido manteniendo longitud ≥ off SÍ diverge
+    /// (lo que el chequeo de longitud, solo, no detectaba).
+    #[test]
+    fn reescritura_del_prefijo_consumido_diverge() {
+        let f = TempTextlog::write(&format!("{SYSLOG_RFC5424_LINE}\n"));
+        let src = TextlogSource::new();
+        let cfg = cfg_with(&[("preset", "syslog")]);
+
+        let mut cur = src.open(f.path(), None, &cfg).unwrap();
+        while cur.next().unwrap().is_some() {}
+        let wm = cur.watermark();
+
+        // Reescribe el fichero entero (cambia el prefijo consumido) con longitud
+        // igual o mayor, así que el chequeo de longitud pasaría; el hash no.
+        f.overwrite("<11>1 2023-10-11T22:14:15Z host app - - - CONTENIDO DISTINTO Y MAS LARGO QUE ANTES\n");
+        match src.open(f.path(), Some(wm), &cfg) {
+            Err(CoreError::Diverged(_)) => {}
+            other => panic!("esperaba Diverged por prefijo cambiado (ok={})", other.is_ok()),
         }
     }
 }
