@@ -229,7 +229,7 @@ mod tests {
                 .output()
                 .unwrap();
             let text = String::from_utf8(out.stdout).unwrap();
-            let fields: Vec<usize> = text.trim().split_whitespace().map(|f| f.parse().unwrap()).collect();
+            let fields: Vec<usize> = text.split_whitespace().map(|f| f.parse().unwrap()).collect();
             (fields[0], fields[1]) // (behind, ahead) vistas desde "feature".
         };
 

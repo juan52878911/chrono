@@ -49,6 +49,27 @@ pub fn git_version() -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Lista ORDENADA (más reciente primero, igual que `git log`) de SHAs no-merge
+/// para `rev_arg` (p.ej. "HEAD" o "`<sha>..HEAD`"). Base para repartir la
+/// ingesta en trozos contiguos que se procesan en paralelo.
+pub fn rev_list_no_merges(repo: &Path, rev_arg: &str) -> Result<Vec<String>> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-list", "--no-merges", rev_arg])
+        .output()?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(format!("git rev-list failed: {stderr}").into());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    Ok(text
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
 /// Pares (ruta, OID de blob) de HEAD, vía `git ls-tree -r -z HEAD`.
 pub fn ls_tree(repo: &Path) -> Result<Vec<(String, String)>> {
     let out = Command::new("git")
