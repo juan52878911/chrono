@@ -14,12 +14,14 @@
 //! - La extracción de tickets es un parseo manual simple (`#123`, `ABC-123`);
 //!   los patrones configurables por repo quedan para más adelante.
 
+mod branches;
 mod cursor;
 mod gitutil;
 mod parse;
 mod simhash;
 mod timeutil;
 
+pub use branches::{branches, Branch, BranchAuthor, BranchTip};
 pub use gitutil::{blob_lines, commit_exists, git_version, head_sha, is_shallow, ls_tree, Result};
 
 use chrono_core::{CoreError, Result as CoreResult, Source, SourceConfig, Watermark};
@@ -184,6 +186,78 @@ mod tests {
             .output()
             .unwrap();
         String::from_utf8(out.stdout).unwrap().trim().parse().unwrap()
+    }
+
+    fn current_branch(dir: &Path) -> String {
+        String::from_utf8(
+            Cmd::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string()
+    }
+
+    #[test]
+    fn branches_calcula_ahead_behind_y_marca_current_merged_stale() {
+        let repo = TempRepo::new();
+        commit(repo.path(), "a.txt", "1\n", "primero");
+        let base_name = current_branch(repo.path());
+
+        // "feature" diverge de la base: 1 commit propio.
+        run(repo.path(), &["checkout", "-b", "feature"]);
+        commit(repo.path(), "feature.txt", "f\n", "feature: primero");
+
+        // Vuelve a la base y le añade otro commit: ahora ambas ramas divergen
+        // (ahead=1, behind=1 vistas desde "feature").
+        run(repo.path(), &["checkout", &base_name]);
+        commit(repo.path(), "base.txt", "b\n", "base: segundo");
+
+        // "merged": una rama sin commits propios tras crearse desde HEAD actual.
+        run(repo.path(), &["branch", "merged-branch"]);
+
+        let expected = {
+            let out = Cmd::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(["rev-list", "--left-right", "--count", &format!("{base_name}...feature")])
+                .output()
+                .unwrap();
+            let text = String::from_utf8(out.stdout).unwrap();
+            let fields: Vec<usize> = text.trim().split_whitespace().map(|f| f.parse().unwrap()).collect();
+            (fields[0], fields[1]) // (behind, ahead) vistas desde "feature".
+        };
+
+        let (base, current, branches) = branches(repo.path(), &base_name).unwrap();
+        assert_eq!(base, base_name);
+        assert_eq!(current, base_name);
+
+        let base_branch = branches.iter().find(|b| b.name == base_name).unwrap();
+        assert!(base_branch.current);
+        assert!(base_branch.merged);
+        assert_eq!(base_branch.ahead, 0);
+        assert_eq!(base_branch.behind, 0);
+
+        let feature = branches.iter().find(|b| b.name == "feature").unwrap();
+        assert!(!feature.current);
+        assert_eq!(feature.behind as usize, expected.0);
+        assert_eq!(feature.ahead as usize, expected.1);
+        assert!(feature.ahead > 0);
+        assert!(!feature.merged);
+        assert!(!feature.stale); // recién creada: no puede tener 90 días.
+        assert_eq!(feature.bus_factor, 1); // un único autor (Test) en feature.
+
+        let merged = branches.iter().find(|b| b.name == "merged-branch").unwrap();
+        assert_eq!(merged.ahead, 0);
+        assert!(merged.merged); // sin commits propios -> ahead=0 -> merged.
+
+        // Orden: la actual (base) primero.
+        assert_eq!(branches[0].name, base_name);
     }
 
     #[test]

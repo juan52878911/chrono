@@ -103,6 +103,7 @@ impl Store {
             "entities",
             "markers",
             "blob_lines",
+            "issues",
             "sources",
         ] {
             tx.execute(&format!("DELETE FROM {table}"), [])?;

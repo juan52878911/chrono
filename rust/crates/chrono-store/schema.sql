@@ -103,6 +103,19 @@ CREATE TABLE IF NOT EXISTS blob_lines (
     lines INTEGER NOT NULL
 );
 
+-- PRs e issues del forge (GitHub vía gh). Era `issues` en el Go.
+CREATE TABLE IF NOT EXISTS issues (
+    number    INTEGER NOT NULL,
+    kind      TEXT NOT NULL,              -- "pr" | "issue"
+    title     TEXT NOT NULL DEFAULT '',
+    state     TEXT NOT NULL DEFAULT '',   -- OPEN | CLOSED | MERGED
+    labels    TEXT NOT NULL DEFAULT '',   -- CSV de labels
+    merged    INTEGER NOT NULL DEFAULT 0,
+    closed_at TEXT NOT NULL DEFAULT '',
+    is_bug    INTEGER NOT NULL DEFAULT 0, -- 1 si algún label lo marca como bug
+    PRIMARY KEY (kind, number)
+);
+
 -- Índices (mismos accesos que las consultas de metrics).
 CREATE INDEX IF NOT EXISTS idx_events_at     ON events(at_epoch);
 CREATE INDEX IF NOT EXISTS idx_events_src_at ON events(source_id, at_epoch);

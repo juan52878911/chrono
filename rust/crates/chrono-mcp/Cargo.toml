@@ -1,0 +1,18 @@
+[package]
+name = "chrono-mcp"
+description = "Servidor MCP (stdio) de chrono: expone las consultas a una IA."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono-core = { path = "../chrono-core" }
+chrono-store = { path = "../chrono-store" }
+chrono-metrics = { path = "../chrono-metrics" }
+chrono-source-git = { path = "../chrono-source-git" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# La consulta de `prs` lee la tabla `issues` directamente (no hay
+# `chrono-metrics::prs`); misma versión que `chrono-store`/`chrono-metrics`.
+rusqlite = { version = "0.32", features = ["bundled"] }

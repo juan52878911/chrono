@@ -1,0 +1,13 @@
+[package]
+name = "chrono-classify-rules"
+description = "Clasificador Level-0 de chrono: reglas/taxonomía deterministas sobre eventos."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono-core = { path = "../chrono-core" }
+# Para leer .chrono/config.json (reglas configurables por repo).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

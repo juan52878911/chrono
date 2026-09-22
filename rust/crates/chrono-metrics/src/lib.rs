@@ -7,19 +7,25 @@
 //! Todas las consultas aceptan una ventana temporal `since_epoch: i64`
 //! (segundos UTC; 0 = sin límite) que filtra `events.at_epoch >= since_epoch`.
 
+mod bugs;
 mod churn;
 mod coupling;
 mod hotspots;
 mod owners;
+mod phases;
 mod search;
 mod similar;
+mod ticket;
 
+pub use bugs::{bugs, BugArea, BugCategory, Bugs};
 pub use churn::{churn, ChurnRow};
 pub use coupling::{coupling, Coupled};
 pub use hotspots::{hotspots, Hotspot};
 pub use owners::{owners, Owner};
+pub use phases::{phases, Phase};
 pub use search::{search, SearchHit};
 pub use similar::{similar, SimilarRow};
+pub use ticket::{ticket, Ticket};
 
 /// Error de `chrono-metrics`: no exige un tipo concreto a los llamadores
 /// (CLI, tests...).

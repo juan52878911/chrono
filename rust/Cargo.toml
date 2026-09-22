@@ -5,6 +5,9 @@ members = [
     "crates/chrono-store",
     "crates/chrono-source-git",
     "crates/chrono-metrics",
+    "crates/chrono-classify-rules",
+    "crates/chrono-tracker-github",
+    "crates/chrono-mcp",
     "crates/chrono-cli",
 ]
 

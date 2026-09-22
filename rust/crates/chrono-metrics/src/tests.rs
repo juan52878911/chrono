@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use chrono_core::{Actor, Event, Touch};
+use chrono_core::{Actor, Event, Link, Touch};
 use chrono_store::Store;
 
-use crate::{churn, coupling, hotspots, owners, search, similar};
+use crate::{bugs, churn, coupling, hotspots, owners, phases, search, similar, ticket};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -317,4 +317,188 @@ fn similar_encuentra_eventos_cercanos_y_excluye_los_lejanos() {
     for pair in sims.windows(2) {
         assert!(pair[0].distance <= pair[1].distance);
     }
+}
+
+#[test]
+fn bugs_cuenta_fixes_categorias_y_hot_areas() {
+    let db = TempDb::new("bugs");
+    let mut store = Store::open(db.path()).unwrap();
+    let ana = actor("ana@example.com", "Ana");
+
+    // src/parser/*: dos fixes (b1 categoría "crash", b2 categoría "crash").
+    // src/lexer/*: un fix (b3, categoría "overflow"). b4 no es fix (no cuenta
+    // ni en total_fixes ni en hot_areas). b5 es fix pero cae antes de la
+    // ventana de referencia (since_epoch=1000).
+    let e1 = event(
+        "b1",
+        1000,
+        ana.clone(),
+        "fix parser crash",
+        vec![touch("src/parser/core.rs", 1, 1)],
+        0,
+        false,
+    );
+    let e2 = event(
+        "b2",
+        2000,
+        ana.clone(),
+        "fix parser crash again",
+        vec![touch("src/parser/edge.rs", 1, 0)],
+        1,
+        false,
+    );
+    let e3 = event(
+        "b3",
+        3000,
+        ana.clone(),
+        "fix lexer overflow",
+        vec![touch("src/lexer/scan.rs", 1, 0)],
+        2,
+        false,
+    );
+    let e4 = event(
+        "b4",
+        4000,
+        ana.clone(),
+        "add parser feature",
+        vec![touch("src/parser/core.rs", 5, 0)],
+        3,
+        false,
+    );
+    let e5 = event(
+        "b5",
+        100,
+        ana.clone(),
+        "fix old bug",
+        vec![touch("src/other/old.rs", 1, 0)],
+        4,
+        false,
+    );
+
+    {
+        let mut w = store.writer().unwrap();
+        for ev in [&e1, &e2, &e3, &e4, &e5] {
+            w.add_event(ev).unwrap();
+        }
+        w.commit().unwrap();
+    }
+
+    let conn = store.conn();
+    for (id, is_fix) in [("b1", true), ("b2", true), ("b3", true), ("b4", false), ("b5", true)] {
+        conn.execute(
+            "INSERT INTO labels(event_id, task, label, confidence, source, evidence)
+             VALUES (?1,'is_fix',?2,1.0,'rules','')",
+            rusqlite::params![id, if is_fix { "true" } else { "false" }],
+        )
+        .unwrap();
+    }
+    for (id, cat) in [("b1", "crash"), ("b2", "crash"), ("b3", "overflow")] {
+        conn.execute(
+            "INSERT INTO labels(event_id, task, label, confidence, source, evidence)
+             VALUES (?1,'bug_category',?2,1.0,'rules','')",
+            rusqlite::params![id, cat],
+        )
+        .unwrap();
+    }
+
+    let result = bugs(conn, 1000, 10).unwrap();
+    // b1,b2,b3 son fixes dentro de la ventana; b4 no es fix; b5 cae fuera.
+    assert_eq!(result.total_fixes, 3);
+
+    let crash = result.categories.iter().find(|c| c.category == "crash").unwrap();
+    assert_eq!(crash.fixes, 2);
+    assert!(crash.top_files.contains(&"src/parser/core.rs".to_string()));
+    assert!(crash.top_files.contains(&"src/parser/edge.rs".to_string()));
+
+    let overflow = result.categories.iter().find(|c| c.category == "overflow").unwrap();
+    assert_eq!(overflow.fixes, 1);
+    assert_eq!(overflow.top_files, vec!["src/lexer/scan.rs".to_string()]);
+
+    let parser_area = result.hot_areas.iter().find(|a| a.dir == "src/parser").unwrap();
+    assert_eq!(parser_area.fixes, 2);
+    let lexer_area = result.hot_areas.iter().find(|a| a.dir == "src/lexer").unwrap();
+    assert_eq!(lexer_area.fixes, 1);
+    // "src/other" (b5) queda fuera de la ventana: no debe aparecer.
+    assert!(result.hot_areas.iter().all(|a| a.dir != "src/other"));
+}
+
+#[test]
+fn ticket_junta_commits_ficheros_y_prs() {
+    let db = TempDb::new("ticket");
+    let mut store = Store::open(db.path()).unwrap();
+    let ana = actor("ana@example.com", "Ana");
+
+    let mut e1 =
+        event("t1", 1000, ana.clone(), "work on TICKET-9", vec![touch("src/a.rs", 1, 0)], 0, false);
+    e1.links.push(Link { rel: "ticket".to_string(), target: "TICKET-9".to_string() });
+    let mut e2 = event(
+        "t2",
+        2000,
+        ana.clone(),
+        "more TICKET-9 work",
+        vec![touch("src/b.rs", 1, 0)],
+        1,
+        false,
+    );
+    e2.links.push(Link { rel: "ticket".to_string(), target: "TICKET-9".to_string() });
+    // Sin link a TICKET-9: no debe aparecer ni en commits ni en files.
+    let e3 = event("t3", 3000, ana.clone(), "unrelated", vec![touch("src/c.rs", 1, 0)], 2, false);
+
+    {
+        let mut w = store.writer().unwrap();
+        for ev in [&e1, &e2, &e3] {
+            w.add_event(ev).unwrap();
+        }
+        w.commit().unwrap();
+    }
+
+    let conn = store.conn();
+    conn.execute(
+        "INSERT INTO issues(number, kind, title, state, labels, merged, closed_at, is_bug)
+         VALUES (42, 'pr', 'Fixes TICKET-9 bug', 'MERGED', 'bug', 1, '2026-01-01', 1)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO issues(number, kind, title, state, labels, merged, closed_at, is_bug)
+         VALUES (7, 'pr', 'unrelated PR', 'OPEN', '', 0, '', 0)",
+        [],
+    )
+    .unwrap();
+
+    let t = ticket(conn, "TICKET-9").unwrap();
+    assert_eq!(t.commits, vec!["t1".to_string(), "t2".to_string()]);
+    assert_eq!(t.files, vec!["src/a.rs".to_string(), "src/b.rs".to_string()]);
+    assert_eq!(t.prs, vec![42]);
+}
+
+#[test]
+fn phases_ordena_por_fecha() {
+    let db = TempDb::new("phases");
+    let store = Store::open(db.path()).unwrap();
+    let conn = store.conn();
+    conn.execute(
+        "INSERT INTO markers(source_id, name, at, ref, kind)
+         VALUES ('git:/repo','v2.0','2026-03-01','refv2','tag')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO markers(source_id, name, at, ref, kind)
+         VALUES ('git:/repo','v1.0','2026-01-01','refv1','tag')",
+        [],
+    )
+    .unwrap();
+    // No es un tag: no debe aparecer.
+    conn.execute(
+        "INSERT INTO markers(source_id, name, at, ref, kind)
+         VALUES ('git:/repo','deploy-1','2026-02-01','refd','deploy')",
+        [],
+    )
+    .unwrap();
+
+    let ph = phases(conn).unwrap();
+    assert_eq!(ph.len(), 2);
+    assert_eq!(ph[0].name, "v1.0");
+    assert_eq!(ph[1].name, "v2.0");
 }
