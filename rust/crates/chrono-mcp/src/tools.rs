@@ -346,10 +346,17 @@ fn phases(conn: &Connection) -> Result<Value> {
 }
 
 fn branches(store: &chrono_store::Store, base: &str) -> Result<Value> {
-    let repo_path = store
-        .meta("repo_path")?
-        .filter(|s| !s.is_empty())
-        .ok_or("no repo_path in the index")?;
+    // `meta.repo_path` (fuente primaria git de `init`); si no, la primera
+    // fuente git de `sources` (git añadido con `chrono add`).
+    let repo_path = match store.meta("repo_path")?.filter(|s| !s.is_empty()) {
+        Some(rp) => rp,
+        None => store
+            .list_sources()?
+            .into_iter()
+            .find(|s| s.kind == "git")
+            .map(|s| s.path)
+            .ok_or("no git source in the index")?,
+    };
     let (base, current, rows) = chrono_source_git::branches(Path::new(&repo_path), base)?;
     let items: Vec<Value> = rows
         .iter()

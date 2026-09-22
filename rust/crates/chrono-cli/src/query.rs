@@ -7,6 +7,7 @@ use std::path::Path;
 
 use chrono_store::Store;
 
+use crate::i18n::t;
 use crate::json::Json;
 use crate::timeutil::{epoch_to_iso8601, now_epoch, parse_duration, parse_since};
 
@@ -25,7 +26,11 @@ impl Window {
             None | Some("") => Ok(Window { since_text: None, since_epoch: 0 }),
             Some(s) => match parse_since(s) {
                 Some(e) => Ok(Window { since_text: Some(s.to_string()), since_epoch: e }),
-                None => Err(format!("--since no válido: {s:?} (usa YYYY-MM-DD)").into()),
+                None => Err(t(
+                    format!("invalid --since: {s:?} (use YYYY-MM-DD)"),
+                    format!("--since no válido: {s:?} (usa YYYY-MM-DD)"),
+                )
+                .into()),
             },
         }
     }
@@ -299,15 +304,30 @@ pub fn phases(store: &Store) -> Result<Json> {
     envelope(store, "phases", &w, n, n, Json::obj().set("phases", Json::Arr(items)))
 }
 
+/// Ruta del repo git del índice, para `branches` (que lee git en vivo). Primero
+/// `meta.repo_path` (lo escribe `init` cuando la fuente primaria es git); si no
+/// está (p.ej. el git se añadió con `chrono add`), la primera fuente git de la
+/// tabla `sources`. `None` si el índice no tiene ninguna fuente git.
+pub fn git_repo_path(store: &Store) -> Result<Option<String>> {
+    if let Some(rp) = store.meta("repo_path")?.filter(|s| !s.is_empty()) {
+        return Ok(Some(rp));
+    }
+    Ok(store.list_sources()?.into_iter().find(|s| s.kind == "git").map(|s| s.path))
+}
+
 /// Parsea `--limit` a `usize` (>0), o cae al `default`. Error accionable si no
 /// es un entero positivo.
 fn parse_limit(limit: Option<&str>, default: usize) -> Result<usize> {
     match limit {
         None | Some("") => Ok(default),
         Some(s) => match s.parse::<usize>() {
-            Ok(0) => Err("--limit debe ser > 0".into()),
+            Ok(0) => Err(t("--limit must be > 0", "--limit debe ser > 0").into()),
             Ok(n) => Ok(n),
-            Err(_) => Err(format!("--limit no válido: {s:?} (usa un entero > 0)").into()),
+            Err(_) => Err(t(
+                format!("invalid --limit: {s:?} (use a positive integer)"),
+                format!("--limit no válido: {s:?} (usa un entero > 0)"),
+            )
+            .into()),
         },
     }
 }
@@ -324,14 +344,21 @@ pub fn timeline(
     const DEFAULT_BUCKET: i64 = 3600;
     let bucket_secs = match bucket {
         None | Some("") => DEFAULT_BUCKET,
-        Some(s) => parse_duration(s)
-            .ok_or_else(|| format!("--bucket no válido: {s:?} (usa p.ej. 1h, 30m, 3600)"))?,
+        Some(s) => parse_duration(s).ok_or_else(|| {
+            t(
+                format!("invalid --bucket: {s:?} (e.g. 1h, 30m, 3600)"),
+                format!("--bucket no válido: {s:?} (usa p.ej. 1h, 30m, 3600)"),
+            )
+        })?,
     };
     let until_epoch = match until {
         None | Some("") => 0,
-        Some(s) => {
-            parse_since(s).ok_or_else(|| format!("--until no válido: {s:?} (usa YYYY-MM-DD)"))?
-        }
+        Some(s) => parse_since(s).ok_or_else(|| {
+            t(
+                format!("invalid --until: {s:?} (use YYYY-MM-DD)"),
+                format!("--until no válido: {s:?} (usa YYYY-MM-DD)"),
+            )
+        })?,
     };
     let group_by = match by {
         None | Some("") => None,
@@ -391,8 +418,12 @@ pub fn correlate(store: &Store, id: &str, delta: Option<&str>, limit: Option<&st
     let w = no_window();
     let delta_secs = match delta {
         None | Some("") => DEFAULT_DELTA,
-        Some(s) => parse_duration(s)
-            .ok_or_else(|| format!("--delta no válido: {s:?} (usa p.ej. 1h, 30m, 3600)"))?,
+        Some(s) => parse_duration(s).ok_or_else(|| {
+            t(
+                format!("invalid --delta: {s:?} (e.g. 1h, 30m, 3600)"),
+                format!("--delta no válido: {s:?} (usa p.ej. 1h, 30m, 3600)"),
+            )
+        })?,
     };
     let limit = parse_limit(limit, DEFAULT_LIMIT)?;
     let corr = chrono_metrics::correlate(store.conn(), id, delta_secs, limit)?;

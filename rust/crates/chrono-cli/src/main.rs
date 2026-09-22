@@ -283,11 +283,11 @@ fn main() {
         "prs" => query::prs(&store),
         "branches" => {
             let base = f.pos.get(1).cloned().unwrap_or_default();
-            let repo_path = match store.meta("repo_path") {
-                Ok(Some(rp)) if !rp.is_empty() => rp,
-                Ok(_) => fatal(t(
-                    "no repo_path in the index; run 'chrono init' first",
-                    "no hay repo_path en el índice; ejecuta 'chrono init' primero",
+            let repo_path = match query::git_repo_path(&store) {
+                Ok(Some(rp)) => rp,
+                Ok(None) => fatal(t(
+                    "no git source in the index; 'branches' needs a git repo",
+                    "no hay fuente git en el índice; 'branches' necesita un repo git",
                 )),
                 Err(e) => fatal(e),
             };

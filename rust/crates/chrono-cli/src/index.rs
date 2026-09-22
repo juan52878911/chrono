@@ -64,8 +64,8 @@ pub fn repo_root(start: &Path) -> Result<PathBuf> {
 /// Error accionable cuando ninguna fuente registrada reconoce `path`.
 fn unrecognized_source_err(path: &Path) -> Box<dyn std::error::Error + Send + Sync> {
     t(
-        format!("I don't recognize this source at {}; is it a git repo or a .jsonl file?", path.display()),
-        format!("no reconozco esta fuente en {}; ¿es un repo git o un .jsonl?", path.display()),
+        format!("I don't recognize this source at {}; expected a git repo, a .jsonl/.csv file, or a text log (syslog/nginx).", path.display()),
+        format!("no reconozco esta fuente en {}; se esperaba un repo git, un fichero .jsonl/.csv o un log de texto (syslog/nginx).", path.display()),
     )
     .into()
 }
@@ -146,7 +146,7 @@ pub fn init(start: &Path) -> Result<()> {
 
     eprintln!("{}", t("  building search index…", "  construyendo índice de búsqueda…"));
     store.rebuild_fts()?;
-    finalize(&root, &store)?;
+    finalize(&root, &store, &git_path_if_git(src.kind(), &ingest_path))?;
     write_meta(&store, src, &root)?;
 
     let unit = if src.kind() == "git" { ("commits", "commits") } else { ("events", "eventos") };
@@ -203,7 +203,7 @@ pub fn add(db: &Path, start: &Path) -> Result<()> {
 
     eprintln!("{}", t("  building search index…", "  construyendo índice de búsqueda…"));
     store.rebuild_fts()?;
-    finalize(&index_root, &store)?;
+    finalize(&index_root, &store, &git_path_if_git(src.kind(), &ingest_path))?;
 
     let total = store.list_sources()?.len();
     eprintln!("{}", t(
@@ -251,6 +251,10 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
     let mut total = 0usize;
     let mut synced_any = false;
     let mut matched_any = false;
+    // Solo las fuentes git que REALMENTE reingirieron necesitan refrescar
+    // tamaños/tags/forge; si git no cambió (atajo de HEAD), no se re-tira del
+    // forge de GitHub aunque otra fuente de log sí traiga eventos nuevos.
+    let mut changed_git_paths: Vec<String> = Vec::new();
     for s in &sources {
         if let Some(ref want) = filter_id {
             if &s.id != want {
@@ -297,6 +301,9 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
             Err(e) => return Err(e.into_boxed()),
         };
         store.set_source_watermark(&s.id, &new_wm.value, &now)?;
+        if s.kind == "git" {
+            changed_git_paths.push(s.path.clone());
+        }
         total += n;
         synced_any = true;
     }
@@ -317,7 +324,7 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
 
     eprintln!("{}", t("  building search index…", "  construyendo índice de búsqueda…"));
     store.rebuild_fts()?;
-    finalize(&index_root, &store)?;
+    finalize(&index_root, &store, &changed_git_paths)?;
     eprintln!("{}", t(format!("sync: {total} new events"), format!("sync: {total} eventos nuevos")));
     Ok(())
 }
@@ -420,12 +427,12 @@ fn ingest_source(
             w.add_labels(&ev.id, &labels)?;
             count += 1;
             if count.is_multiple_of(PROGRESS_EVERY) {
-                let _ = write!(stderr, "\r  {count} commits…");
+                let _ = write!(stderr, "\r  {count}…");
                 let _ = stderr.flush();
             }
         }
         if count >= PROGRESS_EVERY {
-            let _ = writeln!(stderr, "\r  {count} commits");
+            let _ = writeln!(stderr, "\r  {count}");
         }
         w.commit()?;
     }
@@ -445,11 +452,8 @@ fn ingest_source(
 /// (`deleted`) del último repo pisaría al del anterior (las entidades `file`
 /// son globales, no por fuente). El caso soportado es 1 git + N fuentes de log
 /// (cuyas entidades no son `type='file'`, así que no se ven afectadas).
-fn finalize(index_root: &Path, store: &Store) -> Result<()> {
-    let git_paths: Vec<String> =
-        store.list_sources()?.into_iter().filter(|s| s.kind == "git").map(|s| s.path).collect();
-
-    for path in &git_paths {
+fn finalize(index_root: &Path, store: &Store, git_paths: &[String]) -> Result<()> {
+    for path in git_paths {
         finalize_git_sizes_and_deletions(Path::new(path), store)?;
         finalize_git_tags(Path::new(path), store)?;
     }
@@ -483,13 +487,23 @@ fn finalize(index_root: &Path, store: &Store) -> Result<()> {
 
     if !git_paths.is_empty() {
         let cfg = chrono_classify_rules::load(index_root);
-        for path in &git_paths {
+        for path in git_paths {
             finalize_git_forge(Path::new(path), store, &cfg.bug_labels)?;
         }
     }
 
     store.optimize()?;
     Ok(())
+}
+
+/// Helper: `vec![ruta]` si la fuente es git, `vec![]` si no. Para pasar a
+/// [`finalize`] las rutas git que hay que refrescar (tamaños/tags/forge).
+fn git_path_if_git(kind: &str, ingest_path: &Path) -> Vec<String> {
+    if kind == "git" {
+        vec![ingest_path.to_string_lossy().into_owned()]
+    } else {
+        Vec::new()
+    }
 }
 
 /// SOLO-git: borrados (toda entidad `file` que no esté en HEAD) y tamaños
@@ -522,7 +536,11 @@ fn finalize_git_sizes_and_deletions(root: &Path, store: &Store) -> Result<()> {
             oid_set.insert((*oid).to_string());
         }
     }
-    let oids: Vec<String> = oid_set.into_iter().collect();
+    // Ordenados: el orden de inserción en `blob_lines` es entonces
+    // determinista (un `HashSet` no lo garantiza), así el `.db` es
+    // byte-idéntico entre dos ingestas iguales, no solo en contenido.
+    let mut oids: Vec<String> = oid_set.into_iter().collect();
+    oids.sort_unstable();
     let mut cached = store.get_blob_lines(&oids)?;
     let missing: Vec<String> = oids.iter().filter(|o| !cached.contains_key(*o)).cloned().collect();
     if !missing.is_empty() {
