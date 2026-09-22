@@ -19,4 +19,5 @@ chrono-source-git = { path = "../chrono-source-git" }
 chrono-metrics = { path = "../chrono-metrics" }
 chrono-classify-rules = { path = "../chrono-classify-rules" }
 chrono-tracker-github = { path = "../chrono-tracker-github" }
+chrono-source-jsonl = { path = "../chrono-source-jsonl" }
 chrono-mcp = { path = "../chrono-mcp" }

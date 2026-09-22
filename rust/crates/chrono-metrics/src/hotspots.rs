@@ -20,14 +20,18 @@ pub struct Hotspot {
 /// Ficheros más cambiados ponderados por `entities.size`. Filtra
 /// `entities.type='file'`, `deleted=0`, `excluded=0` (igual que el Go).
 pub fn hotspots(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Vec<Hotspot>> {
+    // No se filtra por `type='file'`: en git todas las entidades son ficheros
+    // (idéntico), pero así el adaptador de logs (entity_type='log-source') u
+    // otras trazas también rankean. `MAX(size,1)` = fallback a frecuencia
+    // cuando no hay tamaño (logs), sin alterar el top de git (que sí lo tiene).
     let mut stmt = conn.prepare(
         "SELECT e.key, COUNT(*) AS changes, e.size
          FROM touches t
          JOIN events ev ON ev.id = t.event_id
          JOIN entities e ON e.id = t.entity_id
-         WHERE e.type = 'file' AND e.deleted = 0 AND e.excluded = 0 AND ev.at_epoch >= ?1
+         WHERE e.deleted = 0 AND e.excluded = 0 AND ev.at_epoch >= ?1
          GROUP BY e.id
-         ORDER BY (CAST(COUNT(*) AS REAL) * e.size) DESC
+         ORDER BY (CAST(COUNT(*) AS REAL) * MAX(e.size, 1)) DESC
          LIMIT ?2",
     )?;
     let rows = stmt.query_map(params![since_epoch, limit as i64], |r| {
@@ -38,7 +42,7 @@ pub fn hotspots(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Vec
     let mut max_raw = 0f64;
     for row in rows {
         let (entity, changes, size) = row?;
-        let raw = changes as f64 * size as f64;
+        let raw = changes as f64 * size.max(1) as f64;
         if raw > max_raw {
             max_raw = raw;
         }
