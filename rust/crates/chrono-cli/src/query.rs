@@ -340,8 +340,11 @@ pub fn timeline(
     until: Option<&str>,
     bucket: Option<&str>,
     by: Option<&str>,
+    limit: Option<&str>,
 ) -> Result<Json> {
     const DEFAULT_BUCKET: i64 = 3600;
+    const DEFAULT_LIMIT: usize = 500;
+    let limit = parse_limit(limit, DEFAULT_LIMIT)?;
     let bucket_secs = match bucket {
         None | Some("") => DEFAULT_BUCKET,
         Some(s) => parse_duration(s).ok_or_else(|| {
@@ -364,7 +367,7 @@ pub fn timeline(
         None | Some("") => None,
         Some(b) => Some(b),
     };
-    let rows = chrono_metrics::timeline(store.conn(), w.since_epoch, until_epoch, bucket_secs, group_by)?;
+    let rows = chrono_metrics::timeline(store.conn(), w.since_epoch, until_epoch, bucket_secs, group_by, limit)?;
     let items: Vec<Json> = rows
         .iter()
         .map(|b| {
@@ -382,7 +385,7 @@ pub fn timeline(
         .set("by", group_by.map_or(Json::Null, Json::str))
         .set("until", until_json)
         .set("buckets", Json::Arr(items));
-    envelope(store, "timeline", w, n, n, result)
+    envelope(store, "timeline", w, limit, n, result)
 }
 
 /// `top <dim>`: valores más frecuentes de una dimensión.

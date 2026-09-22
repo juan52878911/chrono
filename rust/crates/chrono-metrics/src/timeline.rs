@@ -29,12 +29,18 @@ pub struct TimelineBucket {
 ///
 /// Orden determinista: por `bucket_epoch` ASC, luego `key` ASC. Solo cuenta
 /// eventos con `at_epoch > 0` (los eventos sin tiempo válido no entran).
+///
+/// `limit` acota el nº de filas devueltas (la salida es "bounded for an AI"):
+/// se aplica DESPUÉS del orden, así que se conservan los buckets más antiguos;
+/// para acotar por tiempo usa `since_epoch`/`until_epoch`. `limit == 0` = sin
+/// tope (para llamadas internas que quieran todo).
 pub fn timeline(
     conn: &Connection,
     since_epoch: i64,
     until_epoch: i64,
     bucket_secs: i64,
     group_by: Option<&str>,
+    limit: usize,
 ) -> Result<Vec<TimelineBucket>> {
     if bucket_secs <= 0 {
         return Err("timeline: bucket_secs debe ser > 0".into());
@@ -66,11 +72,14 @@ pub fn timeline(
                AND (?3 = 0 OR at_epoch < ?3)
          )
          GROUP BY bucket_epoch, key
-         ORDER BY bucket_epoch ASC, key ASC"
+         ORDER BY bucket_epoch ASC, key ASC
+         LIMIT ?4"
     );
 
+    // `limit == 0` -> sin tope (SQLite trata LIMIT -1 como ilimitado).
+    let sql_limit: i64 = if limit == 0 { -1 } else { limit as i64 };
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![bucket_secs, since_epoch, until_epoch], |r| {
+    let rows = stmt.query_map(params![bucket_secs, since_epoch, until_epoch, sql_limit], |r| {
         Ok(TimelineBucket { bucket_epoch: r.get(0)?, key: r.get(1)?, count: r.get(2)? })
     })?;
 
@@ -153,7 +162,7 @@ mod tests {
             w.commit().unwrap();
         }
 
-        let buckets = timeline(store.conn(), 0, 0, 100, None).unwrap();
+        let buckets = timeline(store.conn(), 0, 0, 100, None, 0).unwrap();
         assert_eq!(
             buckets,
             vec![
@@ -183,7 +192,7 @@ mod tests {
         }
         let conn = store.conn();
 
-        let by_level = timeline(conn, 0, 0, 100, Some("level")).unwrap();
+        let by_level = timeline(conn, 0, 0, 100, Some("level"), 0).unwrap();
         assert_eq!(
             by_level,
             vec![
@@ -193,7 +202,7 @@ mod tests {
             ]
         );
 
-        let by_kind = timeline(conn, 0, 0, 100, Some("kind")).unwrap();
+        let by_kind = timeline(conn, 0, 0, 100, Some("kind"), 0).unwrap();
         assert_eq!(
             by_kind,
             vec![
@@ -224,12 +233,12 @@ mod tests {
         let conn = store.conn();
 
         // [100, 250): incluye e2 (150), excluye e1 (50) y e3 (250, límite excluyente).
-        let windowed = timeline(conn, 100, 250, 1000, None).unwrap();
+        let windowed = timeline(conn, 100, 250, 1000, None, 0).unwrap();
         let total: i64 = windowed.iter().map(|b| b.count).sum();
         assert_eq!(total, 1);
 
         // Sin límites: entran e1, e2, e3 (3), e0 queda fuera por at_epoch<=0.
-        let unbounded = timeline(conn, 0, 0, 1000, None).unwrap();
+        let unbounded = timeline(conn, 0, 0, 1000, None, 0).unwrap();
         let total_unbounded: i64 = unbounded.iter().map(|b| b.count).sum();
         assert_eq!(total_unbounded, 3);
     }
@@ -240,8 +249,36 @@ mod tests {
         let store = Store::open(db.path()).unwrap();
         let conn = store.conn();
 
-        assert!(timeline(conn, 0, 0, 0, None).is_err());
-        assert!(timeline(conn, 0, 0, -10, None).is_err());
-        assert!(timeline(conn, 0, 0, 100, Some("actor")).is_err());
+        assert!(timeline(conn, 0, 0, 0, None, 0).is_err());
+        assert!(timeline(conn, 0, 0, -10, None, 0).is_err());
+        assert!(timeline(conn, 0, 0, 100, Some("actor"), 0).is_err());
+    }
+
+    #[test]
+    fn timeline_limit_acota_conservando_los_buckets_mas_antiguos() {
+        let db = TempDb::new("limit");
+        let mut store = Store::open(db.path()).unwrap();
+        let evs = [
+            mk_event("e1", "src", "commit", 5, ""),   // bucket 0
+            mk_event("e2", "src", "commit", 105, ""), // bucket 100
+            mk_event("e3", "src", "commit", 205, ""), // bucket 200
+        ];
+        {
+            let mut w = store.writer().unwrap();
+            for e in &evs {
+                w.add_event(e).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        let conn = store.conn();
+
+        // limit 2 -> los dos buckets más antiguos (0 y 100), no el 200.
+        let capped = timeline(conn, 0, 0, 100, None, 2).unwrap();
+        assert_eq!(capped.len(), 2);
+        assert_eq!(capped[0].bucket_epoch, 0);
+        assert_eq!(capped[1].bucket_epoch, 100);
+
+        // limit 0 -> sin tope (los tres).
+        assert_eq!(timeline(conn, 0, 0, 100, None, 0).unwrap().len(), 3);
     }
 }

@@ -117,7 +117,8 @@ pub fn tool_defs() -> Vec<Value> {
                 "since": since_prop(),
                 "until": str_prop("Fin de la ventana ISO (opcional)"),
                 "bucket_secs": json!({"type": "integer", "description": "Tamaño de bucket en segundos (por defecto 3600)"}),
-                "by": str_prop("Desglose: level | kind (opcional)")
+                "by": str_prop("Desglose: level | kind (opcional)"),
+                "limit": json!({"type": "integer", "description": "Máximo de buckets (por defecto 500)"})
             }),
             &[],
         ),
@@ -210,7 +211,8 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
             let until = args.get("until").and_then(Value::as_str).unwrap_or("");
             let bucket_secs = arg_i64(args, "bucket_secs", 3600).max(1);
             let by = args.get("by").and_then(Value::as_str).filter(|s| !s.is_empty());
-            timeline(conn, since_epoch, since_to_epoch(until), bucket_secs, by)?
+            let limit = arg_i64(args, "limit", 500).max(1) as usize;
+            timeline(conn, since_epoch, since_to_epoch(until), bucket_secs, by, limit)?
         }
         "top" => {
             let dim = arg_str(args, "dim")?;
@@ -423,8 +425,9 @@ fn timeline(
     until_epoch: i64,
     bucket_secs: i64,
     by: Option<&str>,
+    limit: usize,
 ) -> Result<Value> {
-    let rows = chrono_metrics::timeline(conn, since_epoch, until_epoch, bucket_secs, by)?;
+    let rows = chrono_metrics::timeline(conn, since_epoch, until_epoch, bucket_secs, by, limit)?;
     let buckets: Vec<Value> = rows
         .iter()
         .map(|b| json!({"bucket_epoch": b.bucket_epoch, "key": b.key, "count": b.count}))

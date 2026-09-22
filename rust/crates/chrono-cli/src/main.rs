@@ -302,7 +302,7 @@ fn main() {
             let id = require_pos(&f, "similar needs an <id>", "similar necesita un <id>");
             query::similar(&store, &id)
         }
-        "timeline" => query::timeline(&store, &window, f.until.as_deref(), f.bucket.as_deref(), f.by.as_deref()),
+        "timeline" => query::timeline(&store, &window, f.until.as_deref(), f.bucket.as_deref(), f.by.as_deref(), f.limit.as_deref()),
         "top" => {
             let dim = require_pos(
                 &f,

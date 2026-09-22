@@ -2,8 +2,16 @@
 //! `chrono-source-git` tiene su propia copia privada de `epoch_to_iso8601`;
 //! se duplica aquí (15 líneas) antes que ampliar su API pública.
 
-/// Segundos UTC desde epoch, ahora.
+/// Segundos UTC desde epoch, ahora. Si `CHRONO_NOW` está fijado a un entero de
+/// segundos epoch, se usa ese valor: permite ingestas reproducibles byte a byte
+/// (el `.db` guarda `sources.last_sync_at`, que si no varía con el reloj). Útil
+/// para tests de determinismo y builds reproducibles.
 pub fn now_epoch() -> i64 {
+    if let Ok(v) = std::env::var("CHRONO_NOW") {
+        if let Ok(secs) = v.trim().parse::<i64>() {
+            return secs;
+        }
+    }
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
