@@ -17,8 +17,14 @@ pub struct SimilarRow {
 /// (`(a ^ b).count_ones()`). Escaneo en memoria (igual que el Go): a esta
 /// escala es aceptable. Orden asc por distancia, top `limit`.
 pub fn similar(conn: &Connection, id: &str, max_dist: u32, limit: usize) -> Result<Vec<SimilarRow>> {
-    let target: i64 =
-        conn.query_row("SELECT simhash FROM events WHERE id = ?1", params![id], |r| r.get(0))?;
+    // Resuelve por prefijo (igual que `sha LIKE ?||'%'` en el Go): la CLI y
+    // los ejemplos de `bugs`/`branches` usan ids cortos de 8 caracteres.
+    let (id, target): (String, i64) = conn.query_row(
+        "SELECT id, simhash FROM events WHERE id LIKE ?1||'%' ORDER BY id LIMIT 1",
+        params![id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let id = id.as_str();
     let target = target as u64;
 
     let mut stmt = conn.prepare("SELECT id, title, simhash FROM events WHERE id != ?1")?;

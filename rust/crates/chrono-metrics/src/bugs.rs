@@ -65,7 +65,8 @@ pub fn bugs(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Bugs> {
             "SELECT ev.id, ev.at_epoch
              FROM labels l
              JOIN events ev ON ev.id = l.event_id
-             WHERE l.task = 'is_fix' AND l.label = 'true' AND ev.at_epoch >= ?1",
+             WHERE l.task = 'is_fix' AND l.label = 'true' AND ev.is_bulk = 0
+               AND ev.at_epoch >= ?1",
         )?;
         let rows = stmt.query_map(params![since_epoch], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
@@ -91,7 +92,8 @@ pub fn bugs(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Bugs> {
              JOIN events ev ON ev.id = l.event_id
              JOIN touches t ON t.event_id = ev.id
              JOIN entities e ON e.id = t.entity_id
-             WHERE l.task = 'is_fix' AND l.label = 'true' AND ev.at_epoch >= ?1
+             WHERE l.task = 'is_fix' AND l.label = 'true' AND ev.is_bulk = 0
+               AND e.excluded = 0 AND ev.at_epoch >= ?1
              ORDER BY ev.id",
         )?;
         let rows = stmt.query_map(params![since_epoch], |r| {
@@ -141,7 +143,7 @@ pub fn bugs(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Bugs> {
              FROM labels l
              JOIN events ev ON ev.id = l.event_id
              JOIN labels lf ON lf.event_id = l.event_id AND lf.task = 'is_fix' AND lf.label = 'true'
-             WHERE l.task = 'bug_category' AND ev.at_epoch >= ?1
+             WHERE l.task = 'bug_category' AND ev.is_bulk = 0 AND ev.at_epoch >= ?1
              ORDER BY l.event_id",
         )?;
         let rows = stmt.query_map(params![since_epoch], |r| {
@@ -162,7 +164,8 @@ pub fn bugs(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Bugs> {
              JOIN labels lf ON lf.event_id = l.event_id AND lf.task = 'is_fix' AND lf.label = 'true'
              JOIN touches t ON t.event_id = ev.id
              JOIN entities e ON e.id = t.entity_id
-             WHERE l.task = 'bug_category' AND ev.at_epoch >= ?1",
+             WHERE l.task = 'bug_category' AND ev.is_bulk = 0 AND e.excluded = 0
+               AND ev.at_epoch >= ?1",
         )?;
         let rows = stmt.query_map(params![since_epoch], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))

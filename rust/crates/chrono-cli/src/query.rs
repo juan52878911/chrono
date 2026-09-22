@@ -253,6 +253,7 @@ pub fn prs(store: &Store) -> Result<Json> {
     let mut stmt = conn.prepare(
         "SELECT number, kind, title, state, labels, merged, is_bug
          FROM issues
+         WHERE kind = 'pr'
          ORDER BY number DESC
          LIMIT ?1",
     )?;

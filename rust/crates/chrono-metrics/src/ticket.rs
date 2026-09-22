@@ -49,7 +49,8 @@ pub fn ticket(conn: &Connection, id: &str) -> Result<Ticket> {
     let mut stmt = conn.prepare(
         "SELECT number
          FROM issues
-         WHERE kind = 'pr' AND (title LIKE '%'||?1||'%' OR labels LIKE '%'||?1||'%')
+         WHERE kind = 'pr'
+           AND (('#'||number) = ?1 OR title LIKE '%'||?1||'%' OR labels LIKE '%'||?1||'%')
          ORDER BY number",
     )?;
     let rows = stmt.query_map(params![id], |r| r.get::<_, i64>(0))?;
