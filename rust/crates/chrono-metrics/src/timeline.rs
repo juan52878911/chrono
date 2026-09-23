@@ -43,7 +43,7 @@ pub fn timeline(
     limit: usize,
 ) -> Result<Vec<TimelineBucket>> {
     if bucket_secs <= 0 {
-        return Err("timeline: bucket_secs debe ser > 0".into());
+        return Err("timeline: bucket_secs must be > 0".into());
     }
     // Columna nativa para el desglose; "" (literal SQL) cuenta todo junto.
     // Solo se acepta un allowlist fijo de dos valores, así que interpolar el
@@ -54,7 +54,7 @@ pub fn timeline(
         Some("level") => "level",
         Some("kind") => "kind",
         Some(other) => {
-            return Err(format!("timeline: group_by no soportado: {other}").into());
+            return Err(format!("timeline: unsupported group_by: {other}").into());
         }
     };
 

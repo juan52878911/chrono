@@ -47,7 +47,7 @@ fn valid_attr_key(key: &str) -> bool {
 pub fn top(conn: &Connection, dim: &str, since_epoch: i64, limit: usize) -> Result<Vec<TopValue>> {
     if let Some(key) = dim.strip_prefix("attr:") {
         if !valid_attr_key(key) {
-            return Err(format!("top: clave de attr inválida: {key:?}").into());
+            return Err(format!("top: invalid attr key: {key:?}").into());
         }
         let path = format!("$.{key}");
         let mut stmt = conn.prepare(
@@ -70,13 +70,16 @@ pub fn top(conn: &Connection, dim: &str, since_epoch: i64, limit: usize) -> Resu
     let (from_clause, value_expr) = match dim {
         "level" => ("events", "events.level"),
         "kind" => ("events", "events.kind"),
-        "actor" => ("events JOIN actors ON actors.id = events.actor_id", "actors.key"),
+        "actor" => (
+            "events JOIN actors ON actors.id = events.actor_id",
+            "COALESCE(actors.display_name, actors.key)",
+        ),
         "entity" => (
             "touches JOIN events ON events.id = touches.event_id \
              JOIN entities ON entities.id = touches.entity_id",
             "entities.key",
         ),
-        other => return Err(format!("top: dimensión no soportada: {other}").into()),
+        other => return Err(format!("top: unsupported dimension: {other}").into()),
     };
 
     let sql = format!(

@@ -43,7 +43,7 @@ pub fn correlate(
     limit: usize,
 ) -> Result<Correlation> {
     if delta_secs <= 0 {
-        return Err("correlate: delta_secs debe ser > 0".into());
+        return Err("correlate: delta_secs must be > 0".into());
     }
 
     let anchor_row = conn
@@ -65,7 +65,7 @@ pub fn correlate(
         .optional()?;
 
     let (id, source_id, kind, at, at_epoch, level, title) = anchor_row
-        .ok_or_else(|| format!("correlate: evento no encontrado: {event_id}"))?;
+        .ok_or_else(|| format!("correlate: event not found: {event_id}"))?;
 
     let anchor = EventRef { id, source_id, kind, at, at_epoch, level, title, delta_secs: 0 };
 
