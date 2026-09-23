@@ -427,6 +427,15 @@ fn ingest_source(
     // de textlog…), resueltas por ruta/nombre de la fuente. Se toman antes de
     // mover `cfg` al clasificador.
     let source_cfg = SourceConfig { options: cfg.source_options_for(path) };
+    // Caps de ingesta (0 = sin cap; por defecto no alteran nada → paridad).
+    let body_max_bytes = cfg.body_max_bytes;
+    let max_events = cfg.max_events_per_source;
+    if body_max_bytes > 0 {
+        let _ = store.set_meta("body_max_bytes", &body_max_bytes.to_string());
+    }
+    if max_events > 0 {
+        let _ = store.set_meta("max_events_per_source", &max_events.to_string());
+    }
     let classifier = RulesClassifier::new(cfg);
 
     let mut cur: Box<dyn Cursor> = match source.open(path, watermark, &source_cfg) {
@@ -440,11 +449,19 @@ fn ingest_source(
     {
         let mut w = store.writer()?;
         loop {
-            let ev = match cur.next() {
+            let mut ev = match cur.next() {
                 Ok(Some(ev)) => ev,
                 Ok(None) => break,
                 Err(e) => return Err(IngestError::Other(e.to_string().into())),
             };
+            // Cap de body (declarado en meta): recorte en frontera de carácter.
+            if body_max_bytes > 0 && ev.body.len() > body_max_bytes {
+                let mut cut = body_max_bytes;
+                while cut > 0 && !ev.body.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                ev.body.truncate(cut);
+            }
             w.add_event(&ev)?;
             let labels = classifier.classify(&ev);
             w.add_labels(&ev.id, &labels)?;
@@ -452,6 +469,10 @@ fn ingest_source(
             if count.is_multiple_of(PROGRESS_EVERY) {
                 let _ = write!(stderr, "\r  {count}…");
                 let _ = stderr.flush();
+            }
+            // Cap de eventos por fuente (declarado en meta).
+            if max_events > 0 && count >= max_events {
+                break;
             }
         }
         if count >= PROGRESS_EVERY {

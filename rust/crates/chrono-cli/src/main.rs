@@ -58,6 +58,9 @@ Log-native (multi-source):
   patterns             Most frequent log templates (Drain-light clustering).
   correlate <id>       Events from OTHER sources within ±Δt of an event (--delta 1h).
 
+Diagnostics:
+  bench                Measure query latencies + index stats on this index.
+
 Integration:
   mcp                  MCP server (wired separately).
 
@@ -103,6 +106,9 @@ Log-native (multi-fuente):
   top <dim>            Valores más frecuentes de una dimensión (level|kind|actor|entity|attr:<c>).
   patterns             Plantillas de log más frecuentes (clustering Drain-light).
   correlate <id>       Eventos de OTRAS fuentes en ±Δt de un evento (--delta 1h).
+
+Diagnóstico:
+  bench                Mide latencias de consulta + estadísticas del índice.
 
 Integración:
   mcp                  Servidor MCP (se cablea aparte).
@@ -336,6 +342,7 @@ fn main() {
             query::top(&store, &window, &dim, f.limit.as_deref())
         }
         "patterns" => query::patterns(&store, &window, f.limit.as_deref()),
+        "bench" => query::bench(&store, &db),
         "correlate" => {
             let id = require_pos(&f, "correlate needs an <id>", "correlate necesita un <id>");
             query::correlate(&store, &id, f.delta.as_deref(), f.limit.as_deref())

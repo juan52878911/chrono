@@ -63,6 +63,13 @@ pub struct Config {
     /// cual a `SourceConfig.options` del adaptador. Vacío por defecto (los
     /// adaptadores autodetectan). Ver [`Config::source_options_for`].
     pub source_options: BTreeMap<String, BTreeMap<String, String>>,
+    /// Cap de bytes del `body` de cada evento en ingesta (0 = sin cap, por
+    /// defecto: preserva la paridad). Protege contra mensajes/payloads enormes.
+    /// Si >0, el efecto se declara en `meta` (`body_max_bytes`).
+    pub body_max_bytes: usize,
+    /// Cap de eventos ingeridos por fuente (0 = sin cap, por defecto). Si >0,
+    /// se corta la ingesta y se declara en `meta` (`max_events_per_source`).
+    pub max_events_per_source: usize,
 }
 
 impl Default for Config {
@@ -247,6 +254,8 @@ impl Config {
                 ),
             ]),
             source_options: BTreeMap::new(),
+            body_max_bytes: 0,
+            max_events_per_source: 0,
         }
     }
 

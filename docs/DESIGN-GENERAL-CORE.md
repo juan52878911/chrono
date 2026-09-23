@@ -242,7 +242,7 @@ adaptadores → JEV → escala. Cada fase verifica paridad contra el Go actual (
 | **R2 · Resto de consultas + MCP + i18n** | bugs(rules)/tickets/prs/branches/search/similar/phases; servidor MCP; i18n EN/ES; contrato v2 `entity`/`id`; paridad total con Go → sustituye al binario Go. | pendiente |
 | **R3 · Adaptadores + multi-fuente + rollups** | **hecho:** jsonl, **csv**, **textlog** (syslog/nginx sin `regex`), **changelog** (Keep a Changelog → `release`); **`sources` poblada + `chrono add` + `sync` multi-fuente** (paridad git verificada; divergencia por longitud+hash de prefijo); `SourceConfig.options` desde `.chrono/config.json`; consultas log-native **`timeline`/`top`/`correlate`** (leen eventos crudos) en metrics + CLI + MCP. **templates+rollups** (`chrono patterns`, Drain-light determinista, schema v3). **pendiente:** journald (adaptador de log del sistema, adaptable al SO); `event_dims`; `events`. | casi completo |
 | **R4 · JEV Level-1** | crate `chrono-jev` (features+inferencia i16), `chrono-jev-train`, dataset, `JEV-EVAL.md`, opt-in. | pendiente |
-| **R5 · Escala medida** | bandas SimHash; `bench`; caps reales; paginación `gh` (cap 1000 pendiente). | pendiente |
+| **R5 · Escala medida** | **hecho:** `chrono bench` (latencias + stats), caps reales (`body_max_bytes`/`max_events_per_source`, declarados en `meta`, 0=sin cap). **pendiente:** bandas SimHash (solo >1M eventos, requiere fixture para verificar); `gh --limit` configurable. | parcial |
 
 ---
 

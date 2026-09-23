@@ -332,6 +332,61 @@ fn parse_limit(limit: Option<&str>, default: usize) -> Result<usize> {
     }
 }
 
+/// `bench`: mide la latencia de las consultas sobre el índice ACTUAL y reporta
+/// estadísticas (nº de eventos/entidades/fuentes, tamaño del `.db`). No
+/// reingiere: responde "¿es chrono rápido en MI índice?". Determinista en
+/// forma (los tiempos varían, claro).
+pub fn bench(store: &Store, db_path: &Path) -> Result<Json> {
+    use std::time::Instant;
+    let w = no_window();
+    let conn = store.conn();
+
+    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
+    let events = count("SELECT COUNT(*) FROM events");
+    let entities = count("SELECT COUNT(*) FROM entities");
+    let sources = count("SELECT COUNT(*) FROM sources");
+    let templates = count("SELECT COUNT(*) FROM templates");
+    let db_bytes = std::fs::metadata(db_path).map(|m| m.len() as i64).unwrap_or(0);
+
+    // Un id de evento cualquiera para `similar` (si hay eventos).
+    let sample_id: Option<String> =
+        conn.query_row("SELECT id FROM events LIMIT 1", [], |r| r.get(0)).ok();
+
+    // (nombre, closure que ejecuta la consulta e ignora el resultado).
+    let mut timings = Vec::new();
+    let mut time_it = |name: &str, f: &mut dyn FnMut() -> bool| {
+        let t = Instant::now();
+        let ok = f();
+        let us = t.elapsed().as_micros() as i64;
+        timings.push(
+            Json::obj()
+                .set("query", Json::str(name))
+                .set("micros", Json::Int(us))
+                .set("ok", Json::Bool(ok)),
+        );
+    };
+
+    time_it("hotspots", &mut || chrono_metrics::hotspots(conn, 0, 25, false).is_ok());
+    time_it("churn", &mut || chrono_metrics::churn(conn, 0, 25, false).is_ok());
+    time_it("bugs", &mut || chrono_metrics::bugs(conn, 0, 15).is_ok());
+    time_it("timeline", &mut || chrono_metrics::timeline(conn, 0, 0, 3600, None, 500).is_ok());
+    time_it("top_kind", &mut || chrono_metrics::top(conn, "kind", 0, 25).is_ok());
+    time_it("patterns", &mut || chrono_metrics::patterns(conn, 0, 25).is_ok());
+    time_it("search", &mut || chrono_metrics::search(conn, "fix", 25).is_ok());
+    if let Some(id) = &sample_id {
+        time_it("similar", &mut || chrono_metrics::similar(conn, id, 4, 15).is_ok());
+    }
+
+    let stats = Json::obj()
+        .set("events", Json::Int(events))
+        .set("entities", Json::Int(entities))
+        .set("sources", Json::Int(sources))
+        .set("templates", Json::Int(templates))
+        .set("db_bytes", Json::Int(db_bytes));
+    let result = Json::obj().set("stats", stats).set("timings", Json::Arr(timings));
+    envelope(store, "bench", &w, 1, 1, result)
+}
+
 /// `patterns`: plantillas de log más frecuentes (Drain-light, desde rollups).
 pub fn patterns(store: &Store, w: &Window, limit: Option<&str>) -> Result<Json> {
     const DEFAULT_LIMIT: usize = 25;
