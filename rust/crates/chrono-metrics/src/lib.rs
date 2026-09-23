@@ -37,5 +37,18 @@ pub use top::{top, TopValue};
 /// (CLI, tests...).
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+/// Operador SQL de alcance de símbolos (S1). Por defecto las consultas de
+/// entidades EXCLUYEN símbolos (`type != 'symbol'`), para no mezclar el touch
+/// del fichero con el del símbolo; `--by symbol` (symbols_only=true) invierte
+/// el filtro a SOLO símbolos (`type = 'symbol'`). Se compone como
+/// `<alias>.type {op} 'symbol'`; literal fijo, no llega texto de usuario al SQL.
+pub(crate) fn symbol_type_op(symbols_only: bool) -> &'static str {
+    if symbols_only {
+        "="
+    } else {
+        "!="
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -16,8 +16,9 @@ pub struct ChurnRow {
 /// Suma de `added`/`deleted` (leídos de `touches.attrs` JSON) por entity en
 /// la ventana, top `limit`. Ignora binarios: si `added`/`deleted` están
 /// ausentes o son negativos, se tratan como 0 (igual que `MAX(x,0)` en el Go).
-pub fn churn(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Vec<ChurnRow>> {
-    let mut stmt = conn.prepare(
+pub fn churn(conn: &Connection, since_epoch: i64, limit: usize, symbols_only: bool) -> Result<Vec<ChurnRow>> {
+    let op = crate::symbol_type_op(symbols_only);
+    let mut stmt = conn.prepare(&format!(
         // Alias `a`/`d` (como el Go), NO `added`/`deleted`: en el ORDER BY,
         // `deleted` resolvería a la columna `entities.deleted` (siempre 0 aquí)
         // en vez de al alias, y el orden quedaría solo por `added`.
@@ -27,11 +28,11 @@ pub fn churn(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Vec<Ch
          FROM touches t
          JOIN events ev ON ev.id = t.event_id
          JOIN entities e ON e.id = t.entity_id
-         WHERE e.excluded = 0 AND ev.at_epoch >= ?1
+         WHERE e.excluded = 0 AND e.type {op} 'symbol' AND ev.at_epoch >= ?1
          GROUP BY e.id
          ORDER BY (a + d) DESC
          LIMIT ?2",
-    )?;
+    ))?;
     let rows = stmt.query_map(params![since_epoch, limit as i64], |r| {
         Ok(ChurnRow { entity: r.get(0)?, added: r.get(1)?, deleted: r.get(2)? })
     })?;

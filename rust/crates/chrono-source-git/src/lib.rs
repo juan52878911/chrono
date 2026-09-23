@@ -18,11 +18,13 @@ mod branches;
 mod cursor;
 mod gitutil;
 mod parse;
+mod show;
 mod simhash;
 mod timeutil;
 
 pub use branches::{branches, Branch, BranchAuthor, BranchTip};
 pub use gitutil::{blob_lines, commit_exists, git_version, head_sha, is_shallow, ls_tree, Result};
+pub use show::{show, Show};
 
 use chrono_core::{CoreError, Result as CoreResult, Source, SourceConfig, Watermark};
 use cursor::GitCursor;

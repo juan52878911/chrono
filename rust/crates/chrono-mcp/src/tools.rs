@@ -243,7 +243,7 @@ fn arg_i64(args: &Value, key: &str, default: i64) -> i64 {
 }
 
 fn hotspots(conn: &Connection, since_epoch: i64) -> Result<Value> {
-    let rows = chrono_metrics::hotspots(conn, since_epoch, HOTSPOTS_LIMIT)?;
+    let rows = chrono_metrics::hotspots(conn, since_epoch, HOTSPOTS_LIMIT, false)?;
     let items: Vec<Value> = rows
         .iter()
         .map(
@@ -254,13 +254,7 @@ fn hotspots(conn: &Connection, since_epoch: i64) -> Result<Value> {
 }
 
 fn coupling(conn: &Connection, entity: &str, since_epoch: i64) -> Result<Value> {
-    let (rows, _total) = chrono_metrics::coupling(
-        conn,
-        entity,
-        COUPLING_MIN_SUPPORT,
-        since_epoch,
-        COUPLING_LIMIT,
-    )?;
+    let (rows, _total) = chrono_metrics::coupling(conn, entity, COUPLING_MIN_SUPPORT, since_epoch, COUPLING_LIMIT, false)?;
     let items: Vec<Value> = rows
         .iter()
         .map(|c| json!({"b": c.b, "support": c.support, "confidence": c.confidence}))
@@ -269,7 +263,7 @@ fn coupling(conn: &Connection, entity: &str, since_epoch: i64) -> Result<Value> 
 }
 
 fn owners(conn: &Connection, prefix: &str, since_epoch: i64) -> Result<Value> {
-    let (rows, bus_factor) = chrono_metrics::owners(conn, prefix, since_epoch)?;
+    let (rows, bus_factor) = chrono_metrics::owners(conn, prefix, since_epoch, false)?;
     let items: Vec<Value> = rows
         .iter()
         .map(|o| json!({"name": o.name, "changes": o.commits, "share": o.share}))
@@ -278,7 +272,7 @@ fn owners(conn: &Connection, prefix: &str, since_epoch: i64) -> Result<Value> {
 }
 
 fn churn(conn: &Connection, since_epoch: i64) -> Result<Value> {
-    let rows = chrono_metrics::churn(conn, since_epoch, CHURN_LIMIT)?;
+    let rows = chrono_metrics::churn(conn, since_epoch, CHURN_LIMIT, false)?;
     let items: Vec<Value> = rows
         .iter()
         .map(|r| json!({"entity": r.entity, "added": r.added, "deleted": r.deleted}))

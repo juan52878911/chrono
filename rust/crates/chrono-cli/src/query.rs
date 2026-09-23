@@ -71,9 +71,9 @@ fn envelope(
         .set("result", result))
 }
 
-pub fn hotspots(store: &Store, w: &Window) -> Result<Json> {
+pub fn hotspots(store: &Store, w: &Window, symbols_only: bool) -> Result<Json> {
     const LIMIT: usize = 25;
-    let rows = chrono_metrics::hotspots(store.conn(), w.since_epoch, LIMIT)?;
+    let rows = chrono_metrics::hotspots(store.conn(), w.since_epoch, LIMIT, symbols_only)?;
     let items: Vec<Json> = rows
         .iter()
         .map(|h| {
@@ -88,9 +88,9 @@ pub fn hotspots(store: &Store, w: &Window) -> Result<Json> {
     envelope(store, "hotspots", w, LIMIT, n, Json::obj().set("hotspots", Json::Arr(items)))
 }
 
-pub fn coupling(store: &Store, w: &Window, entity: &str) -> Result<Json> {
+pub fn coupling(store: &Store, w: &Window, entity: &str, symbols_only: bool) -> Result<Json> {
     const LIMIT: usize = 25;
-    let (rows, _total) = chrono_metrics::coupling(store.conn(), entity, 2, w.since_epoch, LIMIT)?;
+    let (rows, _total) = chrono_metrics::coupling(store.conn(), entity, 2, w.since_epoch, LIMIT, symbols_only)?;
     let items: Vec<Json> = rows
         .iter()
         .map(|c| {
@@ -111,8 +111,8 @@ pub fn coupling(store: &Store, w: &Window, entity: &str) -> Result<Json> {
     )
 }
 
-pub fn owners(store: &Store, w: &Window, prefix: &str) -> Result<Json> {
-    let (rows, bus_factor) = chrono_metrics::owners(store.conn(), prefix, w.since_epoch)?;
+pub fn owners(store: &Store, w: &Window, prefix: &str, symbols_only: bool) -> Result<Json> {
+    let (rows, bus_factor) = chrono_metrics::owners(store.conn(), prefix, w.since_epoch, symbols_only)?;
     let items: Vec<Json> = rows
         .iter()
         .map(|o| {
@@ -133,9 +133,9 @@ pub fn owners(store: &Store, w: &Window, prefix: &str) -> Result<Json> {
     )
 }
 
-pub fn churn(store: &Store, w: &Window) -> Result<Json> {
+pub fn churn(store: &Store, w: &Window, symbols_only: bool) -> Result<Json> {
     const LIMIT: usize = 25;
-    let rows = chrono_metrics::churn(store.conn(), w.since_epoch, LIMIT)?;
+    let rows = chrono_metrics::churn(store.conn(), w.since_epoch, LIMIT, symbols_only)?;
     let items: Vec<Json> = rows
         .iter()
         .map(|r| {
@@ -330,6 +330,31 @@ fn parse_limit(limit: Option<&str>, default: usize) -> Result<usize> {
             .into()),
         },
     }
+}
+
+/// `show <id> [--entity ruta]`: enseña el diff de un commit (git en vivo, sin
+/// indexar), acotado por un tope de bytes. `id` es un sha o cualquier revspec.
+pub fn show(store: &Store, id: &str, entity: Option<&str>) -> Result<Json> {
+    const MAX_BYTES: usize = 60_000;
+    let w = no_window();
+    let repo = match git_repo_path(store)? {
+        Some(rp) => rp,
+        None => {
+            return Err(t(
+                "no git source in the index; 'show' needs a git repo",
+                "no hay fuente git en el índice; 'show' necesita un repo git",
+            )
+            .into())
+        }
+    };
+    let s = chrono_source_git::show(Path::new(&repo), id, entity, MAX_BYTES)?;
+    let result = Json::obj()
+        .set("id", Json::str(&s.id))
+        .set("entity", entity.map_or(Json::Null, Json::str))
+        .set("truncated", Json::Bool(s.truncated))
+        .set("total_bytes", Json::Int(s.total_bytes as i64))
+        .set("diff", Json::str(&s.text));
+    envelope(store, "show", &w, 1, 1, result)
 }
 
 /// `timeline`: conteo de eventos por bucket temporal. `--bucket` (duración, por

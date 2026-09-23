@@ -179,7 +179,7 @@ fn hotspots_ordena_por_fichero_mas_cambiado_y_respeta_ventana() {
     let conn = store.conn();
 
     // Ventana desde 1000: excluye e4 (500), así que warm.rs solo tiene 1 touch.
-    let hs = hotspots(conn, 1000, 10).unwrap();
+    let hs = hotspots(conn, 1000, 10, false).unwrap();
     // hot.rs: 5 touches (e1,e2,e3,e5,e7) * size 100 = raw 500 (máximo -> score 1.0).
     assert_eq!(hs[0].entity, "src/hot.rs");
     assert_eq!(hs[0].changes, 5);
@@ -191,7 +191,7 @@ fn hotspots_ordena_por_fichero_mas_cambiado_y_respeta_ventana() {
     assert!((warm.score - 0.1).abs() < 1e-9);
 
     // Sin ventana (since_epoch=0): e4 entra y warm.rs pasa a 2 touches.
-    let hs_all = hotspots(conn, 0, 10).unwrap();
+    let hs_all = hotspots(conn, 0, 10, false).unwrap();
     let warm_all = hs_all.iter().find(|h| h.entity == "src/warm.rs").unwrap();
     assert_eq!(warm_all.changes, 2);
     // hot.rs sigue siendo el hotspot número uno.
@@ -203,7 +203,7 @@ fn coupling_devuelve_cocambio_y_excluye_eventos_bulk() {
     let (_db, store) = build_fixture();
     let conn = store.conn();
 
-    let (pairs, total) = coupling(conn, "src/hot.rs", 1, 1000, 10).unwrap();
+    let (pairs, total) = coupling(conn, "src/hot.rs", 1, 1000, 10, false).unwrap();
     // No-bulk touches de hot.rs en la ventana: e1, e2, e3, e7 = 4.
     assert_eq!(total, 4);
 
@@ -226,7 +226,7 @@ fn owners_reparte_shares_y_calcula_bus_factor() {
     let (_db, store) = build_fixture();
     let conn = store.conn();
 
-    let (owns, bus_factor) = owners(conn, "src/", 1000).unwrap();
+    let (owns, bus_factor) = owners(conn, "src/", 1000, false).unwrap();
     // Alice: e1(hot+warm)=2, e2(hot)=1, e5(hot+bulk_only)=2, e7(hot)=1 -> 6.
     // Bob:   e3(hot+cold)=2 -> 2. Total=8.
     assert_eq!(owns[0].name, "Alice");
@@ -244,7 +244,7 @@ fn churn_suma_added_deleted_desde_json_de_attrs() {
     let (_db, store) = build_fixture();
     let conn = store.conn();
 
-    let rows = churn(conn, 1000, 10).unwrap();
+    let rows = churn(conn, 1000, 10, false).unwrap();
     // hot.rs: (10,2)+(5,0)+(2,2)+(1,1)+(0,0) = added 18, deleted 5.
     let hot = rows.iter().find(|r| r.entity == "src/hot.rs").unwrap();
     assert_eq!(hot.added, 18);
@@ -278,7 +278,7 @@ fn churn_ordena_por_added_mas_deleted_no_solo_por_added() {
     w.add_event(&e).unwrap();
     w.commit().unwrap();
 
-    let rows = churn(store.conn(), 0, 10).unwrap();
+    let rows = churn(store.conn(), 0, 10, false).unwrap();
     assert_eq!(rows[0].entity, "src/mucho_borrado.rs");
     assert_eq!((rows[0].added, rows[0].deleted), (5, 20));
     assert_eq!(rows[1].entity, "src/solo_added.rs");

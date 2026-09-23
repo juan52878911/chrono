@@ -12,6 +12,7 @@ mod i18n;
 mod index;
 mod json;
 mod query;
+mod symbols;
 mod timeutil;
 
 use std::path::{Path, PathBuf};
@@ -29,6 +30,7 @@ Usage:
 
 Index:
   init [repo]          Zero-config: detect the repo, create .chrono/, ingest all.
+                       --symbols also indexes per-hunk function history (git only).
   add <path>           Add another source (git repo or log file) to the index.
   sync [path]          Process only the delta since the last watermark (all sources).
 
@@ -44,6 +46,11 @@ Queries (JSON, schema_version 2: `entity`/`id`):
   phases               Project phases (tags/releases).
   search <text>        Search events by text (FTS5, LIKE fallback).
   similar <id>         Near-duplicate events (by SimHash).
+  show <id>            Show a commit's diff live (git, bounded; --entity <path>).
+
+Symbols (git, needs 'init --symbols'):
+  Add --by symbol to hotspots/coupling/owners/churn to scope to functions
+  (entity key 'file#func'), e.g. chrono hotspots --by symbol.
 
 Log-native (multi-source):
   timeline             Event counts per time bucket (--bucket 1h, --by level|kind).
@@ -84,6 +91,11 @@ Consulta (JSON, schema_version 2: `entity`/`id`):
   phases               Fases del proyecto (etiquetas).
   search <texto>       Busca eventos por texto (FTS5, con fallback a LIKE).
   similar <id>         Eventos casi-duplicados (por SimHash).
+  show <id>            Muestra el diff de un commit en vivo (git, acotado; --entity <ruta>).
+
+Símbolos (git, requiere 'init --symbols'):
+  Añade --by symbol a hotspots/coupling/owners/churn para acotar a funciones
+  (clave de entidad 'fichero#func'), p.ej. chrono hotspots --by symbol.
 
 Log-native (multi-fuente):
   timeline             Conteo de eventos por bucket temporal (--bucket 1h, --by level|kind).
@@ -111,6 +123,8 @@ struct Flags {
     delta: Option<String>,
     by: Option<String>,
     limit: Option<String>,
+    entity: Option<String>,
+    symbols: bool,
     pos: Vec<String>,
 }
 
@@ -153,6 +167,11 @@ fn parse_args(args: &[String]) -> Flags {
                 i += 1;
                 f.limit = Some(args[i].clone());
             }
+            "--entity" if i + 1 < args.len() => {
+                i += 1;
+                f.entity = Some(args[i].clone());
+            }
+            "--symbols" => f.symbols = true,
             a if a.starts_with("--") && a != "--version" && a != "--help" => {}
             a => f.pos.push(a.to_string()),
         }
@@ -229,7 +248,7 @@ fn main() {
                 .get(1)
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|e| fatal(e)));
-            if let Err(e) = index::init(&start) {
+            if let Err(e) = index::init(&start, f.symbols) {
                 fatal(e);
             }
             return;
@@ -255,7 +274,7 @@ fn main() {
     }
     if cmd == "add" {
         let path = require_pos(&f, "add needs a <path> (a repo or a log file)", "add necesita una <ruta> (un repo o un fichero de log)");
-        if let Err(e) = index::add(&db, Path::new(&path)) {
+        if let Err(e) = index::add(&db, Path::new(&path), f.symbols) {
             fatal(e);
         }
         return;
@@ -264,18 +283,21 @@ fn main() {
     let store = chrono_store::Store::open(&db).unwrap_or_else(|e| fatal(e));
     let window = query::Window::from_flag(f.since.as_deref()).unwrap_or_else(|e| fatal(e));
 
+    // `--by symbol` cambia el alcance de las consultas de entidades a símbolos
+    // (S1); por defecto (o `--by file`) se excluyen los símbolos.
+    let symbols_only = f.by.as_deref() == Some("symbol");
     let out = match cmd {
-        "hotspots" => query::hotspots(&store, &window),
+        "hotspots" => query::hotspots(&store, &window, symbols_only),
         "coupling" => {
             let entity = require_pos(&f, "coupling needs an <entity>", "coupling necesita una <entity>");
-            query::coupling(&store, &window, &entity)
+            query::coupling(&store, &window, &entity, symbols_only)
         }
         "owners" => {
             let prefix = require_pos(&f, "owners needs a <path>", "owners necesita una <ruta>");
-            query::owners(&store, &window, &prefix)
+            query::owners(&store, &window, &prefix, symbols_only)
         }
         "bugs" => query::bugs(&store, &window),
-        "churn" => query::churn(&store, &window),
+        "churn" => query::churn(&store, &window, symbols_only),
         "tickets" => {
             let id = require_pos(&f, "tickets needs an <id>", "tickets necesita un <id>");
             query::ticket(&store, &id)
@@ -314,6 +336,10 @@ fn main() {
         "correlate" => {
             let id = require_pos(&f, "correlate needs an <id>", "correlate necesita un <id>");
             query::correlate(&store, &id, f.delta.as_deref(), f.limit.as_deref())
+        }
+        "show" => {
+            let id = require_pos(&f, "show needs an <id>", "show necesita un <id>");
+            query::show(&store, &id, f.entity.as_deref())
         }
         other => {
             eprint!(

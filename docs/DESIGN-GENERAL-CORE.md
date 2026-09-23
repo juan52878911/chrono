@@ -295,9 +295,9 @@ regex en el manifiesto** (`symbols_rules_hash`). Cambio de regex → reindex de 
 
 | Fase | Contenido | Binario | Cuándo |
 | --- | --- | --- | --- |
-| **S0 · Ver diffs** | `chrono show <id> [--entity p]` → `git show` acotado por `token_budget`. NO indexa (respeta §2). | +0 | con R2 |
-| **S1 · Símbolos por hunk** | `init --symbols` (default off): stream `git log --numstat -p -U0` + regex propias (rust/go/python/js-ts/c-cpp/zig/java) → `Touch{type:"symbol"}`; `--by symbol`. Test: mismos touches de fichero que sin `-p`. Features JEV `n_sym`, `sym_kind`, `sym_test` (nunca el nombre del símbolo). | +~0,1 MB | R3 |
-| **S2 · Tamaño de símbolos** | regex sobre los blobs de HEAD que ya se leen → `entities.size` de símbolos → hotspots ponderados. | +0 | R3/R5 |
+| **S0 · Ver diffs** | **hecho.** `chrono show <id> [--entity p]` → `git show` acotado (60 KB, recorte en frontera de línea). NO indexa (respeta §2). | +0 | hecho |
+| **S1 · Símbolos por hunk** | **hecho.** `init --symbols` (default off): paso de enriquecimiento APARTE (no toca el cursor de git → paridad intacta) que streamea `git log --no-merges -U0 -p` con regex `xfuncname` PROPIAS por lenguaje (rust/go/python/js-ts/c-cpp/zig/java) inyectadas vía `-c core.attributesFile`/`-c diff.<lang>.xfuncname`, y emite `Touch{type:"symbol", key:"file#func"}` keyeado por sha. `--by symbol` en hotspots/coupling/owners/churn (excluyen símbolos por defecto). Solo ficheros con extensión de código conocida (evita el ruido del xfuncname por defecto de git en `.lock`/`.yml`). `sync` recomputa el delta si el índice tiene símbolos. `symbols_rules_hash` en `meta`. Aproximado a propósito (S3 si midiéramos >15-20% mal). | +~0 MB | hecho |
+| **S2 · Tamaño de símbolos** | regex sobre los blobs de HEAD que ya se leen → `entities.size` de símbolos → hotspots ponderados. Sin S2, `hotspots --by symbol` rankea por frecuencia (funciona). | +0 | pendiente |
 | **S3 · tree-sitter** (condicional, NO por defecto) | feature Cargo `ast`, runtime+rust+go+python+c (~3,7 MB), **solo si S1 mide >15–20 % de hunks mal atribuidos**. Build oficial sin la feature. | +3,7 MB solo en esa build | tras R4 |
 
 **Anti-scope** (además del §8): no embeber 40 gramáticas ni TS/C++; no `.so`/`.wasm` ni

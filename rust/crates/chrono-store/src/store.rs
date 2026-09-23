@@ -154,6 +154,44 @@ impl Store {
         Ok(out)
     }
 
+    /// Inserta touches "de enriquecimiento" (p.ej. símbolos S1) para eventos ya
+    /// ingeridos, upsertando las entidades por `key`. Cada tupla es
+    /// `(entity_key, entity_type, weight, attrs_json)`. Idempotente: reinsertar
+    /// el mismo (event, entity) actualiza peso/attrs. NO toca `touches_n` ni
+    /// `is_bulk` del evento (esos reflejan solo los touches de fichero).
+    pub fn add_touches(&self, event_id: &str, touches: &[(String, String, i64, String)]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut upsert_entity =
+                tx.prepare("INSERT INTO entities(key, type) VALUES (?1, ?2) ON CONFLICT(key) DO NOTHING")?;
+            let mut entity_id = tx.prepare("SELECT id FROM entities WHERE key = ?1")?;
+            let mut add_touch = tx.prepare(
+                "INSERT INTO touches(event_id, entity_id, weight, attrs) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(event_id, entity_id) DO UPDATE SET weight = excluded.weight, attrs = excluded.attrs",
+            )?;
+            for (key, typ, weight, attrs) in touches {
+                upsert_entity.execute(params![key, typ])?;
+                let id: i64 = entity_id.query_row(params![key], |r| r.get(0))?;
+                add_touch.execute(params![event_id, id, weight, attrs])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Borra las entidades de un `type` dado y sus touches (para recomputar S1
+    /// de símbolos sin tocar ficheros/logs). Usado al reindexar símbolos.
+    pub fn delete_entities_of_type(&self, entity_type: &str) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM touches WHERE entity_id IN (SELECT id FROM entities WHERE type = ?1)",
+            params![entity_type],
+        )?;
+        tx.execute("DELETE FROM entities WHERE type = ?1", params![entity_type])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Borra los eventos de una fuente (y sus `touches`/`labels`/`links`), para
     /// re-ingesta tras divergencia. NO toca `entities`/`actors` (compartidos
     /// entre fuentes; sus flags se recalculan en el enriquecimiento).

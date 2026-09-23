@@ -17,18 +17,19 @@ pub struct Owner {
 /// Devuelve (owners ordenados por cambios desc con `share` calculado, y
 /// `bus_factor`: nº mínimo de autores que acumulan más del 50% del total,
 /// recorriendo la lista ya ordenada).
-pub fn owners(conn: &Connection, prefix: &str, since_epoch: i64) -> Result<(Vec<Owner>, i64)> {
+pub fn owners(conn: &Connection, prefix: &str, since_epoch: i64, symbols_only: bool) -> Result<(Vec<Owner>, i64)> {
+    let op = crate::symbol_type_op(symbols_only);
     let like_pattern = format!("{prefix}%");
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT COALESCE(a.display_name, a.key, '') AS name, COUNT(*) AS commits
          FROM touches t
          JOIN entities e ON e.id = t.entity_id
          JOIN events ev ON ev.id = t.event_id
          JOIN actors a ON a.id = ev.actor_id
-         WHERE e.key LIKE ?1 AND ev.at_epoch >= ?2
+         WHERE e.key LIKE ?1 AND e.type {op} 'symbol' AND ev.at_epoch >= ?2
          GROUP BY ev.actor_id
          ORDER BY commits DESC",
-    )?;
+    ))?;
     let rows = stmt.query_map(params![like_pattern, since_epoch], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
     })?;

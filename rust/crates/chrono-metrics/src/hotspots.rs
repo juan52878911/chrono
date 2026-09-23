@@ -17,23 +17,26 @@ pub struct Hotspot {
     pub score: f64,
 }
 
-/// Ficheros más cambiados ponderados por `entities.size`. Filtra
-/// `entities.type='file'`, `deleted=0`, `excluded=0` (igual que el Go).
-pub fn hotspots(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Vec<Hotspot>> {
-    // No se filtra por `type='file'`: en git todas las entidades son ficheros
-    // (idéntico), pero así el adaptador de logs (entity_type='log-source') u
-    // otras trazas también rankean. `MAX(size,1)` = fallback a frecuencia
-    // cuando no hay tamaño (logs), sin alterar el top de git (que sí lo tiene).
-    let mut stmt = conn.prepare(
+/// Entidades más cambiadas ponderadas por `entities.size`. Filtra `deleted=0`,
+/// `excluded=0`. Por defecto EXCLUYE símbolos (`type != 'symbol'`); con
+/// `symbols_only=true` (consultas `--by symbol`) devuelve SOLO símbolos.
+///
+/// No se filtra por `type='file'`: en git las entidades de fichero son idénticas
+/// al Go, pero así el adaptador de logs (entity_type='log-source') u otras
+/// trazas también rankean. `MAX(size,1)` = fallback a frecuencia cuando no hay
+/// tamaño (logs y símbolos sin S2), sin alterar el top de git (que sí lo tiene).
+pub fn hotspots(conn: &Connection, since_epoch: i64, limit: usize, symbols_only: bool) -> Result<Vec<Hotspot>> {
+    let op = crate::symbol_type_op(symbols_only);
+    let mut stmt = conn.prepare(&format!(
         "SELECT e.key, COUNT(*) AS changes, e.size
          FROM touches t
          JOIN events ev ON ev.id = t.event_id
          JOIN entities e ON e.id = t.entity_id
-         WHERE e.deleted = 0 AND e.excluded = 0 AND ev.at_epoch >= ?1
+         WHERE e.deleted = 0 AND e.excluded = 0 AND e.type {op} 'symbol' AND ev.at_epoch >= ?1
          GROUP BY e.id
          ORDER BY (CAST(COUNT(*) AS REAL) * MAX(e.size, 1)) DESC
          LIMIT ?2",
-    )?;
+    ))?;
     let rows = stmt.query_map(params![since_epoch, limit as i64], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
     })?;

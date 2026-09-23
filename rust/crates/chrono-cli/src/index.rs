@@ -113,7 +113,9 @@ fn resolve_source<'a>(registry: &'a Registry, start: &Path) -> Result<(&'a dyn S
 }
 
 /// `chrono init [repo]`: índice completo desde cero en `<root>/.chrono/index.db`.
-pub fn init(start: &Path) -> Result<()> {
+/// Con `symbols=true` (`--symbols`, solo git), además de la ingesta de commits
+/// extrae los símbolos (funciones) tocados por cada hunk (S1).
+pub fn init(start: &Path, symbols: bool) -> Result<()> {
     let registry = build_registry();
     let (src, ingest_path, root) = resolve_source(&registry, start)?;
 
@@ -150,6 +152,10 @@ pub fn init(start: &Path) -> Result<()> {
     finalize(&root, &store, &git_path_if_git(src.kind(), &ingest_path))?;
     write_meta(&store, src, &root)?;
 
+    if symbols && src.kind() == "git" {
+        ingest_symbols(&ingest_path, &store, None)?;
+    }
+
     let unit = if src.kind() == "git" { ("commits", "commits") } else { ("events", "eventos") };
     eprintln!("{}", t(
         format!("chrono: index ready at .chrono/index.db ({n} {}).", unit.0),
@@ -175,7 +181,7 @@ fn index_root_of(db: &Path) -> PathBuf {
 /// deploys en un mismo `.chrono/`, correlacionables por tiempo). No borra lo ya
 /// ingerido. Si la fuente ya estaba, la re-ingiere (borra sus eventos primero),
 /// así `add` es idempotente.
-pub fn add(db: &Path, start: &Path) -> Result<()> {
+pub fn add(db: &Path, start: &Path, symbols: bool) -> Result<()> {
     let mut store = Store::open(db)?;
     let index_root = index_root_of(db);
     let registry = build_registry();
@@ -205,6 +211,10 @@ pub fn add(db: &Path, start: &Path) -> Result<()> {
     eprintln!("{}", t("  building search index…", "  construyendo índice de búsqueda…"));
     store.rebuild_fts()?;
     finalize(&index_root, &store, &git_path_if_git(src.kind(), &ingest_path))?;
+
+    if symbols && src.kind() == "git" {
+        ingest_symbols(&ingest_path, &store, None)?;
+    }
 
     let total = store.list_sources()?.len();
     eprintln!("{}", t(
@@ -248,6 +258,7 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
         None => None,
     };
 
+    let symbols_enabled = store.meta("symbols")?.as_deref() == Some("1");
     let now = now_iso();
     let mut total = 0usize;
     let mut synced_any = false;
@@ -304,6 +315,11 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
         store.set_source_watermark(&s.id, &new_wm.value, &now)?;
         if s.kind == "git" {
             changed_git_paths.push(s.path.clone());
+            // Recomputar símbolos del delta (old HEAD..HEAD) si el índice los usa.
+            if symbols_enabled {
+                let since_sha = s.watermark.strip_prefix("sha:").filter(|s| !s.is_empty());
+                ingest_symbols(&path, &store, since_sha)?;
+            }
         }
         total += n;
         synced_any = true;
@@ -498,6 +514,47 @@ fn finalize(index_root: &Path, store: &Store, git_paths: &[String]) -> Result<()
 
     store.optimize()?;
     Ok(())
+}
+
+/// S1 · Extrae los símbolos (funciones) tocados por cada hunk y los guarda como
+/// `Touch{type:"symbol"}` (clave `file#func`), keyeados por el `sha` de commits
+/// ya ingeridos. `since_sha=None` recomputa TODO (borra los símbolos previos);
+/// `Some(sha)` añade solo el rango `sha..HEAD` (sync incremental). NO toca el
+/// cursor de ingesta de git — la paridad de commits queda intacta.
+fn ingest_symbols(repo: &Path, store: &Store, since_sha: Option<&str>) -> Result<()> {
+    eprintln!("{}", t("  extracting symbols…", "  extrayendo símbolos…"));
+    if since_sha.is_none() {
+        store.delete_entities_of_type("symbol")?;
+    }
+    let mut on_commit = |sha: &str, syms: Vec<crate::symbols::SymbolTouch>| -> crate::symbols::Result<()> {
+        if syms.is_empty() {
+            return Ok(());
+        }
+        let touches: Vec<(String, String, i64, String)> = syms
+            .iter()
+            .map(|s| (s.entity_key(), "symbol".to_string(), s.added + s.deleted, symbol_attrs_json(s)))
+            .collect();
+        store.add_touches(sha, &touches).map_err(|e| e.to_string().into())
+    };
+    crate::symbols::stream_symbols(repo, since_sha, &mut on_commit).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+    store.set_meta("symbols", "1")?;
+    store.set_meta("symbols_rules_hash", &crate::symbols::rules_hash())?;
+    Ok(())
+}
+
+/// JSON compacto de attrs de un touch de símbolo: `added`/`deleted` (para
+/// `churn --by symbol`) + `file`/`sym_kind`. Escapa comillas y backslash.
+fn symbol_attrs_json(s: &crate::symbols::SymbolTouch) -> String {
+    fn esc(v: &str) -> String {
+        v.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+    format!(
+        "{{\"added\":{},\"deleted\":{},\"file\":\"{}\",\"sym_kind\":\"{}\"}}",
+        s.added,
+        s.deleted,
+        esc(&s.file),
+        esc(&s.sym_kind),
+    )
 }
 
 /// Helper: `vec![ruta]` si la fuente es git, `vec![]` si no. Para pasar a
