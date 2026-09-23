@@ -17,7 +17,8 @@ pub fn schema_sql() -> &'static str {
 }
 
 /// Versión de esquema que produce este store. Reindex si el índice tiene otra.
-pub const SCHEMA_VERSION: i64 = 2;
+/// v3 añade `templates`/`rollups` (Drain-light, ver `patterns`).
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Error de `chrono-store`: envuelve I/O y errores de `rusqlite` sin exigir un
 /// tipo concreto a los llamadores (CLI, `chrono-metrics`...).

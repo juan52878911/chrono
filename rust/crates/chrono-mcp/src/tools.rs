@@ -133,6 +133,15 @@ pub fn tool_defs() -> Vec<Value> {
             &["dim"],
         ),
         tool(
+            "patterns",
+            "Plantillas de log más frecuentes (clustering Drain-light).",
+            json!({
+                "since": since_prop(),
+                "limit": json!({"type": "integer", "description": "Máximo de plantillas (por defecto 25)"})
+            }),
+            &[],
+        ),
+        tool(
             "correlate",
             "Eventos de OTRAS fuentes cercanos en el tiempo a un evento (±Δt).",
             json!({
@@ -224,6 +233,10 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
             let delta_secs = arg_i64(args, "delta_secs", 3600).max(1);
             let limit = arg_i64(args, "limit", 25).max(1) as usize;
             correlate(conn, id, delta_secs, limit)?
+        }
+        "patterns" => {
+            let limit = arg_i64(args, "limit", 25).max(1) as usize;
+            patterns(conn, since_epoch, limit)?
         }
         other => return Err(format!("herramienta desconocida: {other}").into()),
     };
@@ -433,6 +446,15 @@ fn top(conn: &Connection, dim: &str, since_epoch: i64, limit: usize) -> Result<V
     let rows = chrono_metrics::top(conn, dim, since_epoch, limit)?;
     let items: Vec<Value> = rows.iter().map(|v| json!({"value": v.value, "count": v.count})).collect();
     Ok(json!({"dim": dim, "top": items}))
+}
+
+fn patterns(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Value> {
+    let rows = chrono_metrics::patterns(conn, since_epoch, limit)?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|p| json!({"template": p.template, "count": p.count, "example_id": p.example_id}))
+        .collect();
+    Ok(json!({"patterns": items}))
 }
 
 fn correlate(conn: &Connection, id: &str, delta_secs: i64, limit: usize) -> Result<Value> {

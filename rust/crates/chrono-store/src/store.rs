@@ -227,6 +227,8 @@ impl Store {
             "blob_lines",
             "issues",
             "sources",
+            "rollups",
+            "templates",
         ] {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
@@ -296,6 +298,72 @@ impl Store {
     pub fn set_entity_size(&self, key: &str, size: i64) -> Result<()> {
         self.conn.execute("UPDATE entities SET size = ?1 WHERE key = ?2", params![size, key])?;
         Ok(())
+    }
+
+    /// Reconstruye `templates`/`rollups` desde cero: normaliza el `title` de
+    /// cada evento con tiempo válido a una plantilla Drain-light y cuenta por
+    /// (fuente, plantilla, bucket de `bucket_secs`). La agregación es EN MEMORIA
+    /// pero acotada por el nº de plantillas×buckets (pequeño: ese es el punto de
+    /// los rollups), no por el nº de eventos. Devuelve (nº plantillas, nº filas
+    /// de rollup). `bucket_secs` debe ser > 0.
+    pub fn build_rollups(&self, bucket_secs: i64) -> Result<(usize, usize)> {
+        use std::collections::BTreeMap;
+        if bucket_secs <= 0 {
+            return Err("build_rollups: bucket_secs debe ser > 0".into());
+        }
+        // Fase 1: escanear eventos y agregar en memoria (sin escribir).
+        // Clave: (source_id, template, bucket) -> (count, first_id, last_id).
+        let mut agg: BTreeMap<(String, String, i64), (i64, String, String)> = BTreeMap::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, source_id, at_epoch, title FROM events WHERE at_epoch > 0 ORDER BY rowid",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, source_id, at_epoch, title) = row?;
+                let template = chrono_core::templatize(&title);
+                let bucket = at_epoch - at_epoch.rem_euclid(bucket_secs);
+                let entry = agg.entry((source_id, template, bucket)).or_insert((0, id.clone(), String::new()));
+                entry.0 += 1;
+                entry.2 = id; // last_id (iteración en orden de rowid → determinista)
+            }
+        }
+
+        // Fase 2: reescribir templates + rollups desde la agregación.
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM rollups", [])?;
+        tx.execute("DELETE FROM templates", [])?;
+        let mut n_templates = 0usize;
+        let mut n_rollups = 0usize;
+        {
+            let mut upsert_tpl = tx.prepare(
+                "INSERT INTO templates(source_id, template) VALUES (?1, ?2)
+                 ON CONFLICT(source_id, template) DO NOTHING",
+            )?;
+            let mut tpl_id = tx.prepare("SELECT id FROM templates WHERE source_id = ?1 AND template = ?2")?;
+            let mut ins_rollup = tx.prepare(
+                "INSERT INTO rollups(source_id, template_id, bucket_epoch, count, first_id, last_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for ((source_id, template, bucket), (count, first_id, last_id)) in &agg {
+                let inserted = upsert_tpl.execute(params![source_id, template])?;
+                if inserted > 0 {
+                    n_templates += 1;
+                }
+                let id: i64 = tpl_id.query_row(params![source_id, template], |r| r.get(0))?;
+                ins_rollup.execute(params![source_id, id, bucket, count, first_id, last_id])?;
+                n_rollups += 1;
+            }
+        }
+        tx.commit()?;
+        Ok((n_templates, n_rollups))
     }
 
     /// Rellena `events_fts` (contenido externo) desde `events`. Se llama al

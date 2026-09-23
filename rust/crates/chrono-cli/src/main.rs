@@ -55,6 +55,7 @@ Symbols (git, needs 'init --symbols'):
 Log-native (multi-source):
   timeline             Event counts per time bucket (--bucket 1h, --by level|kind).
   top <dim>            Most frequent values of a dimension (level|kind|actor|entity|attr:<k>).
+  patterns             Most frequent log templates (Drain-light clustering).
   correlate <id>       Events from OTHER sources within ±Δt of an event (--delta 1h).
 
 Integration:
@@ -100,6 +101,7 @@ Símbolos (git, requiere 'init --symbols'):
 Log-native (multi-fuente):
   timeline             Conteo de eventos por bucket temporal (--bucket 1h, --by level|kind).
   top <dim>            Valores más frecuentes de una dimensión (level|kind|actor|entity|attr:<c>).
+  patterns             Plantillas de log más frecuentes (clustering Drain-light).
   correlate <id>       Eventos de OTRAS fuentes en ±Δt de un evento (--delta 1h).
 
 Integración:
@@ -333,6 +335,7 @@ fn main() {
             );
             query::top(&store, &window, &dim, f.limit.as_deref())
         }
+        "patterns" => query::patterns(&store, &window, f.limit.as_deref()),
         "correlate" => {
             let id = require_pos(&f, "correlate needs an <id>", "correlate necesita un <id>");
             query::correlate(&store, &id, f.delta.as_deref(), f.limit.as_deref())

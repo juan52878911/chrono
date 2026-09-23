@@ -39,6 +39,9 @@ fn now_iso() -> String {
 
 /// Nº máximo de ficheros a los que se les calcula el tamaño (los más cambiados).
 const SIZE_CAP: usize = 4000;
+/// Granularidad de los rollups Drain-light (1 min). `timeline`/`patterns` a
+/// escala se apoyan en estos buckets. Ver `docs/DESIGN-GENERAL-CORE.md §6`.
+const ROLLUP_BUCKET_SECS: i64 = 60;
 /// Cada cuántos eventos se refresca el indicador de progreso (como el Go).
 const PROGRESS_EVERY: usize = 2000;
 
@@ -511,6 +514,12 @@ fn finalize(index_root: &Path, store: &Store, git_paths: &[String]) -> Result<()
             finalize_git_forge(Path::new(path), store, &cfg.bug_labels)?;
         }
     }
+
+    // Rollups Drain-light (plantillas + conteos por bucket) para `patterns`.
+    // Reconstrucción completa: barata en índices normales, O(eventos) a escala.
+    eprintln!("{}", t("  clustering log templates…", "  agrupando plantillas…"));
+    store.build_rollups(ROLLUP_BUCKET_SECS)?;
+    store.set_meta("rollup_bucket_secs", &ROLLUP_BUCKET_SECS.to_string())?;
 
     store.optimize()?;
     Ok(())

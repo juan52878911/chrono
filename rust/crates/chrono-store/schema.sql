@@ -124,6 +124,30 @@ CREATE INDEX IF NOT EXISTS idx_touches_ent   ON touches(entity_id, event_id);
 CREATE INDEX IF NOT EXISTS idx_labels_task   ON labels(task, label);
 CREATE INDEX IF NOT EXISTS idx_links_rel     ON links(rel, target);
 
+-- Plantillas Drain-light: un mensaje normalizado (variables → <NUM>/<IP>/…).
+-- Miles de líneas de log que solo difieren en valores comparten `template`.
+CREATE TABLE IF NOT EXISTS templates (
+    id        INTEGER PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    template  TEXT NOT NULL,
+    simhash   INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (source_id, template)
+);
+
+-- Rollups: conteo de eventos por (fuente, plantilla, bucket temporal). Permiten
+-- `patterns`/timeline a escala (millones de líneas) sin escanear `events`.
+CREATE TABLE IF NOT EXISTS rollups (
+    source_id    TEXT NOT NULL,
+    template_id  INTEGER NOT NULL REFERENCES templates(id),
+    bucket_epoch INTEGER NOT NULL,       -- inicio del bucket (múltiplo de ROLLUP_BUCKET_SECS)
+    count        INTEGER NOT NULL DEFAULT 0,
+    first_id     TEXT NOT NULL DEFAULT '', -- primer/último event id del bucket (para inspección)
+    last_id      TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (source_id, template_id, bucket_epoch)
+);
+CREATE INDEX IF NOT EXISTS idx_rollups_template ON rollups(template_id);
+CREATE INDEX IF NOT EXISTS idx_rollups_bucket   ON rollups(bucket_epoch);
+
 -- FTS5 externo sobre events (title+body); sin duplicar contenido.
 CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
     title, body, content='events', content_rowid='rowid',

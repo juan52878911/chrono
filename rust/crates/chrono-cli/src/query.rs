@@ -332,6 +332,24 @@ fn parse_limit(limit: Option<&str>, default: usize) -> Result<usize> {
     }
 }
 
+/// `patterns`: plantillas de log más frecuentes (Drain-light, desde rollups).
+pub fn patterns(store: &Store, w: &Window, limit: Option<&str>) -> Result<Json> {
+    const DEFAULT_LIMIT: usize = 25;
+    let limit = parse_limit(limit, DEFAULT_LIMIT)?;
+    let rows = chrono_metrics::patterns(store.conn(), w.since_epoch, limit)?;
+    let items: Vec<Json> = rows
+        .iter()
+        .map(|p| {
+            Json::obj()
+                .set("template", Json::str(&p.template))
+                .set("count", Json::Int(p.count))
+                .set("example_id", Json::str(&p.example_id))
+        })
+        .collect();
+    let n = items.len();
+    envelope(store, "patterns", w, limit, n, Json::obj().set("patterns", Json::Arr(items)))
+}
+
 /// `show <id> [--entity ruta]`: enseña el diff de un commit (git en vivo, sin
 /// indexar), acotado por un tope de bytes. `id` es un sha o cualquier revspec.
 pub fn show(store: &Store, id: &str, entity: Option<&str>) -> Result<Json> {
