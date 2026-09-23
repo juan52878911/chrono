@@ -82,7 +82,7 @@ fn build_registry() -> Registry {
     r.register(Box::new(chrono_source_csv::CsvSource::new()));
     r.register(Box::new(chrono_source_textlog::TextlogSource::new()));
     r.register(Box::new(chrono_source_changelog::ChangelogSource::new()));
-    // R3: registrar aquí más adaptadores (journald…).
+    r.register(Box::new(chrono_source_oslog::OsLogSource::new()));
     r
 }
 
