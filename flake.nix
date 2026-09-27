@@ -11,10 +11,10 @@
       packages = forAll (pkgs: {
         default = pkgs.buildGoModule {
           pname = "chrono";
-          version = "0.1.0";
+          version = "0.2.0";
           src = ./.;
           vendorHash = "sha256-tQ39T7gLFDK5OH6MxXsx0usdHRPdAdOViSP9P1Df5B4=";
-          ldflags = [ "-s" "-w" "-X main.version=v0.1.0" ];
+          ldflags = [ "-s" "-w" "-X main.version=v0.2.0" ];
           subPackages = [ "cmd/chrono" ];
           # chrono usa `git` (obligatorio) y `gh` (opcional, para PRs) en runtime.
           nativeBuildInputs = [ pkgs.makeWrapper ];

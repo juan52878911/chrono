@@ -112,9 +112,11 @@ El índice se **auto-descubre** subiendo desde el directorio actual, como git co
 | `phases` | Fases del proyecto (etiquetas/releases). |
 | `search <texto>` | Busca commits por significado (texto completo). |
 | `similar <sha>` | Commits casi-duplicados (por huella SimHash). |
-| `mcp` | Servidor MCP por stdio (para una IA). |
+| `mcp` | Servidor MCP por stdio (para una IA). `--repos DIR` sirve muchos repos. |
+| `export-dataset` | Commits etiquetados en JSONL para [Chispa](docs/CONTRACTS.es.md#4-datos-para-chispa-chrono-export-dataset) (`kling ai chispa train`). |
 
-Opciones: `--db RUTA`, `--since FECHA`, `--lang en|es`.
+Opciones: `--db RUTA`, `--since FECHA`, `--lang en|es`. `coupling`/`owners` aceptan también
+`ruta#símbolo` (el símbolo se ignora) y rutas absolutas dentro del repo.
 
 ---
 
@@ -131,6 +133,13 @@ chrono habla **MCP**. Así una IA responde sobre tu historial leyendo resúmenes
 { "mcpServers": { "chrono": { "command": "chrono", "args": ["mcp"] } } }
 ```
 El servidor se lanza bajo demanda y muere con la sesión (serverless). Auto-descubre el índice por el directorio de trabajo. Si un repo aún no tiene índice, las tools responden *"ejecuta chrono init"* en vez de fallar.
+
+**Muchos repos, un servidor.** Dale una raíz (`chrono mcp --repos /data/repos`, o `CHRONO_REPOS`)
+y cada tool acepta un `repo` opcional: un nombre bajo la raíz, una etiqueta `<nombre>@<rama>`
+(un worktree, o un directorio/symlink con el nombre de la etiqueta) o una ruta absoluta. Cada
+árbol guarda su `.chrono/index.db` (`chrono init <árbol>`); la tool `repos` lista cuáles están
+indexados, y cada respuesta dice de qué repo habla (`"repo": "kindling@main"`). El contrato
+completo está en [`docs/CONTRACTS.es.md`](docs/CONTRACTS.es.md).
 
 ---
 
@@ -153,7 +162,7 @@ Los mensajes están en **inglés por defecto**. chrono cambia a español si tu l
 - **Eficiente:** binario ~6.7 MB; índice de pocos MB; `sync` incremental en milisegundos; sin procesos en segundo plano.
 - **Local y privado:** todo vive en `.chrono/`. El forge (`gh`) solo se consulta si está, y prefiere tu remoto `upstream` en los forks.
 
-Más detalle en [`docs/`](docs/).
+Más detalle en [`docs/`](docs/), incluidos los [contratos con otras herramientas](docs/CONTRACTS.es.md). Cambios por versión: [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 

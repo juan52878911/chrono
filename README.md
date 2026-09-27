@@ -124,9 +124,11 @@ Every query accepts `--json` (default) and `--since DATE`. The index is
 | `phases` | Project phases (tags/releases). |
 | `search <text>` | Search commits by meaning (full-text). |
 | `similar <sha>` | Near-duplicate commits (by SimHash fingerprint). |
-| `mcp` | MCP server over stdio (for an AI). |
+| `mcp` | MCP server over stdio (for an AI). `--repos DIR` serves many repos. |
+| `export-dataset` | Labeled commits as JSONL for [Chispa](docs/CONTRACTS.md#4-dataset-for-chispa-chrono-export-dataset) (`kling ai chispa train`). |
 
-Options: `--db PATH`, `--since DATE`, `--lang en|es`.
+Options: `--db PATH`, `--since DATE`, `--lang en|es`. `coupling`/`owners` also accept
+`path#symbol` (the symbol is ignored) and absolute paths inside the repo.
 
 ---
 
@@ -144,6 +146,13 @@ chrono speaks **MCP**. An AI can answer questions about your history by reading
 { "mcpServers": { "chrono": { "command": "chrono", "args": ["mcp"] } } }
 ```
 The server starts on demand and dies with the session (serverless). It auto-discovers the index from the working directory. If a repo has no index yet, the tools reply *"run chrono init"* instead of failing.
+
+**Many repos, one server.** Give it a root (`chrono mcp --repos /data/repos`, or `CHRONO_REPOS`)
+and every tool takes an optional `repo`: a name under the root, a `<name>@<branch>` label
+(a worktree, or a directory/symlink named like the label), or an absolute path. Each tree
+keeps its own `.chrono/index.db` (`chrono init <tree>`); the `repos` tool lists which are
+indexed, and every answer says which repo it is about (`"repo": "kindling@main"`). The full
+contract (label, entity key, `repo`, dataset format) is in [`docs/CONTRACTS.md`](docs/CONTRACTS.md).
 
 ---
 
@@ -183,7 +192,7 @@ never translated (it's the contract).
 - **Efficient:** ~6.7 MB binary; a few-MB index (e.g. 876 commits ≈ 1.5 MB, 17k commits ≈ tens of MB); incremental `sync` in milliseconds; no background processes.
 - **Local and private:** everything lives in `.chrono/` inside your repo. The forge (`gh`) is only queried when available (and it prefers your `upstream` remote on forks).
 
-More detail in [`docs/`](docs/): architecture, output contract, decisions and roadmap.
+More detail in [`docs/`](docs/): architecture, output contract, [contracts with other tools](docs/CONTRACTS.md), decisions and roadmap. Changes per version: [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 

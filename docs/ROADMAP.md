@@ -22,7 +22,9 @@ Strategy: **make it usable for personal use, test it, and only if it works well,
 
 **Dependency UX (v0.1.1)** ✅ — `init` warns precisely when the forge is skipped (no `gh` / no GitHub remote / `gh` not authenticated) instead of skipping silently; `init`/`sync` give an actionable error if `git` is missing. Queries still work without `git` (they only read the SQLite index).
 
-Full commands: init, sync, hotspots, coupling, owners, bugs, churn, tickets, prs, branches, phases, search, similar, mcp.
+**Contracts with UltraMemory / kindling (v0.2.0)** ✅ — one `chrono mcp` serves many repos: optional `repo` argument on every tool (name under `--repos`/`CHRONO_REPOS`, `<name>@<branch>`, absolute path), `repos` tool, `"repo"` label in every answer, `path#symbol` accepted as a file key; `chrono export-dataset` writes the JSONL that kindling's `kling ai chispa train` reads (Chispa replaces chrono's own planned classifier). See `CONTRACTS.md`. Next: `CHRONO_CHISPA_MODEL` to query a trained `.chispa` at ingest.
+
+Full commands: init, sync, hotspots, coupling, owners, bugs, churn, tickets, prs, branches, phases, search, similar, mcp, export-dataset.
 
 > Decision point: does it help in real use? If yes → Part B.
 
