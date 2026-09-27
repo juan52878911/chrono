@@ -85,3 +85,12 @@ func TestTextRecortaSinPartirRunas(t *testing.T) {
 		t.Fatal("un asunto vacío tras quitar el prefijo no se exporta")
 	}
 }
+
+func TestTextNoTiraUnaRunaQueCabe(t *testing.T) {
+	if got := Text("docs: x", "ab—", 5); got != "x\nab—" { // "ab—" son 5 bytes: cabe entero
+		t.Fatalf("%q", got)
+	}
+	if got := Text("docs: x", "ab—c", 4); got != "x\nab" {
+		t.Fatalf("%q", got)
+	}
+}

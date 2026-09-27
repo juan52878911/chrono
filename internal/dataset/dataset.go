@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // DefaultBodyBytes es cuánto cuerpo se conserva tras el asunto (como kindling).
@@ -73,7 +74,7 @@ func Export(db *sql.DB, w io.Writer, opt Options) (int, error) {
 	rows, err := db.Query(`SELECT c.sha, c.authored_at, c.subject, COALESCE(c.body,''), cl.kind, cl.source
 		FROM commits c JOIN classifications cl ON cl.commit_sha = c.sha
 		WHERE cl.kind <> '' AND cl.kind <> 'other' AND c.authored_at >= ?
-		ORDER BY c.authored_at, c.sha`, since)
+		ORDER BY unixepoch(c.authored_at), c.sha`, since)
 	if err != nil {
 		return 0, err
 	}
@@ -170,14 +171,12 @@ func cleanBody(b string, n int) string {
 	}
 	s := strings.Join(keep, "\n")
 	if len(s) > n {
+		// Corta en el último inicio de runa <= n: no parte una runa UTF-8
+		// ni tira una que cabe entera.
+		for n > 0 && !utf8.RuneStart(s[n]) {
+			n--
+		}
 		s = s[:n]
-		// No partir una runa UTF-8.
-		for len(s) > 0 && s[len(s)-1]&0xC0 == 0x80 {
-			s = s[:len(s)-1]
-		}
-		if len(s) > 0 && s[len(s)-1] >= 0xC0 {
-			s = s[:len(s)-1]
-		}
 	}
 	return s
 }
