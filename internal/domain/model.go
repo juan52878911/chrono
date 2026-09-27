@@ -46,7 +46,7 @@ type Classification struct {
 	Kind       string  // fix|feat|refactor|docs|chore|test|other
 	Severity   int     // 1..5, 0 = sin señal
 	Confidence float64 // 0..1; en Nivel 0 es heurística.
-	Source     string  // "rules" | "local-model" | "jev" | "llm"
+	Source     string  // "rules" | "forge" | "chispa"
 }
 
 // --- Resultados de métricas (se serializan según OUTPUT-CONTRACT.md) ---

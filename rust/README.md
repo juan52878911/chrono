@@ -12,7 +12,9 @@ en [`../docs/DESIGN-GENERAL-CORE.md`](../docs/DESIGN-GENERAL-CORE.md).
 - R1 — store SQLite v2 + adaptador git + paridad con Go. Pendiente.
 - R2 — resto de consultas + MCP + i18n → sustituye al binario Go. Pendiente.
 - R3 — adaptadores (jsonl/csv/textlog/changelog/journald) + multi-fuente + rollups.
-- R4 — JEV Level-1 (features + inferencia i16) + trainer + eval.
+- R4 — Level-1 con Chispa (kindling): `chrono export-dataset` ✅ → `kling ai chispa
+  train|eval` → consulta opcional de un `.chispa` (siguiente paso). chrono no
+  entrena ni embebe un clasificador propio; ver `../docs/CONTRACTS.md`.
 - R5 — escala medida (bandas SimHash, bench, caps reales).
 
 ## Compilar / probar

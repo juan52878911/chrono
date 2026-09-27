@@ -35,14 +35,14 @@ pub struct Link {
     pub target: String,
 }
 
-/// Etiqueta de clasificación multitarea (Level-0 reglas o Level-1 JEV).
+/// Etiqueta de clasificación multitarea (Level-0 reglas o Level-1 Chispa).
 /// `task`: "kind" | "is_fix" | "bug_category" | "severity" | "log_category".
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Label {
     pub task: String,
     pub label: String,
     pub confidence: f64,
-    /// "rules" | "jev" | "forge" — de dónde vino la etiqueta.
+    /// "rules" | "chispa" | "forge" — de dónde vino la etiqueta.
     pub source: String,
     /// Evidencia legible (top features o la regla que disparó).
     pub evidence: Vec<String>,
@@ -83,7 +83,7 @@ impl Event {
     }
 
     /// Primer segmento de cada entidad tocada (feature/dimensión "top:<dir>").
-    /// Determinista y ordenado; útil para JEV y para agregados por directorio.
+    /// Determinista y ordenado; útil como campo de Chispa y para agregados por directorio.
     pub fn top_segments(&self) -> Vec<String> {
         let mut segs: Vec<String> = self
             .touches

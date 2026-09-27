@@ -8,7 +8,7 @@ The core (`internal/domain`) speaks in domain terms (Revision, Author, Change, m
 | --- | --- | --- |
 | **Source** (history) | Yes | git today; GitLab/others on the roadmap → a real second adapter. |
 | **Tracker** (tickets/PRs) | Yes | GitHub today; Jira/Linear committed. |
-| **Classifier** | Yes | real implementations: rules → local → Jev/LLM. |
+| **Classifier** | Yes | real implementations: rules → Chispa (a `.chispa` model trained with kindling's `kling ai chispa train`, see CONTRACTS.md). |
 | **Store** | No (direct call) | only SQLite for now. Add the interface the day of the 2nd backend. |
 | **Embedder** | No (arrives in v2) | only local ONNX planned. |
 

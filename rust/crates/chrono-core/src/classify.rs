@@ -1,6 +1,7 @@
-//! Puerto Classifier: Level-0 (reglas) y Level-1 (JEV) implementan el mismo
+//! Puerto Classifier: Level-0 (reglas) y Level-1 (un modelo Chispa entrenado
+//! con `kling ai chispa train`, consultado desde fuera) implementan el mismo
 //! trait y se encadenan con precedencia explícita. Las señales duras ganan
-//! siempre; JEV solo actúa bajo umbral de confianza.
+//! siempre; Chispa solo actúa cuando su predicción es `confident`.
 
 use crate::domain::{Event, Label};
 
@@ -11,7 +12,7 @@ pub trait Classifier {
 }
 
 /// Cadena determinista de clasificadores. Para cada `task`, la PRIMERA etiqueta
-/// producida gana: coloca primero el de señales duras (reglas), luego JEV.
+/// producida gana: coloca primero el de señales duras (reglas), luego Chispa.
 pub struct Chain {
     stages: Vec<Box<dyn Classifier>>,
 }
@@ -65,10 +66,10 @@ mod tests {
     #[test]
     fn la_primera_etapa_gana_por_tarea() {
         let rules = Box::new(Fixed("rules", vec![lbl("kind", "fix", "rules")]));
-        let jev = Box::new(Fixed("jev", vec![lbl("kind", "feat", "jev"), lbl("bug_category", "network", "jev")]));
-        let chain = Chain::new(vec![rules, jev]);
+        let chispa = Box::new(Fixed("chispa", vec![lbl("kind", "feat", "chispa"), lbl("bug_category", "network", "chispa")]));
+        let chain = Chain::new(vec![rules, chispa]);
         let out = chain.classify(&Event::default());
-        // "kind" lo fija reglas (fix), no JEV (feat); "bug_category" lo aporta JEV.
+        // "kind" lo fija reglas (fix), no Chispa (feat); "bug_category" lo aporta Chispa.
         assert_eq!(out.len(), 2);
         let kind = out.iter().find(|l| l.task == "kind").unwrap();
         assert_eq!(kind.label, "fix");

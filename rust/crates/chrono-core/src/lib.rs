@@ -2,7 +2,7 @@
 //!
 //! Dominio puro, sin I/O ni dependencias: el modelo de evento temporal general
 //! (`Event`) y los puertos (`Source`/`Cursor`, `Classifier`). Los adaptadores
-//! (git, jsonl, sqlite, jev…) viven en crates aparte y dependen de este.
+//! (git, jsonl, sqlite…) viven en crates aparte y dependen de este.
 //!
 //! Ver `docs/DESIGN-GENERAL-CORE.md` en la raíz del repo.
 

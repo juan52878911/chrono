@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS labels (
     task       TEXT NOT NULL,             -- "is_fix" | "kind" | "bug_category" | ...
     label      TEXT NOT NULL,
     confidence REAL NOT NULL DEFAULT 0,
-    source     TEXT NOT NULL DEFAULT '',  -- "rules" | "jev" | "forge"
+    source     TEXT NOT NULL DEFAULT '',  -- "rules" | "chispa" | "forge"
     evidence   TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (event_id, task)
 );

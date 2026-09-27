@@ -1,11 +1,17 @@
-# Diseño — núcleo general, JEV embebido y migración a Rust
+# Diseño — núcleo general, clasificador Chispa y migración a Rust
 
 > Estado: **diseño aprobado, en desarrollo**. Documento vivo.
 > Decisiones del dueño tomadas (2026-09): ver §0.
+>
+> **Cambio 2026-09-26:** el clasificador propio embebido que planeaba este diseño se
+> **descarta**. Su equivalente ya existe en kindling como **Chispa** (`kling ai chispa
+> train|eval|predict|deploy`): chrono exporta datos (`chrono export-dataset`) y, como
+> mucho, consulta un `.chispa` ya entrenado. Ver §5 y `CONTRACTS.md`.
 
 Objetivo: que chrono deje de ser "solo git" y analice **cualquier traza histórica**
 (logs, changelogs, timelines de incidentes, CSV con tiempo, despliegues…),
-con un clasificador propio embebido (**JEV**), manteniendo lo que ya funciona:
+con clasificación aprendida vía **Chispa** (kindling) en vez de un clasificador propio,
+manteniendo lo que ya funciona:
 binario único, local, determinista, sin servidor, sin runtime externo, MIT.
 
 ---
@@ -17,15 +23,17 @@ binario único, local, determinista, sin servidor, sin runtime externo, MIT.
 2. **Lenguaje**: se **migra todo a Rust** *antes* de la generalización, por rendimiento
    y control de memoria. El binario Go actual (v0.1.1) se mantiene funcionando hasta que
    el port Rust alcance paridad; conviven en el repo (`/` = Go actual, `rust/` = port).
-3. **Clasificador por defecto**: `rules` (Level-0) hasta que exista `docs/JEV-EVAL.md`
-   con métricas que demuestren mejora. JEV entra **opt-in** (`classifier: rules+jev`).
+3. **Clasificador por defecto**: `rules` (Level-0). El Level-1 es un modelo Chispa
+   entrenado y evaluado con `kling ai chispa train|eval` (esa evaluación sustituye a
+   la evaluación propia que se planeaba); entra **opt-in** y las reglas siguen de respaldo.
 4. **Migración de índice v1→v2**: **reindex** avisado (el índice es regenerable en segundos;
    no se hace migración in-place).
 
 > Nota honesta sobre Rust: el binario Go ya responde consultas en <0,5 s y pesa ~7 MB.
 > Rust aporta sobre todo (a) ingesta/featurización paralela con memoria controlada para
-> trazas de millones de líneas, (b) inferencia JEV determinista sin las trampas de FMA de Go,
-> (c) un solo lenguaje para trainer y serving. El coste es una reescritura completa; por eso
+> trazas de millones de líneas y (b) un núcleo multi-fuente más limpio. (La inferencia
+> determinista de un clasificador lineal ya la da Chispa en kindling, en Go puro y con los
+> mismos bits en amd64/arm64.) El coste es una reescritura completa; por eso
 > se hace por fases con paridad verificada contra el Go actual en cada paso.
 
 ---
@@ -171,48 +179,46 @@ issues, pr_commits, blob_lines   -- adaptador git/tracker
 
 ---
 
-## 5. JEV dentro del binario
+## 5. Clasificación aprendida: Chispa (kindling), no un clasificador propio
 
-**Algoritmo**: regresión logística multiclase (una cabeza por tarea) sobre *hashing trick*
-(FNV-1a → 2^17/2^18 buckets), con features: uni+bigramas de `title`(+300 chars de `body`),
-char n-gramas 3–5, y features estructurales (`src:<kind>`, `lvl:<level>`, `conv:<prefijo>`,
-`n_touch:<bucket>`, `top:<1er segmento de cada entity>`, `has_ticket`, `is_revert`,
-`attr:status=5xx`…). Descartados: NB (mal calibrado; sirve de baseline), SVM (sin probas),
-transformer/ONNX (CGO/tamaño). Opción B si LR se queda corto: fastText cuantizado.
+**Decisión (2026-09-26).** El clasificador embebido que planeaba esta sección (regresión
+logística con *hashing trick*, pesos `i16`, trainer aparte, eval por versión) **ya existe**
+en kindling como **Chispa**: `pkg/chispa`, `kling ai chispa train|eval|predict|inspect|deploy`,
+con calibración por clase, umbral de confianza, `escalate`, evidencia y bucle de mejora
+continua (`kling ai retrain`). Reimplementarlo en chrono sería el segundo clasificador lineal
+de la casa. El nombre que usaba este diseño se retira por motivos legales (pertenece a un
+tercero). chrono y kindling comparten **formato**, no código (ver `CONTRACTS.md`):
 
-**Determinismo cross-plataforma**: pesos **`i16` cuantizados**, features `i32`, acumulación
-`i64` en orden fijo, argmax con desempate por índice; softmax en `f64` solo para reportar.
-En Rust esto es directo y sin la trampa del FMA de Go.
+1. **Datos**: `chrono export-dataset` escribe los commits etiquetados como JSONL
+   `{"text","label","fields"}` — exactamente lo que lee `kling ai chispa train`. Etiqueta =
+   señal determinista (forge > revert > prefijo conventional > `is_fix` por palabra clave),
+   prefijo **eliminado del texto**, `fields` = `files`/`churn`/`ext`/`dir` como
+   `tools/chispa-commits` de kindling. Verificado: sobre OpenWA (1.726 commits) el JSONL del
+   Go y el del Rust son idénticos y `kling ai chispa train` lo acepta tal cual.
+2. **Entrenar y evaluar**: fuera de chrono, con `kling ai chispa train|eval`. La honestidad
+   que exigía este diseño (eval por versión, opt-in hasta demostrar mejora) la da
+   `kling ai chispa eval` (cobertura, precisión en lo confiado, ECE) y `docs/CHISPA-EVAL.md`
+   de kindling.
+3. **Servir (siguiente paso, no implementado)**: con `CHRONO_CHISPA_MODEL=<m.chispa>`,
+   `init`/`sync` pasarían los commits **sin señal dura** a `kling ai chispa predict -model M`
+   por stdin (JSONL, una respuesta por línea) y guardarían la etiqueta solo si
+   `decision == "confident"`, con `source="chispa"` y la evidencia. Reglas por defecto y de
+   respaldo (sin `kling`, sin modelo o con `escalate`, se queda la de reglas). Pendiente
+   porque toca la ingesta de los dos binarios; si la latencia del subproceso importara, un
+   lector del formato `.chispa` en Rust es la alternativa.
 
-**Entrenar fuera / servir dentro**:
-- Trainer = crate/bin aparte (`chrono-jev-train`), **no se distribuye**. En Rust para reutilizar
-  el **mismo tokenizador** que sirve (evita deriva). SGD/AdaGrad + L1.
-- Dataset por **supervisión débil gratis**: conventional commits de repos públicos
-  (etiqueta = prefijo, **eliminado del texto**), labels del forge, Loghub para logs.
-  `chrono export-training` produce el JSONL desde cualquier índice.
-- Artefacto `jev-<task>-v<N>.bin` (magic, feature_spec_hash, buckets, labels, bias, pesos
-  sparse `i16` con L1 podado), gzip, embebido con `include_bytes!`. ~**+2–3 MB** por 4 cabezas.
-  Override del usuario en `.chrono/models/`. Hash del modelo activo en `meta` y manifiesto;
-  cambiarlo dispara **reclasificación** (recalcula `labels` desde `events`, sin reingerir).
-
-**Integración como Level-1** (trait `Classifier` + cadena):
-1. Señales duras (revert, conventional, forge, `level` nativo) → `source="rules"`, **ganan siempre**.
-2. Si no hay señal dura → JEV; si `p_max ≥ τ_task` → `source="jev"` + `evidence` (top features por `w·x`).
-3. Si `p_max < τ` → reglas blandas (`fix_keywords`, conf 0.5) u `other`. No se inventan categorías.
-
-**Honestidad**: `JEV-EVAL.md` por versión; **opt-in** hasta demostrar mejora. Objetivos
-realistas: `kind` macro-F1 ~0.75–0.85, `bug_category` ~0.5–0.65. **Severidad 1–5 desde prosa:
-no fiable, no se promete.** Solo severidad nativa de la fuente. ES/EN en v1.
-
-**Latencia**: 5–20 µs/evento → <0,5 s extra en 17.678 commits; en logs se clasifica una vez
-por template y se hereda (segundos, no minutos).
+**Integración como Level-1** (trait `Classifier` + cadena, sin cambios):
+1. Señales duras (revert, conventional, forge, `level` nativo) → `source="rules"`/`"forge"`, **ganan siempre**.
+2. Si no hay señal dura → Chispa; si `confident` → `source="chispa"` + `evidence`.
+3. Si escala → reglas blandas (`fix_keywords`) u `other`. No se inventan categorías.
+**Severidad 1–5 desde prosa: no fiable, no se promete.**
 
 ---
 
 ## 6. Optimización a escala
 
 - **Pipeline determinista con paralelismo** (aquí gana Rust): `Cursor.next` asigna `seq` →
-  N workers de featurización+SimHash+JEV → writer que inserta **en orden de `seq`**
+  N workers de featurización+SimHash → writer que inserta **en orden de `seq`**
   (IDs/rowids deterministas pese al paralelismo). Test: ingerir dos veces y comparar
   `sha256` del `.db` tras `VACUUM`.
 - **Sentencias preparadas** en el writer (una vez, no SQL literal por fila). Medir con
@@ -233,7 +239,7 @@ por template y se hereda (segundos, no minutos).
 ## 7. Plan por fases
 
 Con Rust primero, el orden es: montar el port Rust del núcleo → paridad con git →
-adaptadores → JEV → escala. Cada fase verifica paridad contra el Go actual (bun: 17.678 = 17.678).
+adaptadores → Chispa (datos) → escala. Cada fase verifica paridad contra el Go actual (bun: 17.678 = 17.678).
 
 | Fase | Contenido | Estado |
 | --- | --- | --- |
@@ -241,7 +247,7 @@ adaptadores → JEV → escala. Cada fase verifica paridad contra el Go actual (
 | **R1 · Store + adaptador git + paridad** | `chrono-store` (SQLite v2), `chrono-source-git` (ingesta git tras `Cursor`), consultas hotspots/coupling/owners/churn; CLI mínima `init`+`hotspots`. Verificar 17.678=17.678 y top-15 vs Go. | pendiente |
 | **R2 · Resto de consultas + MCP + i18n** | bugs(rules)/tickets/prs/branches/search/similar/phases; servidor MCP; i18n EN/ES; contrato v2 `entity`/`id`; paridad total con Go → sustituye al binario Go. | pendiente |
 | **R3 · Adaptadores + multi-fuente + rollups** | **hecho:** jsonl, **csv**, **textlog** (syslog/nginx sin `regex`), **changelog** (Keep a Changelog → `release`); **`sources` poblada + `chrono add` + `sync` multi-fuente** (paridad git verificada; divergencia por longitud+hash de prefijo); `SourceConfig.options` desde `.chrono/config.json`; consultas log-native **`timeline`/`top`/`correlate`** (leen eventos crudos) en metrics + CLI + MCP. **templates+rollups** (`chrono patterns`, Drain-light determinista, schema v3); **oslog** (log del sistema, adaptable al SO: `log show` en macOS, `journalctl -o json` en Linux; `chrono add oslog`). **pendiente:** `event_dims`; `events`. | completo (salvo extras) |
-| **R4 · JEV Level-1** | crate `chrono-jev` (features+inferencia i16), `chrono-jev-train`, dataset, `JEV-EVAL.md`, opt-in. | pendiente |
+| **R4 · Level-1 con Chispa** | **hecho:** `chrono export-dataset` (Go y Rust, JSONL de Chispa). **siguiente:** consultar un `.chispa` con `kling ai chispa predict` bajo `CHRONO_CHISPA_MODEL`, opt-in. Sin crate de clasificador propio. | parcial |
 | **R5 · Escala medida** | **hecho:** `chrono bench` (latencias + stats), caps reales (`body_max_bytes`/`max_events_per_source`, declarados en `meta`, 0=sin cap). **pendiente:** bandas SimHash (solo >1M eventos, requiere fixture para verificar); `gh --limit` configurable. | parcial |
 
 ---
@@ -250,12 +256,12 @@ adaptadores → JEV → escala. Cada fase verifica paridad contra el Go actual (
 
 **Riesgos**: perder nitidez git al generalizar (mitigado con `Touch.attrs`+`entities.size` y
 test de paridad); adaptadores de texto sin preset (→ `detect` **rechaza**, no ingiere basura);
-JEV sin eval (→ `JEV-EVAL.md` + opt-in, como ya se documentó el fallo del clustering por
+un Level-1 sin eval (→ `kling ai chispa eval` + opt-in, como ya se documentó el fallo del clustering por
 frecuencia en `DECISIONS.md §5`); determinismo con paralelismo (→ `seq`+writer ordenado+i16);
 **coste de la reescritura Rust** (→ paridad verificada por fase; el Go sigue vivo hasta R2).
 
 **Anti-scope**: journal binario/PCAP/OTel-proto/Kafka; detección de anomalías/causa raíz/
-predicción; embeddings/LLM en el binario (fase B, proveedor externo); JEV sin dataset+métrica;
+predicción; embeddings/LLM en el binario (fase B, proveedor externo); un clasificador aprendido propio (se usa Chispa);
 `serve`/multi-repo remoto (segundo producto).
 
 **Decisiones abiertas** (menores, para más adelante): caps por defecto a validar con un log
@@ -302,5 +308,5 @@ regex en el manifiesto** (`symbols_rules_hash`). Cambio de regex → reindex de 
 
 **Anti-scope** (además del §8): no embeber 40 gramáticas ni TS/C++; no `.so`/`.wasm` ni
 descargas; no parsear la historia por defecto; no call graph / renames de función /
-complejidad / LSP; no indexar diffs; nombres de símbolo no son features de JEV.
+complejidad / LSP; no indexar diffs; nombres de símbolo no son campos del dataset de Chispa.
 
