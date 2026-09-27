@@ -11,11 +11,13 @@ import (
 	"strings"
 
 	"github.com/juan52878911/chrono/internal/config"
+	"github.com/juan52878911/chrono/internal/dataset"
 	"github.com/juan52878911/chrono/internal/i18n"
 	"github.com/juan52878911/chrono/internal/ingest"
 	"github.com/juan52878911/chrono/internal/mcp"
 	"github.com/juan52878911/chrono/internal/metrics"
 	"github.com/juan52878911/chrono/internal/report"
+	"github.com/juan52878911/chrono/internal/repos"
 	"github.com/juan52878911/chrono/internal/store"
 )
 
@@ -46,6 +48,10 @@ Queries (JSON, see docs/OUTPUT-CONTRACT.md):
 
 Integration:
   mcp                  MCP server over stdio (for opencode / Claude). Serverless.
+                       --repos DIR (or CHRONO_REPOS) serves every repo under DIR:
+                       each tool takes an optional "repo" (name, name@branch, abs path).
+  export-dataset       Labeled commits as JSONL for 'kling ai chispa train'
+                       (--out FILE, --since DATE, --body N). See docs/CONTRACTS.md.
 
 Options:
   --db PATH            Explicit index (otherwise auto-discovers .chrono/index.db).
@@ -80,6 +86,10 @@ Consulta (JSON según docs/OUTPUT-CONTRACT.md):
 
 Integración:
   mcp                  Servidor MCP por stdio (para opencode / Claude). Serverless.
+                       --repos DIR (o CHRONO_REPOS) sirve todos los repos bajo DIR:
+                       cada tool acepta "repo" opcional (nombre, nombre@rama, ruta abs).
+  export-dataset       Commits etiquetados en JSONL para 'kling ai chispa train'
+                       (--out FICHERO, --since FECHA, --body N). Ver docs/CONTRACTS.md.
 
 Opciones:
   --db RUTA            Índice explícito (si no, se auto-descubre .chrono/index.db).
@@ -97,6 +107,9 @@ type flags struct {
 	db    string
 	since string
 	lang  string
+	repos string
+	out   string
+	body  int
 	pos   string
 }
 
@@ -120,6 +133,21 @@ func parseArgs(args []string) (cmd string, f flags) {
 			if i+1 < len(args) {
 				i++
 				f.lang = args[i]
+			}
+		case "--repos", "-repos":
+			if i+1 < len(args) {
+				i++
+				f.repos = args[i]
+			}
+		case "--out", "-o":
+			if i+1 < len(args) {
+				i++
+				f.out = args[i]
+			}
+		case "--body":
+			if i+1 < len(args) {
+				i++
+				fmt.Sscanf(args[i], "%d", &f.body)
 			}
 		default:
 			if strings.HasPrefix(args[i], "--") {
@@ -193,11 +221,12 @@ func main() {
 		emit(st, "hotspots", f.since, 25, len(res), map[string]any{"hotspots": res}, err)
 	case "coupling":
 		requirePos(f.pos, i18n.T("coupling needs a <file>", "coupling necesita un <fichero>"))
-		pairs, _, err := metrics.Coupling(st.DB(), f.pos, 2, f.since, 25)
-		emit(st, "coupling", f.since, 25, len(pairs), map[string]any{"for": f.pos, "coupled": pairs}, err)
+		file := repos.EntityKey(f.pos, repoDir(st))
+		pairs, _, err := metrics.Coupling(st.DB(), file, 2, f.since, 25)
+		emit(st, "coupling", f.since, 25, len(pairs), map[string]any{"for": file, "coupled": pairs}, err)
 	case "owners":
 		requirePos(f.pos, i18n.T("owners needs a <path>", "owners necesita una <ruta>"))
-		owners, bf, err := metrics.Owners(st.DB(), f.pos, f.since)
+		owners, bf, err := metrics.Owners(st.DB(), repos.EntityKey(f.pos, repoDir(st)), f.since)
 		emit(st, "owners", f.since, len(owners), len(owners), map[string]any{"owners": owners, "bus_factor": bf}, err)
 	case "bugs":
 		res, err := metrics.CommonBugs(st.DB(), bugTaxonomy(st), f.since, 15)
@@ -227,6 +256,8 @@ func main() {
 		requirePos(f.pos, i18n.T("search needs <text>", "search necesita un <texto>"))
 		res, err := metrics.Search(st.DB(), st.HasFTS(), f.pos, 25)
 		emit(st, "search", "", 25, len(res), map[string]any{"query": f.pos, "results": res}, err)
+	case "export-dataset":
+		cmdExportDataset(st, f)
 	case "similar":
 		requirePos(f.pos, i18n.T("similar needs a <sha>", "similar necesita un <sha>"))
 		res, err := metrics.Similar(st.DB(), f.pos, 4, 15)
@@ -255,9 +286,47 @@ func runMCP(f flags) {
 			}
 		}
 	}
-	if err := mcp.Serve(st); err != nil {
+	root := f.repos
+	if root == "" {
+		root = os.Getenv(repos.EnvRoot)
+	}
+	if root != "" {
+		if abs, err := filepath.Abs(root); err == nil {
+			root = abs
+		}
+	}
+	mcp.Version = version
+	if err := mcp.Serve(st, root); err != nil {
 		fatal(err)
 	}
+}
+
+// repoDir es la raíz del repo del índice ("" si no se sabe).
+func repoDir(st *store.Store) string {
+	rp, _, _ := st.Meta("repo_path")
+	return rp
+}
+
+// cmdExportDataset escribe los commits etiquetados como JSONL de Chispa.
+func cmdExportDataset(st *store.Store, f flags) {
+	w := os.Stdout
+	if f.out != "" && f.out != "-" {
+		fh, err := os.Create(f.out)
+		if err != nil {
+			fatal(err)
+		}
+		defer fh.Close()
+		w = fh
+	}
+	label := ""
+	if rp := repoDir(st); rp != "" {
+		label = repos.Label(rp)
+	}
+	n, err := dataset.Export(st.DB(), w, dataset.Options{Since: f.since, BodyBytes: f.body, Repo: label})
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Fprintf(os.Stderr, i18n.T("export-dataset: %d labeled commits\n", "export-dataset: %d commits etiquetados\n"), n)
 }
 
 // cmdInit prepara el índice del repo actual (o el indicado) sin más ceremonia.
