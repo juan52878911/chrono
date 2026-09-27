@@ -73,6 +73,13 @@ This is **the product contract**: which questions chrono answers and their exact
 ]}
 ```
 
+## Over MCP
+
+`chrono mcp` returns the same `result` objects (without the envelope) as the text of each
+tool result, plus a top-level `"repo": "<name>@<branch>"`. Every tool takes an optional
+`repo` argument and `coupling`/`owners` accept `path#symbol`; see
+[`CONTRACTS.md`](CONTRACTS.md) for the resolution rules, errors and the `repos` tool.
+
 ## Trimming rules
 
 1. Order by relevance (score / support / fixes) and cut at `max_items`.
