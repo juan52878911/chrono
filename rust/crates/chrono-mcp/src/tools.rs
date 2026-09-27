@@ -6,10 +6,12 @@
 //! mismo criterio para las que no tiene el CLI.
 
 use std::path::Path;
+use std::rc::Rc;
 
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
+use crate::repos::{self, ResolveError};
 use crate::since::since_to_epoch;
 use crate::{Result, State};
 
@@ -33,7 +35,10 @@ fn since_prop() -> Value {
     str_prop("Ventana temporal ISO, p.ej. 2025-01-01 (opcional)")
 }
 
-fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
+const REPO_DESC: &str = "Repo to answer about (optional): a name under the repos root (CHRONO_REPOS / --repos), <name>@<branch>, or an absolute path. Default: the repo of the server's working directory.";
+
+fn tool(name: &str, description: &str, mut properties: Value, required: &[&str]) -> Value {
+    properties["repo"] = str_prop(REPO_DESC);
     let mut schema = json!({"type": "object", "properties": properties});
     if !required.is_empty() {
         schema["required"] = json!(required);
@@ -41,7 +46,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
     json!({"name": name, "description": description, "inputSchema": schema})
 }
 
-/// Los 11 tools expuestos por el servidor (paridad con el Go + `branches`/`prs`).
+/// Los tools expuestos por el servidor (paridad con el Go + log-native + `repos`).
 pub fn tool_defs() -> Vec<Value> {
     vec![
         tool(
@@ -53,13 +58,13 @@ pub fn tool_defs() -> Vec<Value> {
         tool(
             "coupling",
             "Qué ficheros cambian junto a uno dado.",
-            json!({"file": str_prop("Ruta del fichero"), "since": since_prop()}),
+            json!({"file": str_prop("Ruta del fichero relativa a la raíz del repo; acepta ruta#símbolo (se ignora el #símbolo)"), "since": since_prop()}),
             &["file"],
         ),
         tool(
             "owners",
             "Propiedad por autor y bus factor de una ruta.",
-            json!({"path": str_prop("Prefijo de ruta"), "since": since_prop()}),
+            json!({"path": str_prop("Prefijo de ruta relativo a la raíz del repo; acepta ruta#símbolo"), "since": since_prop()}),
             &["path"],
         ),
         tool(
@@ -151,6 +156,11 @@ pub fn tool_defs() -> Vec<Value> {
             }),
             &["id"],
         ),
+        json!({
+            "name": "repos",
+            "description": "Repos under the repos root and whether each has a chrono index (label <name>@<branch>).",
+            "inputSchema": {"type": "object", "properties": {}},
+        }),
     ]
 }
 
@@ -163,6 +173,69 @@ fn no_index_text() -> String {
 
 fn text_content(text: String) -> Value {
     json!({"content": [{"type": "text", "text": text}]})
+}
+
+fn error_content(text: String) -> Value {
+    json!({"content": [{"type": "text", "text": text}], "isError": true})
+}
+
+/// Índice elegido para una llamada: el por defecto o uno resuelto por `repo`.
+enum Chosen<'a> {
+    Default(&'a chrono_store::Store),
+    Other(Rc<chrono_store::Store>),
+}
+
+/// Resuelve `repo` → (store, raíz, etiqueta), o el resultado de tool con el
+/// error ya redactado para el agente.
+fn choose<'a>(state: &'a State, spec: &str) -> std::result::Result<(Chosen<'a>, Option<std::path::PathBuf>, Option<String>), Value> {
+    let default = |s: &'a chrono_store::Store| {
+        Ok((Chosen::Default(s), state.default_dir().map(Path::to_path_buf), state.default_label().map(str::to_string)))
+    };
+    if spec.is_empty() {
+        return match state.store() {
+            Some(s) => default(s),
+            None => Err(text_content(no_index_text())),
+        };
+    }
+    // Sin raíz, el nombre (o etiqueta) del repo por defecto sigue valiendo.
+    if let (None, Some(s), Some(lbl)) = (state.root(), state.store(), state.default_label()) {
+        if spec == lbl || spec == repos::split_label(lbl).0 {
+            return default(s);
+        }
+    }
+    match repos::resolve(state.root(), spec) {
+        Ok(t) => match state.open_index(&t.index) {
+            Ok(s) => Ok((Chosen::Other(s), Some(t.dir), Some(t.label))),
+            Err(e) => Err(error_content(format!("chrono: cannot open the index of {}: {e}", t.label))),
+        },
+        Err(e @ ResolveError::NoIndex(_)) | Err(e @ ResolveError::Invalid(_)) => Err(error_content(format!("chrono: {e}"))),
+    }
+}
+
+fn list_repos(state: &State) -> Result<Value> {
+    let mut out = json!({"root": state.root().map(|p| p.display().to_string())});
+    if let Some(l) = state.default_label() {
+        out["default"] = json!(l);
+    }
+    match state.root() {
+        None => {
+            out["repos"] = json!([]);
+            out["note"] = json!(format!(
+                "no repos root configured: set {} or run `chrono mcp --repos DIR`",
+                repos::ENV_ROOT
+            ));
+        }
+        Some(root) => match repos::list(root) {
+            Ok(list) => {
+                out["repos"] = list
+                    .iter()
+                    .map(|e| json!({"repo": e.repo, "name": e.name, "path": e.path.display().to_string(), "indexed": e.indexed}))
+                    .collect();
+            }
+            Err(e) => return Ok(error_content(format!("chrono: cannot list {}: {e}", root.display()))),
+        },
+    }
+    result_content(&out)
 }
 
 fn result_content(result: &Value) -> Result<Value> {
@@ -178,9 +251,17 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
     let empty = json!({});
     let args = params.get("arguments").unwrap_or(&empty);
 
-    let store = match state.store() {
-        Some(s) => s,
-        None => return Ok(text_content(no_index_text())),
+    if name == "repos" {
+        return list_repos(state);
+    }
+    let spec = args.get("repo").and_then(Value::as_str).unwrap_or("").trim();
+    let (chosen, dir, label) = match choose(state, spec) {
+        Ok(c) => c,
+        Err(v) => return Ok(v),
+    };
+    let store: &chrono_store::Store = match &chosen {
+        Chosen::Default(s) => s,
+        Chosen::Other(s) => s,
     };
     let conn = store.conn();
     let since = args.get("since").and_then(Value::as_str).unwrap_or("");
@@ -189,12 +270,17 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
     let result = match name {
         "hotspots" => hotspots(conn, since_epoch)?,
         "coupling" => {
-            let file = arg_str(args, "file")?;
-            coupling(conn, file, since_epoch)?
+            let file = repos::entity_key(arg_str(args, "file")?, dir.as_deref());
+            if file.is_empty() {
+                return Err("tools/call: falta el argumento requerido 'file'".into());
+            }
+            coupling(conn, &file, since_epoch)?
         }
         "owners" => {
-            let path = arg_str(args, "path")?;
-            owners(conn, path, since_epoch)?
+            let path = repos::entity_key(arg_str(args, "path")?, dir.as_deref());
+            let mut v = owners(conn, &path, since_epoch)?;
+            v["path"] = json!(path);
+            v
         }
         "churn" => churn(conn, since_epoch)?,
         "search" => {
@@ -240,6 +326,10 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
         }
         other => return Err(format!("herramienta desconocida: {other}").into()),
     };
+    let mut result = result;
+    if let (Some(l), Some(obj)) = (label, result.as_object_mut()) {
+        obj.insert("repo".to_string(), json!(l));
+    }
     result_content(&result)
 }
 

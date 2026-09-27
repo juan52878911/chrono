@@ -7,6 +7,7 @@
 //! (pendiente de cablear). Mensajes de usuario en inglés por defecto,
 //! español con `--lang es` / `CHRONO_LANG=es` / locale del SO.
 
+mod dataset;
 mod glob;
 mod i18n;
 mod index;
@@ -62,7 +63,11 @@ Diagnostics:
   bench                Measure query latencies + index stats on this index.
 
 Integration:
-  mcp                  MCP server (wired separately).
+  mcp                  MCP server over stdio (for opencode / Claude). Serverless.
+                       --repos DIR (or CHRONO_REPOS) serves every repo under DIR:
+                       each tool takes an optional `repo` (name, name@branch, abs path).
+  export-dataset       Labeled commits as JSONL for 'kling ai chispa train'
+                       (--out FILE, --since DATE, --body N). See docs/CONTRACTS.md.
 
 Options:
   --db PATH            Explicit index (otherwise auto-discovers .chrono/index.db).
@@ -111,7 +116,11 @@ Diagnóstico:
   bench                Mide latencias de consulta + estadísticas del índice.
 
 Integración:
-  mcp                  Servidor MCP (se cablea aparte).
+  mcp                  Servidor MCP por stdio (para opencode / Claude). Serverless.
+                       --repos DIR (o CHRONO_REPOS) sirve todos los repos bajo DIR:
+                       cada tool acepta `repo` opcional (nombre, nombre@rama, ruta abs).
+  export-dataset       Commits etiquetados en JSONL para 'kling ai chispa train'
+                       (--out FICHERO, --since FECHA, --body N). Ver docs/CONTRACTS.md.
 
 Opciones:
   --db RUTA            Índice explícito (si no, se auto-descubre .chrono/index.db).
@@ -132,6 +141,9 @@ struct Flags {
     by: Option<String>,
     limit: Option<String>,
     entity: Option<String>,
+    repos: Option<String>,
+    out: Option<String>,
+    body: Option<String>,
     symbols: bool,
     pos: Vec<String>,
 }
@@ -178,6 +190,18 @@ fn parse_args(args: &[String]) -> Flags {
             "--entity" if i + 1 < args.len() => {
                 i += 1;
                 f.entity = Some(args[i].clone());
+            }
+            "--repos" | "-repos" if i + 1 < args.len() => {
+                i += 1;
+                f.repos = Some(args[i].clone());
+            }
+            "--out" | "-o" if i + 1 < args.len() => {
+                i += 1;
+                f.out = Some(args[i].clone());
+            }
+            "--body" if i + 1 < args.len() => {
+                i += 1;
+                f.body = Some(args[i].clone());
             }
             "--symbols" => f.symbols = true,
             a if a.starts_with("--") && a != "--version" && a != "--help" => {}
@@ -231,6 +255,43 @@ fn require_pos(f: &Flags, msg_en: &str, msg_es: &str) -> String {
     f.pos.get(1).cloned().unwrap_or_else(|| fatal(t(msg_en, msg_es)))
 }
 
+/// Clave de entidad a nivel de fichero (docs/CONTRACTS.md): `ruta#símbolo`
+/// → `ruta`, `./ruta` → `ruta`, absoluta dentro del repo → relativa. Con
+/// `--by symbol` la clave `fichero#func` se respeta tal cual.
+fn file_key(store: &chrono_store::Store, key: String, symbols_only: bool) -> String {
+    if symbols_only {
+        return key;
+    }
+    let dir = query::git_repo_path(store).ok().flatten().map(PathBuf::from);
+    chrono_mcp::repos::entity_key(&key, dir.as_deref())
+}
+
+/// `chrono export-dataset`: JSONL para `kling ai chispa train`.
+fn export_dataset(store: &chrono_store::Store, window: &query::Window, f: &Flags) {
+    let body = match f.body.as_deref() {
+        None | Some("") => dataset::DEFAULT_BODY_BYTES,
+        Some(s) => s.parse::<usize>().unwrap_or_else(|_| fatal(t(format!("invalid --body: {s:?}"), format!("--body inválido: {s:?}")))),
+    };
+    let label = query::git_repo_path(store).ok().flatten().map(|rp| chrono_mcp::repos::label(Path::new(&rp)));
+    let res = match f.out.as_deref() {
+        None | Some("-") => {
+            let stdout = std::io::stdout();
+            let mut lock = std::io::BufWriter::new(stdout.lock());
+            dataset::export(store, &mut lock, window.since_epoch, body, label.as_deref())
+                .and_then(|n| std::io::Write::flush(&mut lock).map(|_| n).map_err(Into::into))
+        }
+        Some(p) => std::fs::File::create(p).map_err(Into::into).and_then(|fh| {
+            let mut w = std::io::BufWriter::new(fh);
+            dataset::export(store, &mut w, window.since_epoch, body, label.as_deref())
+                .and_then(|n| std::io::Write::flush(&mut w).map(|_| n).map_err(Into::into))
+        }),
+    };
+    match res {
+        Ok(n) => eprintln!("{}", t(format!("export-dataset: {n} labeled commits"), format!("export-dataset: {n} commits etiquetados"))),
+        Err(e) => fatal(e),
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let f = parse_args(&args);
@@ -263,7 +324,21 @@ fn main() {
         }
         "mcp" => {
             // Servidor MCP por stdio: usa --db si se pasó, o autodescubre.
-            if let Err(e) = chrono_mcp::serve(f.db.as_ref().map(PathBuf::from)) {
+            // --repos DIR (o CHRONO_REPOS) habilita el argumento `repo` por nombre.
+            let root = f
+                .repos
+                .clone()
+                .or_else(|| std::env::var(chrono_mcp::repos::ENV_ROOT).ok())
+                .filter(|s| !s.is_empty())
+                .map(|r| {
+                    let p = PathBuf::from(r);
+                    if p.is_absolute() {
+                        p
+                    } else {
+                        std::env::current_dir().map(|c| c.join(&p)).unwrap_or(p)
+                    }
+                });
+            if let Err(e) = chrono_mcp::serve(f.db.as_ref().map(PathBuf::from), root) {
                 fatal(e);
             }
             return;
@@ -297,12 +372,16 @@ fn main() {
     let out = match cmd {
         "hotspots" => query::hotspots(&store, &window, symbols_only),
         "coupling" => {
-            let entity = require_pos(&f, "coupling needs an <entity>", "coupling necesita una <entity>");
+            let entity = file_key(&store, require_pos(&f, "coupling needs an <entity>", "coupling necesita una <entity>"), symbols_only);
             query::coupling(&store, &window, &entity, symbols_only)
         }
         "owners" => {
-            let prefix = require_pos(&f, "owners needs a <path>", "owners necesita una <ruta>");
+            let prefix = file_key(&store, require_pos(&f, "owners needs a <path>", "owners necesita una <ruta>"), symbols_only);
             query::owners(&store, &window, &prefix, symbols_only)
+        }
+        "export-dataset" => {
+            export_dataset(&store, &window, &f);
+            return;
         }
         "bugs" => query::bugs(&store, &window),
         "churn" => query::churn(&store, &window, symbols_only),

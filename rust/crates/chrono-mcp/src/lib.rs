@@ -12,12 +12,22 @@
 //! `tools/call` responde con un texto pidiendo `chrono init` en vez de
 //! fallar. Si `db` es `None`, se autodescubre `.chrono/index.db` subiendo
 //! desde el cwd (igual que el CLI).
+//!
+//! Multi-repo (docs/CONTRACTS.md): cada tool acepta `repo` opcional — un
+//! nombre bajo la raíz de repos (`CHRONO_REPOS` o `chrono mcp --repos DIR`),
+//! `<nombre>@<rama>` o una ruta absoluta; ver [`repos::resolve`]. Sin `repo`
+//! responde el índice del cwd, como siempre. Toda respuesta lleva
+//! `"repo": "<nombre>@<rama>"`.
 
+pub mod repos;
 mod since;
 mod tools;
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use serde_json::{json, Value};
 
@@ -32,28 +42,74 @@ const SERVER_NAME: &str = "chrono";
 /// Nombre del fichero de índice relativo a la raíz del repo, igual que el CLI.
 const INDEX_REL: &str = ".chrono/index.db";
 
-/// Estado del servidor a lo largo de la sesión: el índice (si lo hay).
-/// Se resuelve una vez al arrancar; `tools/call` lo consulta en cada llamada.
+/// Estado del servidor a lo largo de la sesión: el índice por defecto (el
+/// del cwd, si lo hay), la raíz de repos y los índices de otros repos,
+/// abiertos bajo demanda y cacheados por ruta.
 pub struct State {
     store: Option<Store>,
+    def_dir: Option<PathBuf>,
+    def_label: Option<String>,
+    root: Option<PathBuf>,
+    open: RefCell<HashMap<PathBuf, Rc<Store>>>,
+}
+
+/// Raíz del repo git de un índice: `meta.repo_path` o la primera fuente git.
+pub(crate) fn repo_path_of(store: &Store) -> Option<String> {
+    if let Ok(Some(rp)) = store.meta("repo_path") {
+        if !rp.is_empty() {
+            return Some(rp);
+        }
+    }
+    store.list_sources().ok()?.into_iter().find(|s| s.kind == "git").map(|s| s.path)
 }
 
 impl State {
+    /// Arranca con (o sin) un `Store` por defecto y una raíz de repos opcional.
+    pub fn new(store: Option<Store>, root: Option<PathBuf>) -> State {
+        let def_dir = store.as_ref().and_then(repo_path_of).map(PathBuf::from);
+        let def_label = def_dir.as_deref().map(repos::label);
+        State { store, def_dir, def_label, root, open: RefCell::new(HashMap::new()) }
+    }
+
     /// Para tests: arranca ya con (o sin) un `Store` construido a mano.
+    #[cfg(test)]
     fn with_store(store: Option<Store>) -> State {
-        State { store }
+        State::new(store, None)
     }
 
     pub fn store(&self) -> Option<&Store> {
         self.store.as_ref()
     }
+
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
+    pub fn default_label(&self) -> Option<&str> {
+        self.def_label.as_deref()
+    }
+
+    pub fn default_dir(&self) -> Option<&Path> {
+        self.def_dir.as_deref()
+    }
+
+    /// Abre (o reutiliza) el índice de un repo resuelto.
+    pub(crate) fn open_index(&self, index: &Path) -> Result<Rc<Store>> {
+        if let Some(s) = self.open.borrow().get(index) {
+            return Ok(Rc::clone(s));
+        }
+        let s = Rc::new(Store::open(index)?);
+        self.open.borrow_mut().insert(index.to_path_buf(), Rc::clone(&s));
+        Ok(s)
+    }
 }
 
 /// Corre el bucle de lectura/respuesta sobre stdin/stdout hasta EOF o error
 /// de E/S. Nunca falla por falta de índice: `db` ausente o inválido deja
-/// `State` sin store y el servidor sigue sirviendo `tools/list` etc.
-pub fn serve(db: Option<PathBuf>) -> Result<()> {
-    let state = State::with_store(open_or_discover(db));
+/// `State` sin store y el servidor sigue sirviendo `tools/list` etc. `root`
+/// es la raíz de repos para el argumento `repo` (None = solo rutas absolutas).
+pub fn serve(db: Option<PathBuf>, root: Option<PathBuf>) -> Result<()> {
+    let state = State::new(open_or_discover(db), root);
 
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();

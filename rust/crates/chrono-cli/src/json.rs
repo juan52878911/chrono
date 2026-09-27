@@ -39,6 +39,41 @@ impl Json {
         out
     }
 
+    /// Serializa en una sola línea, sin espacios (una fila de JSONL).
+    pub fn compact(&self) -> String {
+        let mut out = String::new();
+        self.write_compact(&mut out);
+        out
+    }
+
+    fn write_compact(&self, out: &mut String) {
+        match self {
+            Json::Arr(items) => {
+                out.push('[');
+                for (i, it) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    it.write_compact(out);
+                }
+                out.push(']');
+            }
+            Json::Obj(fields) => {
+                out.push('{');
+                for (i, (k, v)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    write_str(k, out);
+                    out.push(':');
+                    v.write_compact(out);
+                }
+                out.push('}');
+            }
+            scalar => scalar.write(out, 0),
+        }
+    }
+
     fn write(&self, out: &mut String, depth: usize) {
         match self {
             Json::Null => out.push_str("null"),
