@@ -32,6 +32,7 @@ Index:
   init [repo]          Zero-config: detect the repo, create .chrono/, ingest all.
                        --symbols also indexes per-hunk function history (git only).
   add <path>           Add another source (git repo or log file) to the index.
+                       --as <kind> forces the adapter (e.g. --as template, config-defined).
   sync [path]          Process only the delta since the last watermark (all sources).
 
 Queries (JSON, schema_version 2: `entity`/`id`):
@@ -84,6 +85,7 @@ Uso:
 Índice:
   init [repo]          Cero-config: detecta el repo, crea .chrono/ e ingiere todo.
   add <ruta>           Añade otra fuente (repo git o fichero de log) al índice.
+                       --as <kind> fuerza el adaptador (p.ej. --as template, definido por config).
   sync [ruta]          Procesa solo el delta desde la última marca (todas las fuentes).
 
 Consulta (JSON, schema_version 2: `entity`/`id`):
@@ -145,6 +147,7 @@ struct Flags {
     grep: Option<String>,
     depth: Option<String>,
     interval: Option<String>,
+    as_kind: Option<String>,
     pos: Vec<String>,
 }
 
@@ -215,6 +218,10 @@ fn parse_args(args: &[String]) -> Flags {
             "--interval" if i + 1 < args.len() => {
                 i += 1;
                 f.interval = Some(args[i].clone());
+            }
+            "--as" if i + 1 < args.len() => {
+                i += 1;
+                f.as_kind = Some(args[i].clone());
             }
             a if a.starts_with("--") && a != "--version" && a != "--help" => {}
             a => f.pos.push(a.to_string()),
@@ -292,7 +299,7 @@ fn main() {
                 .get(1)
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|e| fatal(e)));
-            if let Err(e) = index::init(&start, f.symbols) {
+            if let Err(e) = index::init(&start, f.symbols, f.as_kind.as_deref()) {
                 fatal(e);
             }
             return;
@@ -318,7 +325,7 @@ fn main() {
     }
     if cmd == "add" {
         let path = require_pos(&f, "add needs a <path> (a repo or a log file)", "add necesita una <ruta> (un repo o un fichero de log)");
-        if let Err(e) = index::add(&db, Path::new(&path), f.symbols) {
+        if let Err(e) = index::add(&db, Path::new(&path), f.symbols, f.as_kind.as_deref()) {
             fatal(e);
         }
         return;

@@ -12,6 +12,7 @@ members = [
     "crates/chrono-source-textlog",
     "crates/chrono-source-changelog",
     "crates/chrono-source-oslog",
+    "crates/chrono-source-template",
     "crates/chrono-mcp",
     "crates/chrono-cli",
 ]

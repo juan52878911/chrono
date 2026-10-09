@@ -84,6 +84,7 @@ fn build_registry() -> Registry {
     r.register(Box::new(chrono_source_textlog::TextlogSource::new()));
     r.register(Box::new(chrono_source_changelog::ChangelogSource::new()));
     r.register(Box::new(chrono_source_oslog::OsLogSource::new()));
+    r.register(Box::new(chrono_source_template::TemplateSource::new()));
     r
 }
 
@@ -108,10 +109,23 @@ fn resolve_paths(source: &dyn Source, start: &Path) -> Result<(PathBuf, PathBuf)
 }
 
 /// Elige la fuente para `start` en `registry` y resuelve sus rutas (ver
-/// [`resolve_paths`]). Único punto usado por `init` y `sync` para saber
-/// "qué fuente es esto y dónde vive su índice".
-fn resolve_source<'a>(registry: &'a Registry, start: &Path) -> Result<(&'a dyn Source, PathBuf, PathBuf)> {
-    let src = registry.pick(start).ok_or_else(|| unrecognized_source_err(start))?;
+/// [`resolve_paths`]). Si `as_kind` es `Some`, se FUERZA ese adaptador por su
+/// `kind` (p.ej. `--as template`, o `"adapter"` del config) en vez de
+/// autodetectar; error accionable si ese kind no existe.
+fn resolve_source<'a>(
+    registry: &'a Registry,
+    start: &Path,
+    as_kind: Option<&str>,
+) -> Result<(&'a dyn Source, PathBuf, PathBuf)> {
+    let src = match as_kind.filter(|s| !s.is_empty()) {
+        Some(kind) => registry.by_kind(kind).ok_or_else(|| {
+            t(
+                format!("unknown source kind {kind:?} for --as (try: git, jsonl, csv, textlog, changelog, oslog, template)"),
+                format!("kind de fuente desconocido {kind:?} para --as (prueba: git, jsonl, csv, textlog, changelog, oslog, template)"),
+            )
+        })?,
+        None => registry.pick(start).ok_or_else(|| unrecognized_source_err(start))?,
+    };
     let (ingest_path, root) = resolve_paths(src, start)?;
     Ok((src, ingest_path, root))
 }
@@ -119,9 +133,9 @@ fn resolve_source<'a>(registry: &'a Registry, start: &Path) -> Result<(&'a dyn S
 /// `chrono init [repo]`: índice completo desde cero en `<root>/.chrono/index.db`.
 /// Con `symbols=true` (`--symbols`, solo git), además de la ingesta de commits
 /// extrae los símbolos (funciones) tocados por cada hunk (S1).
-pub fn init(start: &Path, symbols: bool) -> Result<()> {
+pub fn init(start: &Path, symbols: bool, as_kind: Option<&str>) -> Result<()> {
     let registry = build_registry();
-    let (src, ingest_path, root) = resolve_source(&registry, start)?;
+    let (src, ingest_path, root) = resolve_source(&registry, start, as_kind)?;
 
     let dir = root.join(".chrono");
     std::fs::create_dir_all(&dir)?;
@@ -185,11 +199,17 @@ fn index_root_of(db: &Path) -> PathBuf {
 /// deploys en un mismo `.chrono/`, correlacionables por tiempo). No borra lo ya
 /// ingerido. Si la fuente ya estaba, la re-ingiere (borra sus eventos primero),
 /// así `add` es idempotente.
-pub fn add(db: &Path, start: &Path, symbols: bool) -> Result<()> {
+pub fn add(db: &Path, start: &Path, symbols: bool, as_kind: Option<&str>) -> Result<()> {
     let mut store = Store::open(db)?;
     let index_root = index_root_of(db);
     let registry = build_registry();
-    let (src, ingest_path, _root) = resolve_source(&registry, start)?;
+    // Override del adaptador: `--as` gana; si no, la clave `"adapter"` de las
+    // `source_options` de esta ruta en `.chrono/config.json` (así
+    // `chrono add miapp.log` usa el adaptador que diga el config, sin --as).
+    let cfg = chrono_classify_rules::load(&index_root);
+    let config_adapter = cfg.source_options_for(start).get("adapter").cloned();
+    let effective_as = as_kind.map(str::to_string).or(config_adapter);
+    let (src, ingest_path, _root) = resolve_source(&registry, start, effective_as.as_deref())?;
     let source_id = canonical_source_id(src.kind(), &ingest_path);
 
     let already = store.list_sources()?.iter().any(|s| s.id == source_id);

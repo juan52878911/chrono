@@ -1,0 +1,10 @@
+[package]
+name = "chrono-source-template"
+description = "Adaptador Source de texto definido por PLANTILLA en .chrono/config.json (sin regex): una línea → un Event."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono-core = { path = "../chrono-core" }
