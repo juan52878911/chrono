@@ -306,10 +306,10 @@ impl Store {
     /// pero acotada por el nº de plantillas×buckets (pequeño: ese es el punto de
     /// los rollups), no por el nº de eventos. Devuelve (nº plantillas, nº filas
     /// de rollup). `bucket_secs` debe ser > 0.
-    pub fn build_rollups(&self, bucket_secs: i64) -> Result<(usize, usize)> {
+    pub fn build_rollups(&self, bucket_ms: i64) -> Result<(usize, usize)> {
         use std::collections::BTreeMap;
-        if bucket_secs <= 0 {
-            return Err("build_rollups: bucket_secs debe ser > 0".into());
+        if bucket_ms <= 0 {
+            return Err("build_rollups: bucket_ms debe ser > 0".into());
         }
         // Fase 1: escanear eventos y agregar en memoria (sin escribir).
         // Clave: (source_id, template, bucket) -> (count, first_id, last_id).
@@ -329,7 +329,7 @@ impl Store {
             for row in rows {
                 let (id, source_id, at_epoch, title) = row?;
                 let template = chrono_core::templatize(&title);
-                let bucket = at_epoch - at_epoch.rem_euclid(bucket_secs);
+                let bucket = at_epoch - at_epoch.rem_euclid(bucket_ms);
                 let entry = agg.entry((source_id, template, bucket)).or_insert((0, id.clone(), String::new()));
                 entry.0 += 1;
                 entry.2 = id; // last_id (iteración en orden de rowid → determinista)

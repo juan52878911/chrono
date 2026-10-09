@@ -151,7 +151,7 @@ mod tests {
     fn mapea_campos_basicos() {
         let sample = obj(json!({"ts": 1_704_067_200, "msg": "hola", "service": "api", "level": "info"}));
         let ev = line_to_event(&sample, r#"{"ts":1704067200,"msg":"hola","service":"api","level":"info"}"#, 0, &no_overrides(), "jsonl:/tmp/a.log");
-        assert_eq!(ev.at_epoch, 1_704_067_200);
+        assert_eq!(ev.at_epoch, 1_704_067_200_000);
         assert_eq!(ev.at, "2024-01-01T00:00:00Z");
         assert_eq!(ev.title, "hola");
         assert_eq!(ev.level, "INFO");
@@ -210,7 +210,7 @@ mod tests {
         let iso_line = obj(json!({"@timestamp": "2024-01-01T00:00:05Z", "msg": "b"}));
         let ev1 = line_to_event(&epoch_line, r#"{"ts":1704067200,"msg":"a"}"#, 0, &no_overrides(), "jsonl:/tmp/a.log");
         let ev2 = line_to_event(&iso_line, r#"{"@timestamp":"2024-01-01T00:00:05Z","msg":"b"}"#, 40, &no_overrides(), "jsonl:/tmp/a.log");
-        assert_eq!(ev1.at_epoch, 1_704_067_200);
-        assert_eq!(ev2.at_epoch, 1_704_067_205);
+        assert_eq!(ev1.at_epoch, 1_704_067_200_000);
+        assert_eq!(ev2.at_epoch, 1_704_067_205_000);
     }
 }

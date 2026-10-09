@@ -5,15 +5,22 @@
 //! esta parte de `&str` (no de `serde_json::Value`): las fuentes de texto (csv,
 //! textlog) traen el tiempo como cadena o número en texto.
 
-/// Convierte segundos UTC desde epoch a "YYYY-MM-DDThh:mm:ssZ".
-pub fn epoch_to_iso8601(epoch: i64) -> String {
-    let days = epoch.div_euclid(86_400);
-    let secs_of_day = epoch.rem_euclid(86_400);
+/// Convierte MILISEGUNDOS UTC desde epoch a "YYYY-MM-DDThh:mm:ss[.mmm]Z" (la
+/// parte de ms solo si no es cero). `at_epoch` es ms en todo el dominio.
+pub fn epoch_to_iso8601(epoch_ms: i64) -> String {
+    let days = epoch_ms.div_euclid(86_400_000);
+    let ms_of_day = epoch_ms.rem_euclid(86_400_000);
+    let secs_of_day = ms_of_day / 1000;
+    let millis = ms_of_day % 1000;
     let (y, m, d) = civil_from_days(days);
     let hh = secs_of_day / 3600;
     let mm = (secs_of_day % 3600) / 60;
     let ss = secs_of_day % 60;
-    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+    if millis == 0 {
+        format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+    } else {
+        format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{millis:03}Z")
+    }
 }
 
 /// Días desde 1970-01-01 -> (año, mes, día). Algoritmo civil de Hinnant.
@@ -45,8 +52,8 @@ pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 }
 
 /// Parsea a mano una fecha RFC3339/ISO-8601 ("YYYY-MM-DDTHH:MM:SS[.fff][Z|±HH:MM]")
-/// y devuelve el epoch UTC en segundos, o `None` si no encaja el formato.
-/// Sin offset explícito se asume UTC.
+/// y devuelve el epoch UTC en MILISEGUNDOS (conservando la fracción de segundo
+/// hasta ms), o `None` si no encaja el formato. Sin offset explícito se asume UTC.
 pub fn parse_rfc3339(s: &str) -> Option<i64> {
     let bytes = s.as_bytes();
     if bytes.len() < 19 {
@@ -81,11 +88,22 @@ pub fn parse_rfc3339(s: &str) -> Option<i64> {
     let ss: i64 = s.get(17..19)?.parse().ok()?;
 
     let mut idx = 19;
-    // Fracción de segundo opcional (".fff..."): se descarta (at_epoch es entero).
+    // Fracción de segundo opcional (".fff..."): se conserva hasta MILISEGUNDOS
+    // (3 primeros dígitos, con relleno de ceros si hay menos).
+    let mut frac_ms: i64 = 0;
     if byte_at(idx) == Some(b'.') {
         idx += 1;
+        let frac_start = idx;
         while byte_at(idx).is_some_and(|c| c.is_ascii_digit()) {
             idx += 1;
+        }
+        let digits = s.get(frac_start..idx).unwrap_or("");
+        if !digits.is_empty() {
+            let mut buf = String::from(&digits[..digits.len().min(3)]);
+            while buf.len() < 3 {
+                buf.push('0');
+            }
+            frac_ms = buf.parse().unwrap_or(0);
         }
     }
     let rest = s.get(idx..)?;
@@ -113,11 +131,12 @@ pub fn parse_rfc3339(s: &str) -> Option<i64> {
 
     let days = days_from_civil(y, mo, d);
     let local_secs = days * 86_400 + hh * 3600 + mm * 60 + ss;
-    Some(local_secs - offset_secs)
+    Some((local_secs - offset_secs) * 1000 + frac_ms)
 }
 
-/// Extrae el epoch UTC en segundos de un valor de tiempo EN TEXTO: primero como
-/// epoch entero/decimal (segundos, o milisegundos si |v| > 1e12), y si no
+/// Extrae el epoch UTC en MILISEGUNDOS de un valor de tiempo EN TEXTO: primero
+/// como epoch entero/decimal (se asume en segundos y se pasa a ms, salvo que el
+/// valor ya parezca ms —|v| > 1e12—, en cuyo caso se toma tal cual), y si no
 /// parsea como número, como RFC3339/ISO-8601. `None` si nada casa (el evento
 /// entra igual, con `at_epoch=0` y `at=""`).
 pub fn parse_time_str(s: &str) -> Option<i64> {
@@ -126,12 +145,12 @@ pub fn parse_time_str(s: &str) -> Option<i64> {
         return None;
     }
     if let Ok(n) = t.parse::<i64>() {
-        return Some(if n.abs() > 1_000_000_000_000 { n / 1000 } else { n });
+        return Some(if n.abs() > 1_000_000_000_000 { n } else { n * 1000 });
     }
     if let Ok(f) = t.parse::<f64>() {
         if f.is_finite() {
-            let secs = if f.abs() > 1e12 { f / 1000.0 } else { f };
-            return Some(secs as i64);
+            let ms = if f.abs() > 1e12 { f } else { f * 1000.0 };
+            return Some(ms as i64);
         }
     }
     parse_rfc3339(t)
@@ -157,19 +176,24 @@ mod tests {
 
     #[test]
     fn parse_rfc3339_con_z_y_offset() {
-        assert_eq!(parse_rfc3339("2024-01-01T00:00:00Z"), Some(1_704_067_200));
-        assert_eq!(parse_rfc3339("2024-01-01T02:00:00+02:00"), Some(1_704_067_200));
+        // Milisegundos UTC.
+        assert_eq!(parse_rfc3339("2024-01-01T00:00:00Z"), Some(1_704_067_200_000));
+        assert_eq!(parse_rfc3339("2024-01-01T02:00:00+02:00"), Some(1_704_067_200_000));
+        // Fracción de segundo conservada hasta ms.
+        assert_eq!(parse_rfc3339("2024-01-01T00:00:00.123Z"), Some(1_704_067_200_123));
+        assert_eq!(parse_rfc3339("2024-01-01T00:00:00.5Z"), Some(1_704_067_200_500));
     }
 
     #[test]
     fn parse_time_str_epoch_segundos_y_milis() {
-        assert_eq!(parse_time_str("1704067200"), Some(1_704_067_200));
-        assert_eq!(parse_time_str("1704067200000"), Some(1_704_067_200));
+        // "segundos" -> ×1000; "milisegundos" (>1e12) -> tal cual. Ambos a ms.
+        assert_eq!(parse_time_str("1704067200"), Some(1_704_067_200_000));
+        assert_eq!(parse_time_str("1704067200000"), Some(1_704_067_200_000));
     }
 
     #[test]
     fn parse_time_str_iso() {
-        assert_eq!(parse_time_str("2024-01-01T00:00:05Z"), Some(1_704_067_205));
+        assert_eq!(parse_time_str("2024-01-01T00:00:05Z"), Some(1_704_067_205_000));
     }
 
     #[test]

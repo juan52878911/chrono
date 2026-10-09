@@ -55,7 +55,8 @@ fn source_id_for(repo: &Path) -> String {
 /// simhash/tickets: la comparten la ruta secuencial y la paralela.
 fn parse_record_to_event(rec: &str, source_id: &str) -> Option<Event> {
     let raw = parse::split_record(rec)?;
-    let at_epoch: i64 = raw.at_epoch.trim().parse().ok()?;
+    // `%at` de git es epoch en SEGUNDOS; `at_epoch` es ms en el dominio → ×1000.
+    let at_epoch: i64 = raw.at_epoch.trim().parse::<i64>().ok()? * 1000;
     let body = raw.body.trim().to_string();
     let title = raw.subject.to_string();
 

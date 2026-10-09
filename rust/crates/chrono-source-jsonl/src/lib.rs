@@ -244,17 +244,17 @@ mod tests {
         let mut cur = open_source(f.path());
 
         let e1 = cur.next().unwrap().unwrap(); // epoch-segundos
-        assert_eq!(e1.at_epoch, 1_704_067_200);
+        assert_eq!(e1.at_epoch, 1_704_067_200_000);
         assert_eq!(e1.at, "2024-01-01T00:00:00Z");
 
         let e2 = cur.next().unwrap().unwrap(); // epoch-milisegundos
-        assert_eq!(e2.at_epoch, 1_704_067_201);
+        assert_eq!(e2.at_epoch, 1_704_067_201_000);
 
         let e3 = cur.next().unwrap().unwrap(); // ISO con Z
-        assert_eq!(e3.at_epoch, 1_704_067_205);
+        assert_eq!(e3.at_epoch, 1_704_067_205_000);
 
         let e4 = cur.next().unwrap().unwrap(); // ISO con offset +02:00 -> UTC
-        assert_eq!(e4.at_epoch, 1_704_067_210);
+        assert_eq!(e4.at_epoch, 1_704_067_210_000);
     }
 
     #[test]
@@ -309,7 +309,7 @@ mod tests {
         let mut cur = src.open(f.path(), None, &cfg).unwrap();
 
         let ev = cur.next().unwrap().unwrap();
-        assert_eq!(ev.at_epoch, 1_704_067_200);
+        assert_eq!(ev.at_epoch, 1_704_067_200_000);
     }
 
     #[test]

@@ -1,34 +1,45 @@
 //! Fechas sin dependencias: epoch UTC ⇄ civil (algoritmo de Howard Hinnant).
-//! `chrono-source-git` tiene su propia copia privada de `epoch_to_iso8601`;
-//! se duplica aquí (15 líneas) antes que ampliar su API pública.
+//! UNIDAD CANÓNICA: **milisegundos** UTC desde epoch (`at_epoch` es ms en todo
+//! el dominio). `chrono-source-git` y los adaptadores tienen su copia de estas
+//! funciones (se duplican, no se amplía una API pública por 20 líneas).
 
-/// Segundos UTC desde epoch, ahora. Si `CHRONO_NOW` está fijado a un entero de
-/// segundos epoch, se usa ese valor: permite ingestas reproducibles byte a byte
-/// (el `.db` guarda `sources.last_sync_at`, que si no varía con el reloj). Útil
-/// para tests de determinismo y builds reproducibles.
+/// Milisegundos UTC desde epoch, ahora. Si `CHRONO_NOW` está fijado a un entero
+/// de SEGUNDOS epoch (más cómodo de escribir a mano), se usa ese valor ×1000:
+/// permite ingestas reproducibles byte a byte (el `.db` guarda
+/// `sources.last_sync_at`, que si no varía con el reloj). Para tests de
+/// determinismo y builds reproducibles.
 pub fn now_epoch() -> i64 {
     if let Ok(v) = std::env::var("CHRONO_NOW") {
         if let Ok(secs) = v.trim().parse::<i64>() {
-            return secs;
+            return secs * 1000;
         }
     }
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
+        .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 
-/// "YYYY-MM-DDThh:mm:ssZ" a partir de segundos UTC.
-pub fn epoch_to_iso8601(epoch: i64) -> String {
-    let days = epoch.div_euclid(86_400);
-    let secs = epoch.rem_euclid(86_400);
+/// "YYYY-MM-DDThh:mm:ss[.mmm]Z" a partir de MILISEGUNDOS UTC. La parte de
+/// milisegundos solo aparece cuando no es cero (así las fuentes con resolución
+/// de segundo —git, syslog— mantienen la salida limpia "…ssZ").
+pub fn epoch_to_iso8601(epoch_ms: i64) -> String {
+    let days = epoch_ms.div_euclid(86_400_000);
+    let ms_of_day = epoch_ms.rem_euclid(86_400_000);
+    let secs = ms_of_day / 1000;
+    let millis = ms_of_day % 1000;
     let (y, m, d) = civil_from_days(days);
-    format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+    let base = format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}",
         secs / 3600,
         (secs % 3600) / 60,
         secs % 60
-    )
+    );
+    if millis == 0 {
+        format!("{base}Z")
+    } else {
+        format!("{base}.{millis:03}Z")
+    }
 }
 
 /// Parsea `--since`: `YYYY-MM-DD` (medianoche UTC) o `YYYY-MM-DDThh:mm:ss[Z]`.
@@ -57,18 +68,25 @@ pub fn parse_since(s: &str) -> Option<i64> {
         let ss: i64 = parts.get(2).map_or(Some(0), |p| p.parse().ok())?;
         secs = hh * 3600 + mm * 60 + ss;
     }
-    Some(days_from_civil(y, m, d) * 86_400 + secs)
+    // Medianoche (o la hora dada) en MILISEGUNDOS UTC.
+    Some((days_from_civil(y, m, d) * 86_400 + secs) * 1000)
 }
 
-/// Parsea una duración: entero de segundos (`3600`) o con sufijo `s`/`m`/`h`/`d`
-/// (`90s`, `30m`, `1h`, `7d`). Devuelve segundos, o `None` si no lo entiende.
-/// Usado por `--bucket` (timeline) y `--delta` (correlate).
+/// Parsea una duración a MILISEGUNDOS: entero de segundos (`3600`) o con sufijo
+/// `s`/`m`/`h`/`d` (`90s`, `30m`, `1h`, `7d`), o milisegundos con `ms`
+/// (`500ms`). Devuelve ms, o `None` si no lo entiende. Usado por `--bucket`
+/// (timeline) y `--delta` (correlate).
 pub fn parse_duration(s: &str) -> Option<i64> {
     let s = s.trim();
     if s.is_empty() {
         return None;
     }
-    let (num, mult) = match s.as_bytes()[s.len() - 1] {
+    // Sufijo en ms (`500ms`): se comprueba antes que `s` suelto.
+    if let Some(num) = s.strip_suffix("ms").or_else(|| s.strip_suffix("MS")) {
+        let n: i64 = num.trim().parse().ok()?;
+        return if n > 0 { Some(n) } else { None };
+    }
+    let (num, mult_secs) = match s.as_bytes()[s.len() - 1] {
         b's' | b'S' => (&s[..s.len() - 1], 1),
         b'm' | b'M' => (&s[..s.len() - 1], 60),
         b'h' | b'H' => (&s[..s.len() - 1], 3600),
@@ -79,7 +97,7 @@ pub fn parse_duration(s: &str) -> Option<i64> {
     if n <= 0 {
         return None;
     }
-    n.checked_mul(mult)
+    n.checked_mul(mult_secs * 1000)
 }
 
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
@@ -111,9 +129,11 @@ mod tests {
 
     #[test]
     fn ida_y_vuelta() {
-        assert_eq!(parse_since("2024-01-01"), Some(1_704_067_200));
-        assert_eq!(epoch_to_iso8601(1_704_067_200), "2024-01-01T00:00:00Z");
-        assert_eq!(parse_since("2024-01-01T01:00:00Z"), Some(1_704_070_800));
+        // Todo en MILISEGUNDOS.
+        assert_eq!(parse_since("2024-01-01"), Some(1_704_067_200_000));
+        assert_eq!(epoch_to_iso8601(1_704_067_200_000), "2024-01-01T00:00:00Z");
+        assert_eq!(epoch_to_iso8601(1_704_067_200_123), "2024-01-01T00:00:00.123Z");
+        assert_eq!(parse_since("2024-01-01T01:00:00Z"), Some(1_704_070_800_000));
         assert_eq!(parse_since("1970-01-01"), Some(0));
         assert_eq!(parse_since("ayer"), None);
         assert_eq!(parse_since("2024-13-01"), None);
@@ -121,11 +141,12 @@ mod tests {
 
     #[test]
     fn duraciones() {
-        assert_eq!(parse_duration("3600"), Some(3600));
-        assert_eq!(parse_duration("90s"), Some(90));
-        assert_eq!(parse_duration("30m"), Some(1800));
-        assert_eq!(parse_duration("1h"), Some(3600));
-        assert_eq!(parse_duration("7d"), Some(604_800));
+        assert_eq!(parse_duration("3600"), Some(3_600_000));
+        assert_eq!(parse_duration("90s"), Some(90_000));
+        assert_eq!(parse_duration("30m"), Some(1_800_000));
+        assert_eq!(parse_duration("1h"), Some(3_600_000));
+        assert_eq!(parse_duration("7d"), Some(604_800_000));
+        assert_eq!(parse_duration("500ms"), Some(500));
         assert_eq!(parse_duration("0"), None);
         assert_eq!(parse_duration("-5"), None);
         assert_eq!(parse_duration("h"), None);

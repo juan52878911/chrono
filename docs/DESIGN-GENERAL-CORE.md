@@ -68,8 +68,8 @@ pub struct Event {
     pub id: String,                     // único en la fuente: sha | hash(línea+offset) | uuid
     pub source_id: String,              // "git:<abs>" | "jsonl:<abs>" | "journald:<unit>"
     pub kind: String,                   // "commit" | "log" | "deploy" | "incident" | "release" | "row"
-    pub at: String,                     // ISO-8601 SIEMPRE UTC ("2026-08-30T10:00:00Z")
-    pub at_epoch: i64,                  // segundos UTC; lo que usan índices y ventanas
+    pub at: String,                     // ISO-8601 UTC, con ms si aplica ("2026-08-30T10:00:00.123Z")
+    pub at_epoch: i64,                  // MILISEGUNDOS UTC (v4); lo que usan índices y ventanas
     pub actor: Actor,                   // quién/qué (autor, host, servicio, usuario)
     pub title: String,                  // subject | línea normalizada | título del incidente
     pub body: String,                   // cuerpo | payload (truncado a cap)
@@ -240,7 +240,7 @@ adaptadores → JEV → escala. Cada fase verifica paridad contra el Go actual (
 | **R0 · Cimientos Rust** | Workspace Cargo; crate `chrono-core` (dominio `Event`/`Touch`/`Link`/`Label` con `entity`/`id` + traits `Source`/`Cursor`/`Classifier`), sin deps. | **hecho (este commit)** |
 | **R1 · Store + adaptador git + paridad** | `chrono-store` (SQLite v2), `chrono-source-git` (ingesta git tras `Cursor`), consultas hotspots/coupling/owners/churn; CLI mínima `init`+`hotspots`. Verificar 17.678=17.678 y top-15 vs Go. | pendiente |
 | **R2 · Resto de consultas + MCP + i18n** | bugs(rules)/tickets/prs/branches/search/similar/phases; servidor MCP; i18n EN/ES; contrato v2 `entity`/`id`; paridad total con Go → sustituye al binario Go. | pendiente |
-| **R3 · Adaptadores + multi-fuente + rollups** | **hecho:** jsonl, **csv**, **textlog** (syslog/nginx sin `regex`), **changelog** (Keep a Changelog → `release`); **`sources` poblada + `chrono add` + `sync` multi-fuente** (paridad git verificada; divergencia por longitud+hash de prefijo); `SourceConfig.options` desde `.chrono/config.json`; consultas log-native **`timeline`/`top`/`correlate`** (leen eventos crudos) en metrics + CLI + MCP. **templates+rollups** (`chrono patterns`, Drain-light determinista, schema v3); **oslog** (log del sistema, adaptable al SO: `log show` en macOS, `journalctl -o json` en Linux; `chrono add oslog`). **pendiente:** `event_dims`; `events`. | completo (salvo extras) |
+| **R3 · Adaptadores + multi-fuente + rollups** | **hecho:** jsonl, **csv**, **textlog** (syslog/nginx sin `regex`), **changelog** (Keep a Changelog → `release`); **`sources` poblada + `chrono add` + `sync` multi-fuente** (paridad git verificada; divergencia por longitud+hash de prefijo); `SourceConfig.options` desde `.chrono/config.json`; consultas log-native **`timeline`/`top`/`correlate`** (leen eventos crudos) en metrics + CLI + MCP. **templates+rollups** (`chrono patterns`, Drain-light determinista, schema v3); **oslog** (log del sistema, adaptable al SO: `log show` en macOS, `journalctl -o json` en Linux; `chrono add oslog`). **`events`** (stream cronológico unificado filtrable); tiempo en **milisegundos** (schema v4). **pendiente:** `event_dims`. | completo (salvo extras) |
 | **R4 · JEV Level-1** | crate `chrono-jev` (features+inferencia i16), `chrono-jev-train`, dataset, `JEV-EVAL.md`, opt-in. | pendiente |
 | **R5 · Escala medida** | **hecho:** `chrono bench` (latencias + stats), caps reales (`body_max_bytes`/`max_events_per_source`, declarados en `meta`, 0=sin cap). **pendiente:** bandas SimHash (solo >1M eventos, requiere fixture para verificar); `gh --limit` configurable. | parcial |
 

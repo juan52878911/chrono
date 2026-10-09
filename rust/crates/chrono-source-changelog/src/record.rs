@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn fecha_produce_at_epoch_medianoche_utc() {
         let evs = events();
-        assert_eq!(evs[1].at_epoch, 1_717_200_000); // 2024-06-01T00:00:00Z
+        assert_eq!(evs[1].at_epoch, 1_717_200_000_000); // 2024-06-01T00:00:00Z
         assert_eq!(evs[1].at, "2024-06-01T00:00:00Z");
     }
 

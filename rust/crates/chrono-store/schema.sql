@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS events (
     source_id TEXT NOT NULL,
     kind      TEXT NOT NULL,              -- "commit" | "log" | ...
     at        TEXT NOT NULL,              -- ISO-8601 UTC para la salida
-    at_epoch  INTEGER NOT NULL,           -- segundos UTC; lo que usan ventanas/índices
+    at_epoch  INTEGER NOT NULL,           -- MILISEGUNDOS UTC; lo que usan ventanas/índices
     actor_id  INTEGER REFERENCES actors(id),
     title     TEXT NOT NULL DEFAULT '',
     body      TEXT NOT NULL DEFAULT '',

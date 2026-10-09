@@ -295,7 +295,7 @@ mod tests {
         assert_eq!(ev.actor.name, "127.0.0.1");
         assert_eq!(ev.title, "GET /apache_pb.gif 200");
         // 10/Oct/2000:13:55:36 -0700, verificado independientemente.
-        assert_eq!(ev.at_epoch, 971_211_336);
+        assert_eq!(ev.at_epoch, 971_211_336_000);
         assert!(cur.next().unwrap().is_none());
     }
 
@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(ev.touches[0].entity, "su");
         assert_eq!(ev.actor.name, "mymachine.example.com");
         assert_eq!(ev.level, "CRIT");
-        assert_eq!(ev.at_epoch, 1_697_062_455); // 2023-10-11T22:14:15Z
+        assert_eq!(ev.at_epoch, 1_697_062_455_000); // 2023-10-11T22:14:15Z
     }
 
     #[test]
@@ -325,7 +325,7 @@ mod tests {
         let ev = cur.next().unwrap().unwrap();
         assert_eq!(ev.touches[0].entity, "sshd");
         assert_eq!(ev.attrs["pid"], "1234");
-        assert_eq!(ev.at_epoch, 1_697_062_455); // Oct 11 2023 22:14:15Z
+        assert_eq!(ev.at_epoch, 1_697_062_455_000); // Oct 11 2023 22:14:15Z
     }
 
     #[test]

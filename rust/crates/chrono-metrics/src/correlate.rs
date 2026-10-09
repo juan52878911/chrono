@@ -19,7 +19,7 @@ pub struct EventRef {
     pub title: String,
     /// `at_epoch - ancla.at_epoch`: negativo = antes del ancla, positivo =
     /// después. En el ancla vale 0.
-    pub delta_secs: i64,
+    pub delta_ms: i64,
 }
 
 /// Resultado de `correlate`: el ancla y los eventos correlacionados.
@@ -29,21 +29,21 @@ pub struct Correlation {
     pub related: Vec<EventRef>,
 }
 
-/// Eventos de fuentes DISTINTAS a la del ancla dentro de `±delta_secs` de su
+/// Eventos de fuentes DISTINTAS a la del ancla dentro de `±delta_ms` de su
 /// `at_epoch` (excluye el propio ancla y los eventos de su misma `source_id`:
 /// correlacionar es cruzar fuentes).
 ///
-/// `delta_secs` debe ser > 0. Orden determinista de `related`: por
-/// `abs(delta_secs)` ASC, luego `at_epoch` ASC, luego `id` ASC. `limit` acota
+/// `delta_ms` debe ser > 0. Orden determinista de `related`: por
+/// `abs(delta_ms)` ASC, luego `at_epoch` ASC, luego `id` ASC. `limit` acota
 /// el nº de correlacionados. Devuelve error si `event_id` no existe.
 pub fn correlate(
     conn: &Connection,
     event_id: &str,
-    delta_secs: i64,
+    delta_ms: i64,
     limit: usize,
 ) -> Result<Correlation> {
-    if delta_secs <= 0 {
-        return Err("correlate: delta_secs must be > 0".into());
+    if delta_ms <= 0 {
+        return Err("correlate: delta_ms must be > 0".into());
     }
 
     let anchor_row = conn
@@ -67,10 +67,10 @@ pub fn correlate(
     let (id, source_id, kind, at, at_epoch, level, title) = anchor_row
         .ok_or_else(|| format!("correlate: event not found: {event_id}"))?;
 
-    let anchor = EventRef { id, source_id, kind, at, at_epoch, level, title, delta_secs: 0 };
+    let anchor = EventRef { id, source_id, kind, at, at_epoch, level, title, delta_ms: 0 };
 
-    let lo = anchor.at_epoch - delta_secs;
-    let hi = anchor.at_epoch + delta_secs;
+    let lo = anchor.at_epoch - delta_ms;
+    let hi = anchor.at_epoch + delta_ms;
 
     // La ventana es cerrada en ambos extremos ([lo, hi]) y `source_id != ?2`
     // ya excluye por sí solo al propio ancla (comparte source_id consigo
@@ -95,7 +95,7 @@ pub fn correlate(
                 at_epoch: r.get(4)?,
                 level: r.get(5)?,
                 title: r.get(6)?,
-                delta_secs: r.get(7)?,
+                delta_ms: r.get(7)?,
             })
         },
     )?;
@@ -186,16 +186,16 @@ mod tests {
         let corr = correlate(store.conn(), "anchor1", 60, 10).unwrap();
 
         assert_eq!(corr.anchor.id, "anchor1");
-        assert_eq!(corr.anchor.delta_secs, 0);
+        assert_eq!(corr.anchor.delta_ms, 0);
 
         let ids: Vec<&str> = corr.related.iter().map(|r| r.id.as_str()).collect();
         // j1/j2 (delta -5, empate por at_epoch -> desempate por id) antes que
         // h1 (delta +5, mismo |delta| pero at_epoch mayor). git2 (misma fuente)
         // y far1 (fuera de ventana) no aparecen.
         assert_eq!(ids, vec!["j1", "j2", "h1"]);
-        assert_eq!(corr.related[0].delta_secs, -5);
-        assert_eq!(corr.related[1].delta_secs, -5);
-        assert_eq!(corr.related[2].delta_secs, 5);
+        assert_eq!(corr.related[0].delta_ms, -5);
+        assert_eq!(corr.related[1].delta_ms, -5);
+        assert_eq!(corr.related[2].delta_ms, 5);
     }
 
     #[test]

@@ -243,7 +243,7 @@ mod tests {
         cur.next().unwrap(); // Unreleased
         let e1 = cur.next().unwrap().unwrap();
         assert_eq!(e1.at, "2024-06-01T00:00:00Z");
-        assert_eq!(e1.at_epoch, 1_717_200_000);
+        assert_eq!(e1.at_epoch, 1_717_200_000_000);
     }
 
     #[test]

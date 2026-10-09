@@ -142,6 +142,20 @@ pub fn tool_defs() -> Vec<Value> {
             &[],
         ),
         tool(
+            "events",
+            "Stream cronológico unificado de todas las fuentes, filtrable.",
+            json!({
+                "since": since_prop(),
+                "until": str_prop("Fin de la ventana ISO (opcional)"),
+                "source": str_prop("Fuente: kind (git|jsonl|…) o source_id (opcional)"),
+                "kind": str_prop("Tipo de evento (commit|log|release|…) (opcional)"),
+                "level": str_prop("Nivel/severidad exacto (ERROR, INFO…) (opcional)"),
+                "grep": str_prop("Substring en el título (opcional)"),
+                "limit": json!({"type": "integer", "description": "Máximo de eventos (por defecto 100)"})
+            }),
+            &[],
+        ),
+        tool(
             "correlate",
             "Eventos de OTRAS fuentes cercanos en el tiempo a un evento (±Δt).",
             json!({
@@ -218,10 +232,11 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
         "prs" => prs(conn, since)?,
         "timeline" => {
             let until = args.get("until").and_then(Value::as_str).unwrap_or("");
-            let bucket_secs = arg_i64(args, "bucket_secs", 3600).max(1);
+            // El parámetro MCP es en SEGUNDOS (cómodo); `at_epoch` es ms → ×1000.
+            let bucket_ms = arg_i64(args, "bucket_secs", 3600).max(1) * 1000;
             let by = args.get("by").and_then(Value::as_str).filter(|s| !s.is_empty());
             let limit = arg_i64(args, "limit", 500).max(1) as usize;
-            timeline(conn, since_epoch, since_to_epoch(until), bucket_secs, by, limit)?
+            timeline(conn, since_epoch, since_to_epoch(until), bucket_ms, by, limit)?
         }
         "top" => {
             let dim = arg_str(args, "dim")?;
@@ -230,13 +245,26 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
         }
         "correlate" => {
             let id = arg_str(args, "id")?;
-            let delta_secs = arg_i64(args, "delta_secs", 3600).max(1);
+            let delta_ms = arg_i64(args, "delta_secs", 3600).max(1) * 1000;
             let limit = arg_i64(args, "limit", 25).max(1) as usize;
-            correlate(conn, id, delta_secs, limit)?
+            correlate(conn, id, delta_ms, limit)?
         }
         "patterns" => {
             let limit = arg_i64(args, "limit", 25).max(1) as usize;
             patterns(conn, since_epoch, limit)?
+        }
+        "events" => {
+            let until = args.get("until").and_then(Value::as_str).unwrap_or("");
+            let limit = arg_i64(args, "limit", 100).max(1) as usize;
+            let filter = chrono_metrics::EventFilter {
+                since_epoch,
+                until_epoch: since_to_epoch(until),
+                source: args.get("source").and_then(Value::as_str).filter(|s| !s.is_empty()),
+                kind: args.get("kind").and_then(Value::as_str).filter(|s| !s.is_empty()),
+                level: args.get("level").and_then(Value::as_str).filter(|s| !s.is_empty()),
+                grep: args.get("grep").and_then(Value::as_str).filter(|s| !s.is_empty()),
+            };
+            events(conn, &filter, limit)?
         }
         other => return Err(format!("herramienta desconocida: {other}").into()),
     };
@@ -430,22 +458,34 @@ fn timeline(
     conn: &Connection,
     since_epoch: i64,
     until_epoch: i64,
-    bucket_secs: i64,
+    bucket_ms: i64,
     by: Option<&str>,
     limit: usize,
 ) -> Result<Value> {
-    let rows = chrono_metrics::timeline(conn, since_epoch, until_epoch, bucket_secs, by, limit)?;
+    let rows = chrono_metrics::timeline(conn, since_epoch, until_epoch, bucket_ms, by, limit)?;
     let buckets: Vec<Value> = rows
         .iter()
         .map(|b| json!({"bucket_epoch": b.bucket_epoch, "key": b.key, "count": b.count}))
         .collect();
-    Ok(json!({"bucket_secs": bucket_secs, "by": by, "buckets": buckets}))
+    Ok(json!({"bucket_ms": bucket_ms, "by": by, "buckets": buckets}))
 }
 
 fn top(conn: &Connection, dim: &str, since_epoch: i64, limit: usize) -> Result<Value> {
     let rows = chrono_metrics::top(conn, dim, since_epoch, limit)?;
     let items: Vec<Value> = rows.iter().map(|v| json!({"value": v.value, "count": v.count})).collect();
     Ok(json!({"dim": dim, "top": items}))
+}
+
+fn events(conn: &Connection, filter: &chrono_metrics::EventFilter, limit: usize) -> Result<Value> {
+    let rows = chrono_metrics::events(conn, filter, limit)?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|e| json!({
+            "id": e.id, "source_id": e.source_id, "kind": e.kind,
+            "at": e.at, "level": e.level, "title": e.title,
+        }))
+        .collect();
+    Ok(json!({"events": items}))
 }
 
 fn patterns(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Value> {
@@ -457,14 +497,14 @@ fn patterns(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Value> 
     Ok(json!({"patterns": items}))
 }
 
-fn correlate(conn: &Connection, id: &str, delta_secs: i64, limit: usize) -> Result<Value> {
-    let corr = chrono_metrics::correlate(conn, id, delta_secs, limit)?;
+fn correlate(conn: &Connection, id: &str, delta_ms: i64, limit: usize) -> Result<Value> {
+    let corr = chrono_metrics::correlate(conn, id, delta_ms, limit)?;
     let event_json = |e: &chrono_metrics::EventRef| {
         json!({
             "id": e.id, "source_id": e.source_id, "kind": e.kind, "at": e.at,
-            "level": e.level, "title": e.title, "delta_secs": e.delta_secs,
+            "level": e.level, "title": e.title, "delta_ms": e.delta_ms,
         })
     };
     let related: Vec<Value> = corr.related.iter().map(event_json).collect();
-    Ok(json!({"delta_secs": delta_secs, "anchor": event_json(&corr.anchor), "related": related}))
+    Ok(json!({"delta_ms": delta_ms, "anchor": event_json(&corr.anchor), "related": related}))
 }

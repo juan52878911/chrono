@@ -3,15 +3,23 @@
 //! Usa el algoritmo civil de Howard Hinnant (`days_from_civil` / `civil_from_days`),
 //! válido para cualquier año proléptico gregoriano, con enteros de 64 bits.
 
-/// Convierte segundos UTC desde epoch a "YYYY-MM-DDThh:mm:ssZ".
-pub fn epoch_to_iso8601(epoch: i64) -> String {
-    let days = epoch.div_euclid(86_400);
-    let secs_of_day = epoch.rem_euclid(86_400);
+/// Convierte MILISEGUNDOS UTC desde epoch a "YYYY-MM-DDThh:mm:ss[.mmm]Z" (la
+/// parte de ms solo si no es cero). `at_epoch` es ms en todo el dominio; los
+/// commits git tienen resolución de segundo, así que su salida no lleva ms.
+pub fn epoch_to_iso8601(epoch_ms: i64) -> String {
+    let days = epoch_ms.div_euclid(86_400_000);
+    let ms_of_day = epoch_ms.rem_euclid(86_400_000);
+    let secs_of_day = ms_of_day / 1000;
+    let millis = ms_of_day % 1000;
     let (y, m, d) = civil_from_days(days);
     let hh = secs_of_day / 3600;
     let mm = (secs_of_day % 3600) / 60;
     let ss = secs_of_day % 60;
-    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+    if millis == 0 {
+        format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+    } else {
+        format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{millis:03}Z")
+    }
 }
 
 /// Días desde 1970-01-01 -> (año, mes, día). Algoritmo civil de Hinnant.
@@ -40,10 +48,12 @@ mod tests {
 
     #[test]
     fn epoch_conocido() {
-        // 2024-01-01T00:00:00Z
-        assert_eq!(epoch_to_iso8601(1_704_067_200), "2024-01-01T00:00:00Z");
+        // 2024-01-01T00:00:00Z (entrada en MILISEGUNDOS)
+        assert_eq!(epoch_to_iso8601(1_704_067_200_000), "2024-01-01T00:00:00Z");
         // 2000-03-01T00:00:00Z (justo tras el bisiesto 2000)
-        assert_eq!(epoch_to_iso8601(951_868_800), "2000-03-01T00:00:00Z");
+        assert_eq!(epoch_to_iso8601(951_868_800_000), "2000-03-01T00:00:00Z");
+        // Con milisegundos no nulos.
+        assert_eq!(epoch_to_iso8601(1_704_067_200_123), "2024-01-01T00:00:00.123Z");
     }
 
     #[test]

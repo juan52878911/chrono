@@ -56,6 +56,7 @@ Log-native (multi-source):
   timeline             Event counts per time bucket (--bucket 1h, --by level|kind).
   top <dim>            Most frequent values of a dimension (level|kind|actor|entity|attr:<k>).
   patterns             Most frequent log templates (Drain-light clustering).
+  events               Unified chronological stream across sources (--source/--kind/--level/--grep).
   correlate <id>       Events from OTHER sources within ±Δt of an event (--delta 1h).
 
 Diagnostics:
@@ -105,6 +106,7 @@ Log-native (multi-fuente):
   timeline             Conteo de eventos por bucket temporal (--bucket 1h, --by level|kind).
   top <dim>            Valores más frecuentes de una dimensión (level|kind|actor|entity|attr:<c>).
   patterns             Plantillas de log más frecuentes (clustering Drain-light).
+  events               Stream cronológico unificado de todas las fuentes (--source/--kind/--level/--grep).
   correlate <id>       Eventos de OTRAS fuentes en ±Δt de un evento (--delta 1h).
 
 Diagnóstico:
@@ -133,6 +135,10 @@ struct Flags {
     limit: Option<String>,
     entity: Option<String>,
     symbols: bool,
+    source: Option<String>,
+    kind: Option<String>,
+    level: Option<String>,
+    grep: Option<String>,
     pos: Vec<String>,
 }
 
@@ -180,6 +186,22 @@ fn parse_args(args: &[String]) -> Flags {
                 f.entity = Some(args[i].clone());
             }
             "--symbols" => f.symbols = true,
+            "--source" if i + 1 < args.len() => {
+                i += 1;
+                f.source = Some(args[i].clone());
+            }
+            "--kind" if i + 1 < args.len() => {
+                i += 1;
+                f.kind = Some(args[i].clone());
+            }
+            "--level" if i + 1 < args.len() => {
+                i += 1;
+                f.level = Some(args[i].clone());
+            }
+            "--grep" if i + 1 < args.len() => {
+                i += 1;
+                f.grep = Some(args[i].clone());
+            }
             a if a.starts_with("--") && a != "--version" && a != "--help" => {}
             a => f.pos.push(a.to_string()),
         }
@@ -342,6 +364,16 @@ fn main() {
             query::top(&store, &window, &dim, f.limit.as_deref())
         }
         "patterns" => query::patterns(&store, &window, f.limit.as_deref()),
+        "events" => query::events(
+            &store,
+            &window,
+            f.until.as_deref(),
+            f.source.as_deref(),
+            f.kind.as_deref(),
+            f.level.as_deref(),
+            f.grep.as_deref(),
+            f.limit.as_deref(),
+        ),
         "bench" => query::bench(&store, &db),
         "correlate" => {
             let id = require_pos(&f, "correlate needs an <id>", "correlate necesita un <id>");

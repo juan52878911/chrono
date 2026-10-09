@@ -144,10 +144,11 @@ mod tests {
     #[test]
     fn at_epoch_respeta_el_offset_de_zona() {
         let events = parse_macos(SAMPLE, "oslog:macos").unwrap();
-        // "2026-09-22 23:12:11.497633-0500" en UTC es "2026-09-23T04:12:11Z".
-        let expected = crate::timeutil::parse_rfc3339("2026-09-23T04:12:11Z").unwrap();
+        // "2026-09-22 23:12:11.497633-0500" en UTC es "2026-09-23T04:12:11.497Z":
+        // el offset -0500 se aplica y la fracción de micros se conserva hasta ms.
+        let expected = crate::timeutil::parse_rfc3339("2026-09-23T04:12:11.497Z").unwrap();
         assert_eq!(events[0].at_epoch, expected);
-        assert_eq!(events[0].at, "2026-09-23T04:12:11Z");
+        assert_eq!(events[0].at, "2026-09-23T04:12:11.497Z");
     }
 
     #[test]

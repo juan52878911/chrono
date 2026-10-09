@@ -369,7 +369,7 @@ pub fn bench(store: &Store, db_path: &Path) -> Result<Json> {
     time_it("hotspots", &mut || chrono_metrics::hotspots(conn, 0, 25, false).is_ok());
     time_it("churn", &mut || chrono_metrics::churn(conn, 0, 25, false).is_ok());
     time_it("bugs", &mut || chrono_metrics::bugs(conn, 0, 15).is_ok());
-    time_it("timeline", &mut || chrono_metrics::timeline(conn, 0, 0, 3600, None, 500).is_ok());
+    time_it("timeline", &mut || chrono_metrics::timeline(conn, 0, 0, 3_600_000, None, 500).is_ok());
     time_it("top_kind", &mut || chrono_metrics::top(conn, "kind", 0, 25).is_ok());
     time_it("patterns", &mut || chrono_metrics::patterns(conn, 0, 25).is_ok());
     time_it("search", &mut || chrono_metrics::search(conn, "fix", 25).is_ok());
@@ -385,6 +385,52 @@ pub fn bench(store: &Store, db_path: &Path) -> Result<Json> {
         .set("db_bytes", Json::Int(db_bytes));
     let result = Json::obj().set("stats", stats).set("timings", Json::Arr(timings));
     envelope(store, "bench", &w, 1, 1, result)
+}
+
+/// `events`: stream cronológico unificado de todas las fuentes, filtrable por
+/// `--source`/`--kind`/`--level`/`--grep` y la ventana `--since`/`--until`.
+#[allow(clippy::too_many_arguments)]
+pub fn events(
+    store: &Store,
+    w: &Window,
+    until: Option<&str>,
+    source: Option<&str>,
+    kind: Option<&str>,
+    level: Option<&str>,
+    grep: Option<&str>,
+    limit: Option<&str>,
+) -> Result<Json> {
+    const DEFAULT_LIMIT: usize = 100;
+    let limit = parse_limit(limit, DEFAULT_LIMIT)?;
+    let until_epoch = match until {
+        None | Some("") => 0,
+        Some(s) => parse_since(s).ok_or_else(|| {
+            t(format!("invalid --until: {s:?} (use YYYY-MM-DD)"), format!("--until no válido: {s:?} (usa YYYY-MM-DD)"))
+        })?,
+    };
+    let filter = chrono_metrics::EventFilter {
+        since_epoch: w.since_epoch,
+        until_epoch,
+        source,
+        kind,
+        level,
+        grep,
+    };
+    let rows = chrono_metrics::events(store.conn(), &filter, limit)?;
+    let items: Vec<Json> = rows
+        .iter()
+        .map(|e| {
+            Json::obj()
+                .set("id", Json::str(&e.id))
+                .set("source_id", Json::str(&e.source_id))
+                .set("kind", Json::str(&e.kind))
+                .set("at", Json::str(&e.at))
+                .set("level", Json::str(&e.level))
+                .set("title", Json::str(&e.title))
+        })
+        .collect();
+    let n = items.len();
+    envelope(store, "events", w, limit, n, Json::obj().set("events", Json::Arr(items)))
 }
 
 /// `patterns`: plantillas de log más frecuentes (Drain-light, desde rollups).
@@ -440,10 +486,10 @@ pub fn timeline(
     by: Option<&str>,
     limit: Option<&str>,
 ) -> Result<Json> {
-    const DEFAULT_BUCKET: i64 = 3600;
+    const DEFAULT_BUCKET: i64 = 3_600_000; // 1h en ms
     const DEFAULT_LIMIT: usize = 500;
     let limit = parse_limit(limit, DEFAULT_LIMIT)?;
-    let bucket_secs = match bucket {
+    let bucket_ms = match bucket {
         None | Some("") => DEFAULT_BUCKET,
         Some(s) => parse_duration(s).ok_or_else(|| {
             t(
@@ -465,7 +511,7 @@ pub fn timeline(
         None | Some("") => None,
         Some(b) => Some(b),
     };
-    let rows = chrono_metrics::timeline(store.conn(), w.since_epoch, until_epoch, bucket_secs, group_by, limit)?;
+    let rows = chrono_metrics::timeline(store.conn(), w.since_epoch, until_epoch, bucket_ms, group_by, limit)?;
     let items: Vec<Json> = rows
         .iter()
         .map(|b| {
@@ -479,7 +525,7 @@ pub fn timeline(
     let n = items.len();
     let until_json = if until_epoch == 0 { Json::Null } else { Json::str(&epoch_to_iso8601(until_epoch)) };
     let result = Json::obj()
-        .set("bucket_secs", Json::Int(bucket_secs))
+        .set("bucket_ms", Json::Int(bucket_ms))
         .set("by", group_by.map_or(Json::Null, Json::str))
         .set("until", until_json)
         .set("buckets", Json::Arr(items));
@@ -508,16 +554,16 @@ fn event_ref_json(e: &chrono_metrics::EventRef) -> Json {
         .set("at", Json::str(&e.at))
         .set("level", Json::str(&e.level))
         .set("title", Json::str(&e.title))
-        .set("delta_secs", Json::Int(e.delta_secs))
+        .set("delta_ms", Json::Int(e.delta_ms))
 }
 
 /// `correlate <id>`: eventos de OTRAS fuentes en ±Δt del evento ancla.
 /// `--delta` (duración, por defecto 1h), `--limit`.
 pub fn correlate(store: &Store, id: &str, delta: Option<&str>, limit: Option<&str>) -> Result<Json> {
-    const DEFAULT_DELTA: i64 = 3600;
+    const DEFAULT_DELTA: i64 = 3_600_000; // 1h en ms
     const DEFAULT_LIMIT: usize = 25;
     let w = no_window();
-    let delta_secs = match delta {
+    let delta_ms = match delta {
         None | Some("") => DEFAULT_DELTA,
         Some(s) => parse_duration(s).ok_or_else(|| {
             t(
@@ -527,11 +573,11 @@ pub fn correlate(store: &Store, id: &str, delta: Option<&str>, limit: Option<&st
         })?,
     };
     let limit = parse_limit(limit, DEFAULT_LIMIT)?;
-    let corr = chrono_metrics::correlate(store.conn(), id, delta_secs, limit)?;
+    let corr = chrono_metrics::correlate(store.conn(), id, delta_ms, limit)?;
     let related: Vec<Json> = corr.related.iter().map(event_ref_json).collect();
     let n = related.len();
     let result = Json::obj()
-        .set("delta_secs", Json::Int(delta_secs))
+        .set("delta_ms", Json::Int(delta_ms))
         .set("anchor", event_ref_json(&corr.anchor))
         .set("related", Json::Arr(related));
     envelope(store, "correlate", &w, limit, n, result)

@@ -79,7 +79,8 @@ fn parse_nginx_date(s: &str) -> Option<i64> {
     let offset = parse_tz_offset(tz)?;
     let days = days_from_civil(year, month, day);
     let local_secs = days * 86_400 + hh * 3600 + mm * 60 + ss;
-    Some(local_secs - offset)
+    // `at_epoch` es ms en todo el dominio; nginx tiene resolución de segundo.
+    Some((local_secs - offset) * 1000)
 }
 
 /// Contenido entre comillas dobles al inicio de `s` (sin soporte de escapes:
@@ -169,7 +170,7 @@ mod tests {
         assert_eq!(f.referer, "http://www.example.com/start.html");
         assert_eq!(f.user_agent, "Mozilla/4.08");
         // Epoch conocido, verificado independientemente (ver informe): 971211336.
-        assert_eq!(f.epoch, 971_211_336);
+        assert_eq!(f.epoch, 971_211_336_000);
     }
 
     #[test]
@@ -181,7 +182,7 @@ mod tests {
         assert_eq!(f.bytes, "");
         assert_eq!(f.referer, "");
         assert_eq!(f.user_agent, "");
-        assert_eq!(f.epoch, 1_577_836_800);
+        assert_eq!(f.epoch, 1_577_836_800_000);
     }
 
     #[test]

@@ -60,7 +60,7 @@ pub struct Event {
     /// ISO-8601 SIEMPRE en UTC ("2026-08-30T10:00:00Z"). Para la salida.
     pub at: String,
     /// Segundos UTC desde epoch. Lo que usan índices y ventanas temporales.
-    pub at_epoch: i64,
+    pub at_epoch: i64,                  // MILISEGUNDOS UTC; lo que usan índices y ventanas
     pub actor: Actor,
     pub title: String,
     pub body: String,

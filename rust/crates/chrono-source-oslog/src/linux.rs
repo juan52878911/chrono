@@ -17,11 +17,11 @@ use std::collections::BTreeMap;
 /// Longitud máxima del `title` (mensaje del log), ver encargo §4.
 const TITLE_MAX_CHARS: usize = 500;
 
-/// `__REALTIME_TIMESTAMP` viene en MICROsegundos desde epoch, como texto
-/// (no es el mismo formato que acepta `timeutil::parse_time_str`, pensado
-/// para segundos/milisegundos). `None` si no es un entero.
+/// `__REALTIME_TIMESTAMP` viene en MICROsegundos desde epoch, como texto.
+/// `at_epoch` es MILISEGUNDOS en todo el dominio → se dividen micros entre 1000.
+/// `None` si no es un entero.
 fn parse_realtime_us(s: &str) -> Option<i64> {
-    s.trim().parse::<i64>().ok().map(|us| us.div_euclid(1_000_000))
+    s.trim().parse::<i64>().ok().map(|us| us.div_euclid(1000))
 }
 
 /// Prioridad syslog (0..7, texto) al nombre de nivel, tal como pide el
@@ -133,8 +133,8 @@ mod tests {
     #[test]
     fn microsegundos_a_epoch_segundos() {
         let events = parse_journald(SAMPLE, "oslog:linux");
-        assert_eq!(events[0].at_epoch, 1_696_000_000);
-        assert_eq!(events[1].at_epoch, 1_696_000_005);
+        assert_eq!(events[0].at_epoch, 1_696_000_000_000);
+        assert_eq!(events[1].at_epoch, 1_696_000_005_000);
     }
 
     #[test]

@@ -168,7 +168,8 @@ fn try_rfc3164(rest: &str, fallback_year: i64) -> Option<(String, String, String
     }
 
     let days = days_from_civil(fallback_year, month, day);
-    let epoch = days * 86_400 + hh * 3600 + mm * 60 + ss;
+    // `at_epoch` es ms en todo el dominio; RFC3164 tiene resolución de segundo.
+    let epoch = (days * 86_400 + hh * 3600 + mm * 60 + ss) * 1000;
     Some((host.to_string(), tag, pid, msg, epoch))
 }
 
@@ -226,7 +227,7 @@ mod tests {
         assert_eq!(f.facility, "4");
         assert_eq!(f.severity, "2");
         assert!(f.msg.starts_with("BOMsu"));
-        assert_eq!(f.epoch, 1_697_062_455);
+        assert_eq!(f.epoch, 1_697_062_455_003);
     }
 
     #[test]
@@ -258,7 +259,7 @@ mod tests {
         assert_eq!(f.level, "");
         assert_eq!(f.facility, "");
         // 2023-10-11T22:14:15Z
-        assert_eq!(f.epoch, 1_697_062_455);
+        assert_eq!(f.epoch, 1_697_062_455_000);
     }
 
     #[test]

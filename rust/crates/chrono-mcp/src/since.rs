@@ -29,7 +29,8 @@ pub fn parse_since(s: &str) -> Option<i64> {
         let ss: i64 = parts.get(2).map_or(Some(0), |p| p.parse().ok())?;
         secs = hh * 3600 + mm * 60 + ss;
     }
-    Some(days_from_civil(y, m, d) * 86_400 + secs)
+    // MILISEGUNDOS UTC (unidad canónica de `at_epoch`).
+    Some((days_from_civil(y, m, d) * 86_400 + secs) * 1000)
 }
 
 /// `since` textual (posiblemente vacío o inválido) -> epoch para las
@@ -58,7 +59,7 @@ mod tests {
 
     #[test]
     fn parsea_fechas_simples() {
-        assert_eq!(parse_since("2024-01-01"), Some(1_704_067_200));
+        assert_eq!(parse_since("2024-01-01"), Some(1_704_067_200_000));
         assert_eq!(parse_since("1970-01-01"), Some(0));
         assert_eq!(parse_since("ayer"), None);
         assert_eq!(since_to_epoch(""), 0);

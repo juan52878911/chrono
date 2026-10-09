@@ -133,7 +133,7 @@ mod tests {
         let cols = config::resolve_columns(&h, &CsvOverrides::default());
         let f = fields(&["1704067200", "hola", "api", "info"]);
         let ev = row_to_event(&f, &h, &cols, "1704067200,hola,api,info", 0, "csv:/tmp/a.csv");
-        assert_eq!(ev.at_epoch, 1_704_067_200);
+        assert_eq!(ev.at_epoch, 1_704_067_200_000);
         assert_eq!(ev.at, "2024-01-01T00:00:00Z");
         assert_eq!(ev.title, "hola");
         assert_eq!(ev.level, "INFO");
