@@ -6,7 +6,7 @@ use crate::config::{self, JsonlConfig, JsonlOverrides};
 use crate::record;
 use chrono_core::{CoreError, Cursor, Event, Result as CoreResult, SourceConfig, Watermark};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -96,12 +96,23 @@ pub struct JsonlCursor {
     /// Ruta del fichero, para recalcular el hash del prefijo en `watermark()`
     /// sobre `min(4096, bytes_read)` (la región consumida hasta ese momento).
     path: PathBuf,
+    /// Eventos ya construidos de la última línea leída y aún no entregados
+    /// (solo con `explode`: una línea → N eventos). `next()` los entrega de
+    /// uno en uno, en orden, antes de leer otra línea.
+    pending: VecDeque<Event>,
+    /// Offset de inicio de la línea que originó `pending`. Mientras queden
+    /// eventos pendientes el watermark apunta aquí (no a `bytes_read`), para
+    /// que un `open` posterior re-lea la línea entera en vez de perder los
+    /// eventos no entregados (los ids son deterministas, re-emitir es
+    /// idempotente).
+    line_start: u64,
 }
 
 impl JsonlCursor {
     /// Abre el cursor sobre `path`, arrancando la lectura en `start_offset`
     /// bytes (0 si no hay watermark previo).
     pub fn open(path: &Path, start_offset: u64, cfg: &SourceConfig) -> CoreResult<Self> {
+        config::validate_options(cfg)?;
         let sample: Map<String, Value> = peek_first_nonempty_line(path)
             .and_then(|line| serde_json::from_str::<Value>(&line).ok())
             .and_then(|v| v.as_object().cloned())
@@ -120,6 +131,8 @@ impl JsonlCursor {
             reported,
             bytes_read: start_offset,
             path: path.to_path_buf(),
+            pending: VecDeque::new(),
+            line_start: start_offset,
         })
     }
 
@@ -146,6 +159,9 @@ impl JsonlCursor {
 
 impl Cursor for JsonlCursor {
     fn next(&mut self) -> CoreResult<Option<Event>> {
+        if let Some(ev) = self.pending.pop_front() {
+            return Ok(Some(ev));
+        }
         loop {
             let line_offset = self.bytes_read;
             let raw = self
@@ -162,16 +178,25 @@ impl Cursor for JsonlCursor {
             let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(&raw) else {
                 continue;
             };
-            return Ok(Some(record::line_to_event(&obj, &raw, line_offset, &self.overrides, &self.source_id)));
+            // Una línea puede dar 0 (explode sin array/sin coincidencias), 1 o
+            // N eventos; los N se encolan y se entregan de uno en uno.
+            self.pending = record::line_to_events(&obj, &raw, line_offset, &self.overrides, &self.source_id).into();
+            self.line_start = line_offset;
+            if let Some(ev) = self.pending.pop_front() {
+                return Ok(Some(ev));
+            }
         }
     }
 
     fn watermark(&self) -> Watermark {
         // Hash del prefijo sobre la región consumida (`min(4096, bytes_read)`).
         // Si no se puede leer el fichero, se cae al formato antiguo `off:<n>`.
-        let value = match hash_prefix(&self.path, self.bytes_read) {
-            Ok(h) => format!("off:{}|p:{}", self.bytes_read, h),
-            Err(_) => format!("off:{}", self.bytes_read),
+        // Con eventos pendientes de una línea expandida, el offset es el INICIO
+        // de esa línea (ver `line_start`); si no, el final de lo consumido.
+        let off = if self.pending.is_empty() { self.bytes_read } else { self.line_start };
+        let value = match hash_prefix(&self.path, off) {
+            Ok(h) => format!("off:{off}|p:{h}"),
+            Err(_) => format!("off:{off}"),
         };
         Watermark { kind: "jsonl".to_string(), value }
     }
@@ -182,6 +207,12 @@ impl Cursor for JsonlCursor {
         m.insert("time_field".to_string(), self.reported.time_field.clone());
         m.insert("message_field".to_string(), self.reported.message_field.clone());
         m.insert("entity_field".to_string(), self.reported.entity_field.clone());
+        if !self.reported.explode.is_empty() {
+            m.insert("explode".to_string(), self.reported.explode.clone());
+        }
+        if !self.reported.explode_where.is_empty() {
+            m.insert("explode_where".to_string(), self.reported.explode_where.clone());
+        }
         m
     }
 }

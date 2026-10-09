@@ -8,6 +8,10 @@
 //!   resuelve UNA VEZ a partir de la primera línea del fichero (no de la
 //!   línea de arranque de un watermark incremental), para que `manifest()`
 //!   sea estable entre un `init` y un `sync`. Ver `config::resolve_config`.
+//! - Selectores de campo con rutas JSON anidadas (`message.role`, `data.0.id`)
+//!   y expansión de arrays opcional (`explode` + `explode_where`): una línea
+//!   → N eventos. Ver `path` y `record`. Casos de uso: transcripts de Claude
+//!   (`explode = "message.content"`, `explode_where = "type=tool_use"`).
 //! - Una línea que no parsea como objeto JSON se descarta silenciosamente
 //!   (no aborta la ingesta), igual que `chrono-source-git` descarta
 //!   registros corruptos de `git log`.
@@ -19,6 +23,7 @@
 
 mod config;
 mod cursor;
+mod path;
 mod record;
 mod simhash;
 mod timeutil;
@@ -430,5 +435,133 @@ mod tests {
         assert_eq!(m["time_field"], "ts");
         assert_eq!(m["message_field"], "msg");
         assert_eq!(m["entity_field"], "service");
+    }
+
+    const CLAUDE_TRANSCRIPT: &str = concat!(
+        r#"{"timestamp":"2024-01-01T00:00:00.100Z","type":"assistant","message":{"content":[{"type":"text","text":"hi"},{"type":"tool_use","name":"Read"},{"type":"tool_use","name":"Bash"}]}}"#, "\n",
+        r#"{"timestamp":"2024-01-01T00:00:01.000Z","type":"user","message":{"content":"solo texto"}}"#, "\n",
+        r#"{"timestamp":"2024-01-01T00:00:02.000Z","type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit"}]}}"#, "\n",
+    );
+
+    fn claude_cfg() -> SourceConfig {
+        let pairs = [
+            ("explode", "message.content"),
+            ("explode_where", "type=tool_use"),
+            ("time_field", "timestamp"),
+            ("entity_field", "name"),
+            ("message_field", "name"),
+        ];
+        SourceConfig { options: pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect() }
+    }
+
+    fn drain(cur: &mut Box<dyn chrono_core::Cursor>) -> Vec<chrono_core::Event> {
+        let mut out = Vec::new();
+        while let Some(ev) = cur.next().unwrap() {
+            out.push(ev);
+        }
+        out
+    }
+
+    #[test]
+    fn explode_un_evento_por_tool_use_y_lineas_sin_array_se_descartan() {
+        let f = TempJsonl::write(CLAUDE_TRANSCRIPT);
+        let mut cur = JsonlSource::new().open(f.path(), None, &claude_cfg()).unwrap();
+        let evs = drain(&mut cur);
+        let names: Vec<&str> = evs.iter().map(|e| e.touches[0].entity.as_str()).collect();
+        assert_eq!(names, ["Read", "Bash", "Edit"]);
+        assert_eq!(evs[0].at_epoch, 1_704_067_200_100);
+        assert_eq!(evs[1].at_epoch, 1_704_067_200_100);
+        assert_eq!(evs[2].at_epoch, 1_704_067_202_000);
+    }
+
+    #[test]
+    fn explode_ids_iguales_entre_dos_aperturas() {
+        let f = TempJsonl::write(CLAUDE_TRANSCRIPT);
+        let src = JsonlSource::new();
+        let ids = |_: ()| drain(&mut src.open(f.path(), None, &claude_cfg()).unwrap()).into_iter().map(|e| e.id).collect::<Vec<_>>();
+        let (a, b) = (ids(()), ids(()));
+        assert_eq!(a, b);
+        let uniq: std::collections::BTreeSet<_> = a.iter().collect();
+        assert_eq!(uniq.len(), a.len(), "los N eventos de una línea no colisionan");
+    }
+
+    #[test]
+    fn explode_watermark_final_no_reemite_y_append_solo_da_el_delta() {
+        let f = TempJsonl::write(CLAUDE_TRANSCRIPT);
+        let src = JsonlSource::new();
+        let cfg = claude_cfg();
+        let mut cur = src.open(f.path(), None, &cfg).unwrap();
+        assert_eq!(drain(&mut cur).len(), 3);
+        let wm = cur.watermark();
+        assert_eq!(wm.value.split('|').next().unwrap(), format!("off:{}", CLAUDE_TRANSCRIPT.len()));
+
+        let mut again = src.open(f.path(), Some(wm.clone()), &cfg).unwrap();
+        assert!(again.next().unwrap().is_none());
+
+        f.append(concat!(r#"{"timestamp":"2024-01-01T00:00:03Z","message":{"content":[{"type":"tool_use","name":"Grep"}]}}"#, "\n"));
+        let mut delta = src.open(f.path(), Some(wm), &cfg).unwrap();
+        let evs = drain(&mut delta);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].touches[0].entity, "Grep");
+    }
+
+    #[test]
+    fn explode_watermark_a_mitad_de_linea_apunta_al_inicio_de_la_linea() {
+        let f = TempJsonl::write(CLAUDE_TRANSCRIPT);
+        let src = JsonlSource::new();
+        let cfg = claude_cfg();
+        let mut cur = src.open(f.path(), None, &cfg).unwrap();
+        let first = cur.next().unwrap().unwrap(); // Read; Bash queda pendiente.
+        assert_eq!(first.touches[0].entity, "Read");
+        let wm = cur.watermark();
+        assert_eq!(wm.value.split('|').next().unwrap(), "off:0", "no se pierde el evento pendiente");
+
+        // Entrega el pendiente: ahora el watermark ya está después de la línea.
+        let second = cur.next().unwrap().unwrap();
+        assert_eq!(second.touches[0].entity, "Bash");
+        let first_len = CLAUDE_TRANSCRIPT.lines().next().unwrap().len() + 1;
+        assert_eq!(cur.watermark().value.split('|').next().unwrap(), format!("off:{first_len}"));
+    }
+
+    #[test]
+    fn explode_manifest_reporta_explode_y_where() {
+        let f = TempJsonl::write(CLAUDE_TRANSCRIPT);
+        let cur = JsonlSource::new().open(f.path(), None, &claude_cfg()).unwrap();
+        let m = cur.manifest();
+        assert_eq!(m["explode"], "message.content");
+        assert_eq!(m["explode_where"], "type=tool_use");
+        assert_eq!(m["time_field"], "timestamp");
+        assert_eq!(m["entity_field"], "name");
+
+        // Sin explode, el manifest no trae esas claves.
+        let plain = open_source(TempJsonl::write(SAMPLE).path());
+        assert!(!plain.manifest().contains_key("explode"));
+    }
+
+    #[test]
+    fn explode_where_sin_explode_o_mal_formado_es_error() {
+        let f = TempJsonl::write(CLAUDE_TRANSCRIPT);
+        let src = JsonlSource::new();
+        let mk = |pairs: &[(&str, &str)]| SourceConfig { options: pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect() };
+        assert!(src.open(f.path(), None, &mk(&[("explode_where", "type=x")])).is_err());
+        assert!(src.open(f.path(), None, &mk(&[("explode", "a"), ("explode_where", "sinigual")])).is_err());
+        assert!(src.open(f.path(), None, &mk(&[("explode", "a"), ("explode_where", "=v")])).is_err());
+    }
+
+    #[test]
+    fn config_viejo_time_field_top_level_sigue_igual() {
+        let f = TempJsonl::write(concat!(r#"{"ts": 1704067200, "when": 1704067300, "msg": "x", "service": "api"}"#, "\n"));
+        let cfg = SourceConfig { options: BTreeMap::from([("time_field".to_string(), "when".to_string())]) };
+        let ev = drain(&mut JsonlSource::new().open(f.path(), None, &cfg).unwrap()).remove(0);
+        assert_eq!(ev.at_epoch, 1_704_067_300_000);
+        assert_eq!(ev.touches[0].entity, "api");
+    }
+
+    #[test]
+    fn ruta_anidada_via_cursor() {
+        let f = TempJsonl::write(concat!(r#"{"message":{"role":"user"},"ts":1}"#, "\n"));
+        let cfg = SourceConfig { options: BTreeMap::from([("entity_field".to_string(), "message.role".to_string())]) };
+        let ev = drain(&mut JsonlSource::new().open(f.path(), None, &cfg).unwrap()).remove(0);
+        assert_eq!(ev.touches[0].entity, "user");
     }
 }
