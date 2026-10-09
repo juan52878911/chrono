@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono_classify_rules::RulesClassifier;
 use chrono_core::{Classifier, CoreError, Cursor, Registry, Source, SourceConfig, Watermark};
@@ -346,6 +347,102 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
     store.rebuild_fts()?;
     finalize(&index_root, &store, &changed_git_paths)?;
     eprintln!("{}", t(format!("sync: {total} new events"), format!("sync: {total} eventos nuevos")));
+    Ok(())
+}
+
+/// `chrono tail [--interval 2s] [--source/--kind/--level/--grep]`: sigue el
+/// índice como `tail -f`. Cada intervalo ingiere el delta de cada fuente (SIN
+/// el enriquecimiento pesado: ni FTS, ni rollups, ni tamaños/forge de git) e
+/// imprime los eventos NUEVOS en orden cronológico. Bucle infinito; Ctrl-C para
+/// parar. Pensado para fuentes que crecen (logs, oslog); para git el atajo de
+/// HEAD evita trabajo si no hay commits nuevos.
+pub fn tail(
+    db: &Path,
+    interval_ms: i64,
+    source: Option<&str>,
+    kind: Option<&str>,
+    level: Option<&str>,
+    grep: Option<&str>,
+) -> Result<()> {
+    let mut store = Store::open(db)?;
+    let index_root = index_root_of(db);
+    let registry = build_registry();
+    let interval = Duration::from_millis(interval_ms.clamp(200, 3_600_000) as u64);
+
+    // `tail -f`: se sigue SOLO lo nuevo → se arranca desde el máximo at_epoch ya
+    // presente (0 si el índice está vacío, en cuyo caso se mostrará todo).
+    let mut since: i64 = store
+        .conn()
+        .query_row("SELECT COALESCE(MAX(at_epoch), 0) FROM events", [], |r| r.get(0))
+        .unwrap_or(0);
+    let mut seen: HashSet<String> = HashSet::new();
+
+    eprintln!("{}", t(
+        format!("chrono tail: following every {interval_ms} ms — Ctrl-C to stop"),
+        format!("chrono tail: siguiendo cada {interval_ms} ms — Ctrl-C para parar"),
+    ));
+
+    let mut stdout = std::io::stdout();
+    loop {
+        tail_ingest(&mut store, &registry, &index_root)?;
+
+        let filter = chrono_metrics::EventFilter {
+            since_epoch: since,
+            until_epoch: 0,
+            source,
+            kind,
+            level,
+            grep,
+        };
+        let rows = chrono_metrics::events(store.conn(), &filter, 1000)?;
+        for r in &rows {
+            if seen.insert(r.id.clone()) {
+                let lvl: &str = if r.level.is_empty() { "-" } else { r.level.as_str() };
+                let src = r.source_id.split(':').next().unwrap_or(&r.source_id);
+                let _ = writeln!(stdout, "{}  {:5}  [{src}]  {}", r.at, lvl, r.title);
+                if r.at_epoch > since {
+                    since = r.at_epoch;
+                }
+            }
+        }
+        let _ = stdout.flush();
+        std::thread::sleep(interval);
+    }
+}
+
+/// Ingesta del delta de TODAS las fuentes para `tail`: como `sync` pero SIN
+/// enriquecimiento (ni FTS, ni rollups, ni tamaños/forge). Solo mete los
+/// eventos nuevos para poder mostrarlos al instante.
+fn tail_ingest(store: &mut Store, registry: &Registry, index_root: &Path) -> Result<()> {
+    let now = now_iso();
+    let sources = store.list_sources()?;
+    for s in &sources {
+        let Some(adapter) = registry.by_kind(&s.kind) else { continue };
+        let path = PathBuf::from(&s.path);
+        if s.kind == "git" {
+            if let Ok(head) = chrono_source_git::head_sha(&path) {
+                if s.watermark == format!("sha:{head}") {
+                    continue;
+                }
+            }
+        }
+        let wm = if s.watermark.is_empty() {
+            None
+        } else {
+            Some(Watermark { kind: s.kind.clone(), value: s.watermark.clone() })
+        };
+        let new_wm = match ingest_source(adapter, &path, wm, store, index_root) {
+            Ok((_n, new_wm, _)) => new_wm,
+            Err(IngestError::Diverged) => {
+                store.delete_source_events(&s.id)?;
+                ingest_source(adapter, &path, None, store, index_root)
+                    .map(|(_n, w, _)| w)
+                    .map_err(|e| e.into_boxed())?
+            }
+            Err(e) => return Err(e.into_boxed()),
+        };
+        store.set_source_watermark(&s.id, &new_wm.value, &now)?;
+    }
     Ok(())
 }
 

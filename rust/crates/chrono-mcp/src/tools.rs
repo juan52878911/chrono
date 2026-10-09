@@ -142,6 +142,16 @@ pub fn tool_defs() -> Vec<Value> {
             &[],
         ),
         tool(
+            "trace",
+            "Sigue la cadena de un evento por links (reverts, mismo ticket/PR).",
+            json!({
+                "id": str_prop("Id del evento ancla"),
+                "depth": json!({"type": "integer", "description": "Profundidad BFS (por defecto 5)"}),
+                "limit": json!({"type": "integer", "description": "Máximo de nodos (por defecto 50)"})
+            }),
+            &["id"],
+        ),
+        tool(
             "events",
             "Stream cronológico unificado de todas las fuentes, filtrable.",
             json!({
@@ -252,6 +262,12 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
         "patterns" => {
             let limit = arg_i64(args, "limit", 25).max(1) as usize;
             patterns(conn, since_epoch, limit)?
+        }
+        "trace" => {
+            let id = arg_str(args, "id")?;
+            let depth = arg_i64(args, "depth", 5).max(1);
+            let limit = arg_i64(args, "limit", 50).max(1) as usize;
+            trace(conn, id, depth, limit)?
         }
         "events" => {
             let until = args.get("until").and_then(Value::as_str).unwrap_or("");
@@ -474,6 +490,24 @@ fn top(conn: &Connection, dim: &str, since_epoch: i64, limit: usize) -> Result<V
     let rows = chrono_metrics::top(conn, dim, since_epoch, limit)?;
     let items: Vec<Value> = rows.iter().map(|v| json!({"value": v.value, "count": v.count})).collect();
     Ok(json!({"dim": dim, "top": items}))
+}
+
+fn trace(conn: &Connection, id: &str, depth: i64, limit: usize) -> Result<Value> {
+    let tr = chrono_metrics::trace(conn, id, depth, limit)?;
+    let event_json = |e: &chrono_metrics::EventRow| {
+        json!({"id": e.id, "source_id": e.source_id, "kind": e.kind, "at": e.at, "level": e.level, "title": e.title})
+    };
+    let chain: Vec<Value> = tr
+        .nodes
+        .iter()
+        .map(|n| {
+            let mut v = event_json(&n.event);
+            v["depth"] = json!(n.depth);
+            v["rel"] = json!(n.rel);
+            v
+        })
+        .collect();
+    Ok(json!({"anchor": event_json(&tr.anchor), "chain": chain}))
 }
 
 fn events(conn: &Connection, filter: &chrono_metrics::EventFilter, limit: usize) -> Result<Value> {

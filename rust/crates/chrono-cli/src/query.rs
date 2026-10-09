@@ -387,6 +387,42 @@ pub fn bench(store: &Store, db_path: &Path) -> Result<Json> {
     envelope(store, "bench", &w, 1, 1, result)
 }
 
+/// `trace <id>`: sigue la cadena de `links` desde un evento (reverts, mismo
+/// ticket/PR…). `--depth` (profundidad BFS, por defecto 5), `--limit` (50).
+pub fn trace(store: &Store, id: &str, depth: Option<&str>, limit: Option<&str>) -> Result<Json> {
+    const DEFAULT_DEPTH: i64 = 5;
+    const DEFAULT_LIMIT: usize = 50;
+    let w = no_window();
+    let max_depth = match depth {
+        None | Some("") => DEFAULT_DEPTH,
+        Some(s) => match s.parse::<i64>() {
+            Ok(n) if n > 0 => n,
+            _ => return Err(t(format!("invalid --depth: {s:?} (positive integer)"), format!("--depth no válido: {s:?} (entero positivo)")).into()),
+        },
+    };
+    let limit = parse_limit(limit, DEFAULT_LIMIT)?;
+    let tr = chrono_metrics::trace(store.conn(), id, max_depth, limit)?;
+    let event_json = |e: &chrono_metrics::EventRow| {
+        Json::obj()
+            .set("id", Json::str(&e.id))
+            .set("source_id", Json::str(&e.source_id))
+            .set("kind", Json::str(&e.kind))
+            .set("at", Json::str(&e.at))
+            .set("level", Json::str(&e.level))
+            .set("title", Json::str(&e.title))
+    };
+    let nodes: Vec<Json> = tr
+        .nodes
+        .iter()
+        .map(|n| {
+            event_json(&n.event).set("depth", Json::Int(n.depth)).set("rel", Json::str(&n.rel))
+        })
+        .collect();
+    let n = nodes.len();
+    let result = Json::obj().set("anchor", event_json(&tr.anchor)).set("chain", Json::Arr(nodes));
+    envelope(store, "trace", &w, limit, n, result)
+}
+
 /// `events`: stream cronológico unificado de todas las fuentes, filtrable por
 /// `--source`/`--kind`/`--level`/`--grep` y la ventana `--since`/`--until`.
 #[allow(clippy::too_many_arguments)]

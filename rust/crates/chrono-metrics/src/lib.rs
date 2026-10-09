@@ -21,6 +21,7 @@ mod similar;
 mod ticket;
 mod timeline;
 mod top;
+mod trace;
 
 pub use bugs::{bugs, BugArea, BugCategory, Bugs};
 pub use churn::{churn, ChurnRow};
@@ -36,6 +37,7 @@ pub use similar::{similar, SimilarRow};
 pub use ticket::{ticket, Ticket};
 pub use timeline::{timeline, TimelineBucket};
 pub use top::{top, TopValue};
+pub use trace::{trace, Trace, TraceNode};
 
 /// Error de `chrono-metrics`: no exige un tipo concreto a los llamadores
 /// (CLI, tests...).

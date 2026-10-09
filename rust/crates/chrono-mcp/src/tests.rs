@@ -166,18 +166,18 @@ fn ping_responde_objeto_vacio() {
 }
 
 #[test]
-fn tools_list_incluye_los_dieciseis_tools() {
+fn tools_list_incluye_los_diecisiete_tools() {
     let (_db, state) = state_with_fixture();
     let resp = call(&state, 3, "tools/list", json!({}));
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools debe ser array");
-    assert_eq!(tools.len(), 16);
+    assert_eq!(tools.len(), 17);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     for expected in [
         "hotspots", "coupling", "owners", "churn", "search", "similar", "bugs", "tickets",
-        "phases", "branches", "prs", "timeline", "top", "correlate", "patterns", "events",
+        "phases", "branches", "prs", "timeline", "top", "correlate", "patterns", "events", "trace",
     ] {
         assert!(
             names.contains(&expected),
@@ -231,7 +231,7 @@ fn tools_call_sin_indice_pide_chrono_init() {
 
     // tools/list debe seguir funcionando igual sin índice.
     let list = call(&state, 6, "tools/list", json!({}));
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 16);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 17);
 }
 
 #[test]

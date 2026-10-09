@@ -56,10 +56,12 @@ Log-native (multi-source):
   timeline             Event counts per time bucket (--bucket 1h, --by level|kind).
   top <dim>            Most frequent values of a dimension (level|kind|actor|entity|attr:<k>).
   patterns             Most frequent log templates (Drain-light clustering).
+  trace <id>           Follow an event's links chain (reverts, same ticket/PR).
   events               Unified chronological stream across sources (--source/--kind/--level/--grep).
   correlate <id>       Events from OTHER sources within ±Δt of an event (--delta 1h).
 
 Diagnostics:
+  tail                 Follow new events live across sources (tail -f; --interval 2s).
   bench                Measure query latencies + index stats on this index.
 
 Integration:
@@ -106,10 +108,12 @@ Log-native (multi-fuente):
   timeline             Conteo de eventos por bucket temporal (--bucket 1h, --by level|kind).
   top <dim>            Valores más frecuentes de una dimensión (level|kind|actor|entity|attr:<c>).
   patterns             Plantillas de log más frecuentes (clustering Drain-light).
+  trace <id>           Sigue la cadena de links de un evento (reverts, mismo ticket/PR).
   events               Stream cronológico unificado de todas las fuentes (--source/--kind/--level/--grep).
   correlate <id>       Eventos de OTRAS fuentes en ±Δt de un evento (--delta 1h).
 
 Diagnóstico:
+  tail                 Sigue eventos nuevos en vivo (tail -f; --interval 2s).
   bench                Mide latencias de consulta + estadísticas del índice.
 
 Integración:
@@ -139,6 +143,8 @@ struct Flags {
     kind: Option<String>,
     level: Option<String>,
     grep: Option<String>,
+    depth: Option<String>,
+    interval: Option<String>,
     pos: Vec<String>,
 }
 
@@ -201,6 +207,14 @@ fn parse_args(args: &[String]) -> Flags {
             "--grep" if i + 1 < args.len() => {
                 i += 1;
                 f.grep = Some(args[i].clone());
+            }
+            "--depth" if i + 1 < args.len() => {
+                i += 1;
+                f.depth = Some(args[i].clone());
+            }
+            "--interval" if i + 1 < args.len() => {
+                i += 1;
+                f.interval = Some(args[i].clone());
             }
             a if a.starts_with("--") && a != "--version" && a != "--help" => {}
             a => f.pos.push(a.to_string()),
@@ -309,6 +323,24 @@ fn main() {
         }
         return;
     }
+    if cmd == "tail" {
+        let interval_ms = match f.interval.as_deref() {
+            None | Some("") => 2000,
+            Some(s) => timeutil::parse_duration(s)
+                .unwrap_or_else(|| fatal(t(format!("invalid --interval: {s:?}"), format!("--interval no válido: {s:?}")))),
+        };
+        if let Err(e) = index::tail(
+            &db,
+            interval_ms,
+            f.source.as_deref(),
+            f.kind.as_deref(),
+            f.level.as_deref(),
+            f.grep.as_deref(),
+        ) {
+            fatal(e);
+        }
+        return;
+    }
 
     let store = chrono_store::Store::open(&db).unwrap_or_else(|e| fatal(e));
     let window = query::Window::from_flag(f.since.as_deref()).unwrap_or_else(|e| fatal(e));
@@ -378,6 +410,10 @@ fn main() {
         "correlate" => {
             let id = require_pos(&f, "correlate needs an <id>", "correlate necesita un <id>");
             query::correlate(&store, &id, f.delta.as_deref(), f.limit.as_deref())
+        }
+        "trace" => {
+            let id = require_pos(&f, "trace needs an <id>", "trace necesita un <id>");
+            query::trace(&store, &id, f.depth.as_deref(), f.limit.as_deref())
         }
         "show" => {
             let id = require_pos(&f, "show needs an <id>", "show necesita un <id>");

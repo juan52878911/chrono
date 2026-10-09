@@ -123,6 +123,7 @@ CREATE INDEX IF NOT EXISTS idx_events_kind   ON events(kind, at_epoch);
 CREATE INDEX IF NOT EXISTS idx_touches_ent   ON touches(entity_id, event_id);
 CREATE INDEX IF NOT EXISTS idx_labels_task   ON labels(task, label);
 CREATE INDEX IF NOT EXISTS idx_links_rel     ON links(rel, target);
+CREATE INDEX IF NOT EXISTS idx_links_target  ON links(target);
 
 -- Plantillas Drain-light: un mensaje normalizado (variables → <NUM>/<IP>/…).
 -- Miles de líneas de log que solo difieren en valores comparten `template`.
