@@ -136,10 +136,11 @@ mod tests_p3 {
                 (4,'src/sym','symbol',0,0,0),
                 (5,'src/del.rs','file',99,1,0),
                 (6,'src/exc.rs','file',99,0,1);
-             INSERT INTO events(id,source_id,kind,at,at_epoch,title) VALUES
-                ('e1','git:/r','commit','',1000,''),
-                ('e2','git:/r','commit','',2000,''),
-                ('e3','git:/r','commit','',3000,'');
+             INSERT INTO sources(ref,id,kind) VALUES (1,'git:/r','git');
+             INSERT INTO events(id,source_ref,kind,at,at_epoch,title) VALUES
+                ('e1',1,'commit','',1000,''),
+                ('e2',1,'commit','',2000,''),
+                ('e3',1,'commit','',3000,'');
              INSERT INTO touches(event_id,entity_id,weight,attrs) VALUES
                 ('e1',1,12,'{}'),('e2',1,5,'{}'),('e3',1,4,'{}'),
                 ('e1',2,2,'{}'),('e3',2,1,'{}'),
@@ -220,8 +221,8 @@ mod tests_p3 {
         conn.execute_batch(
             "INSERT INTO entities(id,key,type,size,deleted,excluded) VALUES
                 (7,'src/ancient.rs','file',77,0,0);
-             INSERT INTO events(id,source_id,kind,at,at_epoch,title) VALUES
-                ('eneg','git:/r','commit','',-5000,'');
+             INSERT INTO events(id,source_ref,kind,at,at_epoch,title) VALUES
+                ('eneg',1,'commit','',-5000,'');
              INSERT INTO touches(event_id,entity_id,weight,attrs) VALUES
                 ('eneg',7,1,'{}'),('eneg',1,1,'{}');",
         )

@@ -76,12 +76,12 @@ fn open_crea_esquema_y_version_actual_y_reabrir_no_falla() {
     let db = TempDb::new("open");
 
     let store = Store::open(db.path()).expect("open crea el índice");
-    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("4"));
+    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("5"));
     drop(store);
 
     // Reabrir un índice ya existente (mismo schema_version) no debe fallar.
     let store2 = Store::open(db.path()).expect("reabrir no falla");
-    assert_eq!(store2.meta("schema_version").unwrap().as_deref(), Some("4"));
+    assert_eq!(store2.meta("schema_version").unwrap().as_deref(), Some("5"));
 }
 
 #[test]
@@ -351,7 +351,7 @@ fn reset_borra_datos_pero_conserva_meta() {
     }
     // meta se conserva.
     assert_eq!(store.meta("git_version").unwrap().as_deref(), Some("2.45.0"));
-    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("4"));
+    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("5"));
 }
 
 #[test]

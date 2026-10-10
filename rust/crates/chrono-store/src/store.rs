@@ -169,23 +169,25 @@ impl Store {
 
     /// Inserta touches "de enriquecimiento" (p.ej. símbolos S1) para eventos ya
     /// ingeridos, upsertando las entidades por `key`. Cada tupla es
-    /// `(entity_key, entity_type, weight, attrs_json)`. Idempotente: reinsertar
-    /// el mismo (event, entity) actualiza peso/attrs. NO toca `touches_n` ni
-    /// `is_bulk` del evento (esos reflejan solo los touches de fichero).
-    pub fn add_touches(&self, event_id: &str, touches: &[(String, String, i64, String)]) -> Result<()> {
+    /// `(entity_key, entity_type, weight, added, deleted, attrs_json)`.
+    /// Idempotente: reinsertar el mismo (event, entity) actualiza
+    /// peso/added/deleted/attrs. NO toca `touches_n` ni `is_bulk` del evento
+    /// (esos reflejan solo los touches de fichero).
+    pub fn add_touches(&self, event_id: &str, touches: &[(String, String, i64, i64, i64, String)]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         {
             let mut upsert_entity =
                 tx.prepare("INSERT INTO entities(key, type) VALUES (?1, ?2) ON CONFLICT(key) DO NOTHING")?;
             let mut entity_id = tx.prepare("SELECT id FROM entities WHERE key = ?1")?;
             let mut add_touch = tx.prepare(
-                "INSERT INTO touches(event_id, entity_id, weight, attrs) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(event_id, entity_id) DO UPDATE SET weight = excluded.weight, attrs = excluded.attrs",
+                "INSERT INTO touches(event_id, entity_id, weight, added, deleted, attrs) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(event_id, entity_id) DO UPDATE SET
+                    weight = excluded.weight, added = excluded.added, deleted = excluded.deleted, attrs = excluded.attrs",
             )?;
-            for (key, typ, weight, attrs) in touches {
+            for (key, typ, weight, added, deleted, attrs) in touches {
                 upsert_entity.execute(params![key, typ])?;
                 let id: i64 = entity_id.query_row(params![key], |r| r.get(0))?;
-                add_touch.execute(params![event_id, id, weight, attrs])?;
+                add_touch.execute(params![event_id, id, weight, added, deleted, attrs])?;
             }
         }
         tx.commit()?;
@@ -210,15 +212,23 @@ impl Store {
     /// entre fuentes; sus flags se recalculan en el enriquecimiento).
     pub fn delete_source_events(&self, source_id: &str) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
+        // v5: events.source_ref es entero; se resuelve el string a su `ref` con
+        // una subconsulta. Si la fuente no existe, `(SELECT ref …)` da NULL y
+        // `source_ref = NULL` no casa nada (no-op, igual que antes). NO se borra
+        // la fila de `sources`: su `ref` se conserva para la re-ingesta.
         for child in ["touches", "labels", "links"] {
             tx.execute(
                 &format!(
-                    "DELETE FROM {child} WHERE event_id IN (SELECT id FROM events WHERE source_id = ?1)"
+                    "DELETE FROM {child} WHERE event_id IN
+                       (SELECT id FROM events WHERE source_ref = (SELECT ref FROM sources WHERE id = ?1))"
                 ),
                 params![source_id],
             )?;
         }
-        tx.execute("DELETE FROM events WHERE source_id = ?1", params![source_id])?;
+        tx.execute(
+            "DELETE FROM events WHERE source_ref = (SELECT ref FROM sources WHERE id = ?1)",
+            params![source_id],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -365,9 +375,13 @@ impl Store {
         // memoria. Clave: (source_id, template, bucket) -> (count, first_id, last_id).
         let mut agg: BTreeMap<(String, String, i64), (i64, String, String)> = BTreeMap::new();
         {
+            // rollups.source_id sigue siendo TEXT (v5 solo cambió events): se
+            // recupera el string por JOIN a sources. ORDER BY e.rowid conserva el
+            // determinismo del first_id/last_id.
             let mut stmt = self.conn.prepare(
-                "SELECT id, source_id, at_epoch, title FROM events
-                 WHERE at_epoch > 0 AND rowid > ?1 ORDER BY rowid",
+                "SELECT e.id, s.id, e.at_epoch, e.title
+                 FROM events e JOIN sources s ON s.ref = e.source_ref
+                 WHERE e.at_epoch > 0 AND e.rowid > ?1 ORDER BY e.rowid",
             )?;
             let rows = stmt.query_map(params![since_rowid], |r| {
                 Ok((

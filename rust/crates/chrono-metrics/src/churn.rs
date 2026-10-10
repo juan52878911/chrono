@@ -22,9 +22,9 @@ pub struct ChurnRow {
     pub deleted: i64,
 }
 
-/// Suma de `added`/`deleted` (leídos de `touches.attrs` JSON) por entity en
-/// la ventana, top `limit`. Ignora binarios: si `added`/`deleted` están
-/// ausentes o son negativos, se tratan como 0 (igual que `MAX(x,0)` en el Go).
+/// Suma de `added`/`deleted` (columnas enteras de `touches`, v5) por entity en
+/// la ventana, top `limit`. Ignora binarios: si `added`/`deleted` son negativos
+/// (git binario = -1), se tratan como 0 (`MAX(x,0)`, igual que el Go).
 pub fn churn(conn: &Connection, since_epoch: i64, limit: usize, symbols_only: bool) -> Result<Vec<ChurnRow>> {
     let op = crate::symbol_type_op(symbols_only);
     // Alias `a`/`d` (como el Go), NO `added`/`deleted`: en el ORDER BY,
@@ -41,8 +41,8 @@ pub fn churn(conn: &Connection, since_epoch: i64, limit: usize, symbols_only: bo
     let sql = if fast_path {
         format!(
             "SELECT e.key,
-                 SUM(MAX(CAST(COALESCE(json_extract(t.attrs, '$.added'), 0) AS INTEGER), 0)) AS a,
-                 SUM(MAX(CAST(COALESCE(json_extract(t.attrs, '$.deleted'), 0) AS INTEGER), 0)) AS d
+                 SUM(MAX(t.added, 0)) AS a,
+                 SUM(MAX(t.deleted, 0)) AS d
              FROM touches t
              JOIN entities e ON e.id = t.entity_id
              WHERE e.excluded = 0 AND e.type {op} 'symbol'
@@ -53,8 +53,8 @@ pub fn churn(conn: &Connection, since_epoch: i64, limit: usize, symbols_only: bo
     } else {
         format!(
             "SELECT e.key,
-                 SUM(MAX(CAST(COALESCE(json_extract(t.attrs, '$.added'), 0) AS INTEGER), 0)) AS a,
-                 SUM(MAX(CAST(COALESCE(json_extract(t.attrs, '$.deleted'), 0) AS INTEGER), 0)) AS d
+                 SUM(MAX(t.added, 0)) AS a,
+                 SUM(MAX(t.deleted, 0)) AS d
              FROM touches t
              JOIN events ev ON ev.id = t.event_id
              JOIN entities e ON e.id = t.entity_id
@@ -118,16 +118,17 @@ mod tests_p3 {
                 (2,'src/warm.rs','file',0,0,0),
                 (3,'src/sym','symbol',0,0,0),
                 (4,'src/exc.rs','file',0,0,1);
-             INSERT INTO events(id,source_id,kind,at,at_epoch,title) VALUES
-                ('e1','git:/r','commit','',1000,''),
-                ('e2','git:/r','commit','',2000,'');
-             INSERT INTO touches(event_id,entity_id,weight,attrs) VALUES
-                ('e1',1,12,'{\"added\":10,\"deleted\":2}'),
-                ('e2',1,5,'{\"added\":5,\"deleted\":0}'),
-                ('e1',2,2,'{\"added\":1,\"deleted\":1}'),
-                ('e2',2,0,'{\"added\":-1,\"deleted\":-1}'),
-                ('e1',3,3,'{\"added\":9,\"deleted\":9}'),
-                ('e1',4,1,'{\"added\":7,\"deleted\":7}');",
+             INSERT INTO sources(ref,id,kind) VALUES (1,'git:/r','git');
+             INSERT INTO events(id,source_ref,kind,at,at_epoch,title) VALUES
+                ('e1',1,'commit','',1000,''),
+                ('e2',1,'commit','',2000,'');
+             INSERT INTO touches(event_id,entity_id,weight,added,deleted,attrs) VALUES
+                ('e1',1,12,10,2,'{\"added\":10,\"deleted\":2}'),
+                ('e2',1,5,5,0,'{\"added\":5,\"deleted\":0}'),
+                ('e1',2,2,1,1,'{\"added\":1,\"deleted\":1}'),
+                ('e2',2,0,-1,-1,'{\"added\":-1,\"deleted\":-1}'),
+                ('e1',3,3,9,9,'{\"added\":9,\"deleted\":9}'),
+                ('e1',4,1,7,7,'{\"added\":7,\"deleted\":7}');",
         )
         .unwrap();
     }
@@ -195,11 +196,11 @@ mod tests_p3 {
         conn.execute_batch(
             "INSERT INTO entities(id,key,type,size,deleted,excluded) VALUES
                 (5,'src/ancient.rs','file',0,0,0);
-             INSERT INTO events(id,source_id,kind,at,at_epoch,title) VALUES
-                ('eneg','git:/r','commit','',-5000,'');
-             INSERT INTO touches(event_id,entity_id,weight,attrs) VALUES
-                ('eneg',5,1,'{\"added\":100,\"deleted\":100}'),
-                ('eneg',1,1,'{\"added\":100,\"deleted\":100}');",
+             INSERT INTO events(id,source_ref,kind,at,at_epoch,title) VALUES
+                ('eneg',1,'commit','',-5000,'');
+             INSERT INTO touches(event_id,entity_id,weight,added,deleted,attrs) VALUES
+                ('eneg',5,1,100,100,'{\"added\":100,\"deleted\":100}'),
+                ('eneg',1,1,100,100,'{\"added\":100,\"deleted\":100}');",
         )
         .unwrap();
         assert!(super::has_negative_epoch(conn).unwrap(), "debe detectar el epoch negativo");
@@ -228,8 +229,8 @@ mod tests_p3 {
         seed(conn);
         let sql = "EXPLAIN QUERY PLAN
              SELECT e.key,
-                 SUM(MAX(CAST(COALESCE(json_extract(t.attrs, '$.added'), 0) AS INTEGER), 0)) AS a,
-                 SUM(MAX(CAST(COALESCE(json_extract(t.attrs, '$.deleted'), 0) AS INTEGER), 0)) AS d
+                 SUM(MAX(t.added, 0)) AS a,
+                 SUM(MAX(t.deleted, 0)) AS d
              FROM touches t
              JOIN entities e ON e.id = t.entity_id
              WHERE e.excluded = 0 AND e.type != 'symbol'

@@ -47,16 +47,21 @@ pub fn events(conn: &Connection, f: &EventFilter, limit: usize) -> Result<Vec<Ev
     });
     let grep_like: Option<String> = f.grep.filter(|s| !s.is_empty()).map(|g| format!("%{g}%"));
 
-    let sql = "SELECT id, source_id, kind, at, at_epoch, level, title
-         FROM events
-         WHERE at_epoch > 0
-           AND (?1 = 0 OR at_epoch >= ?1)
-           AND (?2 = 0 OR at_epoch < ?2)
-           AND (?3 IS NULL OR source_id LIKE ?3)
-           AND (?4 IS NULL OR kind = ?4)
-           AND (?5 IS NULL OR level = ?5)
-           AND (?6 IS NULL OR title LIKE ?6)
-         ORDER BY at_epoch ASC, id ASC
+    // v5: events.source_ref es entero; el string ("git:/path") se recupera por
+    // JOIN a sources, y el filtro `--source` (prefijo) opera sobre ese string
+    // `s.id` → semántica idéntica a la antigua columna `events.source_id`. El
+    // JOIN es INNER pero todo evento tiene un source_ref válido (lo garantiza el
+    // Writer), así que no se pierde ninguna fila.
+    let sql = "SELECT e.id, s.id, e.kind, e.at, e.at_epoch, e.level, e.title
+         FROM events e JOIN sources s ON s.ref = e.source_ref
+         WHERE e.at_epoch > 0
+           AND (?1 = 0 OR e.at_epoch >= ?1)
+           AND (?2 = 0 OR e.at_epoch < ?2)
+           AND (?3 IS NULL OR s.id LIKE ?3)
+           AND (?4 IS NULL OR e.kind = ?4)
+           AND (?5 IS NULL OR e.level = ?5)
+           AND (?6 IS NULL OR e.title LIKE ?6)
+         ORDER BY e.at_epoch ASC, e.id ASC
          LIMIT ?7";
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(

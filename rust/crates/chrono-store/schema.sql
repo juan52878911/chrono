@@ -10,8 +10,13 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 -- Fuentes ingeridas (multi-fuente en un mismo índice).
+-- `ref` es alias explícito del rowid (INTEGER PRIMARY KEY): estable ante VACUUM
+-- —al revés que un rowid implícito, que VACUUM puede renumerar y dejaría
+-- huérfanos los `events.source_ref`. `id` (el string "git:<abs>") pasa de PK a
+-- UNIQUE para conservar el `ON CONFLICT(id)` de `upsert_source`. Ver v5 (§DECISIONS).
 CREATE TABLE IF NOT EXISTS sources (
-    id           TEXT PRIMARY KEY,        -- "git:<abs>" | "jsonl:<abs>" ...
+    ref          INTEGER PRIMARY KEY,     -- entero estable; lo referencia events.source_ref
+    id           TEXT NOT NULL UNIQUE,    -- "git:<abs>" | "jsonl:<abs>" ...
     kind         TEXT NOT NULL,           -- "git" | "jsonl" | ...
     path         TEXT,
     watermark    TEXT,                    -- opaco: "sha:<HEAD>" | "off:<n>|hash"
@@ -44,8 +49,8 @@ CREATE TABLE IF NOT EXISTS entities (
 
 -- Eventos (era `commits`).
 CREATE TABLE IF NOT EXISTS events (
-    id        TEXT PRIMARY KEY,           -- sha | hash(línea) | uuid
-    source_id TEXT NOT NULL,
+    id         TEXT PRIMARY KEY,          -- sha | hash(línea) | uuid
+    source_ref INTEGER NOT NULL REFERENCES sources(ref),  -- entero (v5); texto por JOIN
     kind      TEXT NOT NULL,              -- "commit" | "log" | ...
     at        TEXT NOT NULL,              -- ISO-8601 UTC para la salida
     at_epoch  INTEGER NOT NULL,           -- MILISEGUNDOS UTC; lo que usan ventanas/índices
@@ -64,6 +69,8 @@ CREATE TABLE IF NOT EXISTS touches (
     event_id  TEXT NOT NULL REFERENCES events(id),
     entity_id INTEGER NOT NULL REFERENCES entities(id),
     weight    INTEGER NOT NULL DEFAULT 0,  -- added+deleted en git; -1 si binario
+    added     INTEGER NOT NULL DEFAULT 0,  -- v5: líneas añadidas (antes json_extract en churn)
+    deleted   INTEGER NOT NULL DEFAULT 0,  -- v5: líneas borradas (git binario = -1, clamp en churn)
     attrs     TEXT NOT NULL DEFAULT '{}',  -- git: added, deleted, change_type, old_path
     PRIMARY KEY (event_id, entity_id)
 );
@@ -118,7 +125,7 @@ CREATE TABLE IF NOT EXISTS issues (
 
 -- Índices (mismos accesos que las consultas de metrics).
 CREATE INDEX IF NOT EXISTS idx_events_at     ON events(at_epoch);
-CREATE INDEX IF NOT EXISTS idx_events_src_at ON events(source_id, at_epoch);
+CREATE INDEX IF NOT EXISTS idx_events_srcref_at ON events(source_ref, at_epoch);
 CREATE INDEX IF NOT EXISTS idx_events_kind   ON events(kind, at_epoch);
 CREATE INDEX IF NOT EXISTS idx_touches_ent   ON touches(entity_id, event_id);
 CREATE INDEX IF NOT EXISTS idx_labels_task   ON labels(task, label);

@@ -738,9 +738,11 @@ fn ingest_symbols(repo: &Path, store: &Store, since_sha: Option<&str>) -> Result
         if syms.is_empty() {
             return Ok(());
         }
-        let touches: Vec<(String, String, i64, String)> = syms
+        let touches: Vec<(String, String, i64, i64, i64, String)> = syms
             .iter()
-            .map(|s| (s.entity_key(), "symbol".to_string(), s.added + s.deleted, symbol_attrs_json(s)))
+            .map(|s| {
+                (s.entity_key(), "symbol".to_string(), s.added + s.deleted, s.added, s.deleted, symbol_attrs_json(s))
+            })
             .collect();
         store.add_touches(sha, &touches).map_err(|e| e.to_string().into())
     };

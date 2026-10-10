@@ -17,6 +17,7 @@ use crate::Result;
 pub struct WriterCaches {
     actors: HashMap<String, i64>,
     entities: HashMap<String, i64>,
+    sources: HashMap<String, i64>,
 }
 
 impl WriterCaches {
@@ -31,21 +32,26 @@ pub struct Writer<'a> {
     tx: Transaction<'a>,
     actors: HashMap<String, i64>,
     entities: HashMap<String, i64>,
+    sources: HashMap<String, i64>,
 }
 
 impl<'a> Writer<'a> {
     pub(crate) fn new(tx: Transaction<'a>) -> Self {
-        Writer { tx, actors: HashMap::new(), entities: HashMap::new() }
+        Writer { tx, actors: HashMap::new(), entities: HashMap::new(), sources: HashMap::new() }
     }
 
     /// Como [`Writer::new`] pero sembrado con cachés de un lote anterior.
     pub(crate) fn new_seeded(tx: Transaction<'a>, caches: WriterCaches) -> Self {
-        Writer { tx, actors: caches.actors, entities: caches.entities }
+        Writer { tx, actors: caches.actors, entities: caches.entities, sources: caches.sources }
     }
 
     /// Commitea el lote y DEVUELVE las cachés, para sembrar el siguiente lote.
     pub fn finish(self) -> Result<WriterCaches> {
-        let caches = WriterCaches { actors: self.actors, entities: self.entities };
+        let caches = WriterCaches {
+            actors: self.actors,
+            entities: self.entities,
+            sources: self.sources,
+        };
         self.tx.commit()?;
         Ok(caches)
     }
@@ -62,6 +68,7 @@ impl<'a> Writer<'a> {
     /// que reingestar el mismo evento es seguro (no falla ni duplica filas).
     pub fn add_event(&mut self, ev: &chrono_core::Event) -> Result<()> {
         let actor_id = self.actor_id(&ev.actor)?;
+        let source_ref = self.source_ref(&ev.source_id)?;
 
         let attrs_json = attrs_to_json(&ev.attrs);
         let touches_n = ev.touches.len() as i64;
@@ -72,13 +79,13 @@ impl<'a> Writer<'a> {
         self.tx
             .prepare_cached(
                 "INSERT OR IGNORE INTO events
-                    (id, source_id, kind, at, at_epoch, actor_id, title, body, level,
+                    (id, source_ref, kind, at, at_epoch, actor_id, title, body, level,
                      simhash, is_bulk, touches_n, attrs)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             )?
             .execute(params![
                 ev.id,
-                ev.source_id,
+                source_ref,
                 ev.kind,
                 ev.at,
                 ev.at_epoch,
@@ -95,12 +102,16 @@ impl<'a> Writer<'a> {
         for t in &ev.touches {
             let entity_id = self.entity_id(&t.entity, &t.entity_type)?;
             let touch_attrs = attrs_to_json(&t.attrs);
+            // v5: added/deleted como columnas enteras (git las trae como string en
+            // attrs; binario = "-1"). Se guarda el valor crudo; el clamp a >=0 lo
+            // hace `churn` con MAX(x,0), igual que antes con json_extract.
+            let (added, deleted) = touch_lines(&t.attrs);
             self.tx
                 .prepare_cached(
-                    "INSERT OR IGNORE INTO touches(event_id, entity_id, weight, attrs)
-                     VALUES (?1,?2,?3,?4)",
+                    "INSERT OR IGNORE INTO touches(event_id, entity_id, weight, added, deleted, attrs)
+                     VALUES (?1,?2,?3,?4,?5,?6)",
                 )?
-                .execute(params![ev.id, entity_id, t.weight, touch_attrs])?;
+                .execute(params![ev.id, entity_id, t.weight, added, deleted, touch_attrs])?;
         }
 
         for l in &ev.links {
@@ -182,4 +193,36 @@ impl<'a> Writer<'a> {
         self.entities.insert(key.to_string(), id);
         Ok(id)
     }
+
+    /// Resuelve el `source_id` string (`"git:/abs"`) al entero `sources.ref`,
+    /// cacheado. Auto-registra un stub `INSERT OR IGNORE INTO sources(id, kind)`
+    /// la primera vez: así el evento puede insertar su `source_ref` aunque el
+    /// `upsert_source` del CLI (que enriquece path/watermark/manifest vía
+    /// `ON CONFLICT(id)`) se llame DESPUÉS de la ingesta. El `kind` del stub es
+    /// el prefijo del id (`"git:/abs"` → `"git"`), que coincide con el real
+    /// (`canonical_source_id` usa `src.kind()` como prefijo) → sin divergencia.
+    fn source_ref(&mut self, source_id: &str) -> Result<i64> {
+        if let Some(&r) = self.sources.get(source_id) {
+            return Ok(r);
+        }
+        let kind = source_id.split(':').next().unwrap_or("");
+        self.tx
+            .prepare_cached("INSERT OR IGNORE INTO sources(id, kind) VALUES (?1, ?2)")?
+            .execute(params![source_id, kind])?;
+        let r: i64 = self
+            .tx
+            .prepare_cached("SELECT ref FROM sources WHERE id = ?1")?
+            .query_row(params![source_id], |x| x.get(0))?;
+        self.sources.insert(source_id.to_string(), r);
+        Ok(r)
+    }
+}
+
+/// Lee `added`/`deleted` de las attrs de un touch (git las trae como string;
+/// binario = `"-1"`). Ausente o no parseable → 0, idéntico al antiguo
+/// `CAST(COALESCE(json_extract(...),0) AS INTEGER)` de churn para los casos
+/// reales (solo git escribe estas claves, siempre enteras).
+fn touch_lines(attrs: &std::collections::BTreeMap<String, String>) -> (i64, i64) {
+    let parse = |k: &str| attrs.get(k).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+    (parse("added"), parse("deleted"))
 }

@@ -107,7 +107,8 @@ pub fn trace(conn: &Connection, event_id: &str, max_depth: i64, limit: usize) ->
 fn fetch_event(conn: &Connection, id: &str) -> Result<Option<EventRow>> {
     Ok(conn
         .query_row(
-            "SELECT id, source_id, kind, at, at_epoch, level, title FROM events WHERE id = ?1",
+            "SELECT e.id, s.id, e.kind, e.at, e.at_epoch, e.level, e.title
+             FROM events e JOIN sources s ON s.ref = e.source_ref WHERE e.id = ?1",
             params![id],
             |r| {
                 Ok(EventRow {

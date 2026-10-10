@@ -53,12 +53,26 @@ paridad git intacta). A 500k ya son sub-0,1 s; el beneficio es **asintótico**
 | `timeline` | Lee de `rollups` (O(#buckets)) cuando es byte-idéntico; si no, cae a `events` | `SCAN rollups` vs `idx_events_at` |
 | `similar` | Bandas SimHash `idx_events_sh0..3`; exacto hasta dist 3, escaneo a dist ≥4 (default) | `MULTI-INDEX OR` |
 
-## Qué sigue O(N) (P4)
+## P4 — schema v5 (`source_ref` entero + columnas `added/deleted`)
+
+Reindex avisado (`open()` da error en un `.db` v4). `events.source_id` TEXT →
+`source_ref` INTEGER (JOIN a `sources.ref` para el string); `touches` gana
+`added`/`deleted` INTEGER (churn deja de usar `json_extract`).
+
+| Métrica | v4 | v5 |
+|---|---|---|
+| Tamaño `.db` (fixture 300k, ruta de fuente larga) | 285,6 MB | **181,5 MB (−36,5 %)** |
+
+Verificado byte-idéntico al binario v4 en 17 consultas (git + jsonl, incl.
+`events --source`, `correlate` cruzando fuentes, `churn` desde columnas),
+determinismo (`.db` byte-idéntico con `CHRONO_NOW`), sin eventos huérfanos,
+suite + clippy limpios.
+
+## Qué sigue O(N) (futuro)
 
 `top attr:<key>` (json_extract), `top entity` (join a events), `timeline --by`,
-`similar` a dist ≥4, `hotspots`/`churn` con ventana. Plan P4 (schema v5, un
-reindex): `source_id` → entero, columnas `added/deleted` en `touches`,
-`dim_rollups` para `top`/`timeline --by`.
+`similar` a dist ≥4. Necesitarían `dim_rollups` (pre-agregado por dimensión,
+aditivo sin reindex) y bandas SimHash de 5×13 bits.
 
 ## Reproducción
 

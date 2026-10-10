@@ -18,8 +18,10 @@ pub fn schema_sql() -> &'static str {
 
 /// Versión de esquema que produce este store. Reindex si el índice tiene otra.
 /// v3 añadió `templates`/`rollups` (Drain-light, ver `patterns`); v4 cambia la
-/// unidad de `events.at_epoch` a MILISEGUNDOS (antes segundos).
-pub const SCHEMA_VERSION: i64 = 4;
+/// unidad de `events.at_epoch` a MILISEGUNDOS (antes segundos); v5 cambia
+/// `events.source_id` (TEXT) por `source_ref` (INTEGER → `sources.ref`) y añade
+/// `touches.added`/`deleted` (antes `json_extract` en churn) — reindex avisado.
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Error de `chrono-store`: envuelve I/O y errores de `rusqlite` sin exigir un
 /// tipo concreto a los llamadores (CLI, `chrono-metrics`...).

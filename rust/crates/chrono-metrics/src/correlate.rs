@@ -46,9 +46,14 @@ pub fn correlate(
         return Err("correlate: delta_ms must be > 0".into());
     }
 
+    // v5: se trae también `e.source_ref` (entero) para excluir la misma fuente
+    // con una comparación de enteros; el string `s.id` (por JOIN) es para la
+    // salida. La biyección ref↔id hace la exclusión idéntica a la antigua
+    // `source_id != …`.
     let anchor_row = conn
         .query_row(
-            "SELECT id, source_id, kind, at, at_epoch, level, title FROM events WHERE id = ?1",
+            "SELECT e.id, s.id, e.kind, e.at, e.at_epoch, e.level, e.title, e.source_ref
+             FROM events e JOIN sources s ON s.ref = e.source_ref WHERE e.id = ?1",
             params![event_id],
             |r| {
                 Ok((
@@ -59,12 +64,13 @@ pub fn correlate(
                     r.get::<_, i64>(4)?,
                     r.get::<_, String>(5)?,
                     r.get::<_, String>(6)?,
+                    r.get::<_, i64>(7)?,
                 ))
             },
         )
         .optional()?;
 
-    let (id, source_id, kind, at, at_epoch, level, title) = anchor_row
+    let (id, source_id, kind, at, at_epoch, level, title, anchor_ref) = anchor_row
         .ok_or_else(|| format!("correlate: event not found: {event_id}"))?;
 
     let anchor = EventRef { id, source_id, kind, at, at_epoch, level, title, delta_ms: 0 };
@@ -72,20 +78,21 @@ pub fn correlate(
     let lo = anchor.at_epoch - delta_ms;
     let hi = anchor.at_epoch + delta_ms;
 
-    // La ventana es cerrada en ambos extremos ([lo, hi]) y `source_id != ?2`
-    // ya excluye por sí solo al propio ancla (comparte source_id consigo
-    // misma), además de a cualquier evento de su misma fuente.
+    // La ventana es cerrada en ambos extremos ([lo, hi]) y `e.source_ref != ?2`
+    // ya excluye por sí solo al propio ancla (comparte source_ref consigo
+    // misma), además de a cualquier evento de su misma fuente. El `s.id` (JOIN)
+    // es solo para la salida.
     let mut stmt = conn.prepare(
-        "SELECT id, source_id, kind, at, at_epoch, level, title, (at_epoch - ?1) AS delta
-         FROM events
-         WHERE source_id != ?2
-           AND at_epoch >= ?3
-           AND at_epoch <= ?4
-         ORDER BY ABS(at_epoch - ?1) ASC, at_epoch ASC, id ASC
+        "SELECT e.id, s.id, e.kind, e.at, e.at_epoch, e.level, e.title, (e.at_epoch - ?1) AS delta
+         FROM events e JOIN sources s ON s.ref = e.source_ref
+         WHERE e.source_ref != ?2
+           AND e.at_epoch >= ?3
+           AND e.at_epoch <= ?4
+         ORDER BY ABS(e.at_epoch - ?1) ASC, e.at_epoch ASC, e.id ASC
          LIMIT ?5",
     )?;
     let rows = stmt.query_map(
-        params![anchor.at_epoch, anchor.source_id, lo, hi, limit as i64],
+        params![anchor.at_epoch, anchor_ref, lo, hi, limit as i64],
         |r| {
             Ok(EventRef {
                 id: r.get(0)?,
