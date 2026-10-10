@@ -125,6 +125,22 @@ CREATE INDEX IF NOT EXISTS idx_labels_task   ON labels(task, label);
 CREATE INDEX IF NOT EXISTS idx_links_rel     ON links(rel, target);
 CREATE INDEX IF NOT EXISTS idx_links_target  ON links(target);
 
+-- P3 (escala, aditivos — se crean al abrir, sin reindex ni subir schema_version).
+-- Covering para `top level`/`top actor` y ventanas por nivel/actor: evitan el
+-- SCAN completo de events (como ya hace idx_events_kind con `top kind`).
+CREATE INDEX IF NOT EXISTS idx_events_level ON events(level, at_epoch);
+CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id, at_epoch);
+-- Bandas SimHash para `similar` sin escanear: el simhash de 64 bits se parte en
+-- 4 bandas de 16 bits (índices de expresión; `& 65535` toma los 16 bits bajos
+-- del desplazamiento, correcto aunque el i64 sea negativo). Dos eventos a
+-- distancia Hamming ≤3 comparten al menos una banda idéntica (pigeonhole: 3
+-- bits que difieren tocan ≤3 de las 4 bandas), así que la consulta recupera los
+-- candidatos por igualdad de banda y refina con Hamming exacto en Rust.
+CREATE INDEX IF NOT EXISTS idx_events_sh0 ON events((simhash >> 48) & 65535);
+CREATE INDEX IF NOT EXISTS idx_events_sh1 ON events((simhash >> 32) & 65535);
+CREATE INDEX IF NOT EXISTS idx_events_sh2 ON events((simhash >> 16) & 65535);
+CREATE INDEX IF NOT EXISTS idx_events_sh3 ON events(simhash & 65535);
+
 -- Plantillas Drain-light: un mensaje normalizado (variables → <NUM>/<IP>/…).
 -- Miles de líneas de log que solo difieren en valores comparten `template`.
 CREATE TABLE IF NOT EXISTS templates (
