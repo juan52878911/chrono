@@ -9,7 +9,7 @@ mod store;
 mod writer;
 
 pub use store::{SourceRow, Store};
-pub use writer::Writer;
+pub use writer::{Writer, WriterCaches};
 
 /// SQL del esquema v2, embebido en el binario.
 pub fn schema_sql() -> &'static str {

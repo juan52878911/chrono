@@ -37,10 +37,17 @@ impl Store {
         let conn = Connection::open(path)?;
 
         // PRAGMAs de conexión: se pierden al reabrir, así que se reaplican siempre.
+        // `foreign_keys = OFF`: el índice es un derivado regenerable y el `Writer`
+        // ya inserta el evento antes que sus touches/labels, así que la integridad
+        // referencial está garantizada por construcción; tener los FK activos
+        // añadía una búsqueda aleatoria extra en la PK de `events` por cada
+        // touch/label (medido: cuello de ingesta a escala). `wal_autocheckpoint`
+        // acota el WAL entre lotes de ingesta (ver `ingest` por lotes en el CLI).
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
-             PRAGMA foreign_keys = ON;
-             PRAGMA busy_timeout = 5000;",
+             PRAGMA foreign_keys = OFF;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA wal_autocheckpoint = 10000;",
         )?;
 
         let is_new = !table_exists(&conn, "meta")?;
@@ -71,9 +78,15 @@ impl Store {
         }
 
         // Índice regenerable desde la fuente: prioriza velocidad de ingesta.
+        // `cache_size = -262144` → 256 MB de page cache: mantiene los B-trees de
+        // las PK (TEXT aleatorias) en memoria mucho más allá de la caché por
+        // defecto de 2 MB, que era la causa del desplome de caudal hacia 1M.
+        // `temp_store = FILE` (no MEMORY) → VACUUM/ORDER BY grandes no construyen
+        // la copia en RAM (a 10M, `temp_store=MEMORY` reventaba la memoria).
         conn.execute_batch(
             "PRAGMA synchronous = OFF;
-             PRAGMA temp_store = MEMORY;
+             PRAGMA cache_size = -262144;
+             PRAGMA temp_store = FILE;
              PRAGMA mmap_size = 268435456;",
         )?;
 
@@ -234,6 +247,10 @@ impl Store {
         }
         // events_fts es de contenido externo: hay que vaciarlo explícitamente.
         tx.execute("INSERT INTO events_fts(events_fts) VALUES ('delete-all')", [])?;
+        // Los watermarks incrementales (FTS/rollups) apuntan a rowids que ya no
+        // existen; al vaciar `events` los rowids reinician en 1, así que se
+        // borran para que el próximo build completo los recalcule desde 0.
+        tx.execute("DELETE FROM meta WHERE key IN ('fts_max_rowid', 'rollup_max_rowid')", [])?;
         tx.commit()?;
         Ok(())
     }
@@ -242,6 +259,14 @@ impl Store {
     pub fn writer(&mut self) -> Result<Writer<'_>> {
         let tx = self.conn.transaction()?;
         Ok(Writer::new(tx))
+    }
+
+    /// Como [`Store::writer`] pero sembrando las cachés de un lote anterior
+    /// (para ingesta por lotes: commitear cada N eventos sin re-consultar
+    /// actores/entidades ya vistos). Ciérralo con [`Writer::finish`].
+    pub fn writer_seeded(&mut self, caches: crate::WriterCaches) -> Result<Writer<'_>> {
+        let tx = self.conn.transaction()?;
+        Ok(Writer::new_seeded(tx, caches))
     }
 
     /// Acceso de solo lectura a la conexión (para `chrono-metrics`).
@@ -306,19 +331,45 @@ impl Store {
     /// pero acotada por el nº de plantillas×buckets (pequeño: ese es el punto de
     /// los rollups), no por el nº de eventos. Devuelve (nº plantillas, nº filas
     /// de rollup). `bucket_secs` debe ser > 0.
+    /// Reconstruye rollups + templates desde cero (barre TODOS los eventos).
+    /// Para `init`, `reset` y tras una divergencia (los rowids se reasignan, así
+    /// que el watermark incremental ya no vale). Deja `rollup_max_rowid` al tope.
     pub fn build_rollups(&self, bucket_ms: i64) -> Result<(usize, usize)> {
+        self.build_rollups_from(bucket_ms, true)
+    }
+
+    /// Agrega en rollups SOLO los eventos nuevos (rowid > `rollup_max_rowid`),
+    /// acumulando `count` sobre los buckets existentes (UPSERT). O(delta), no
+    /// O(N). Para `sync`/`add` cuando el índice solo creció (sin divergencia).
+    pub fn build_rollups_sync(&self, bucket_ms: i64) -> Result<(usize, usize)> {
+        self.build_rollups_from(bucket_ms, false)
+    }
+
+    /// Núcleo común de rollups. `reset=true` vacía las tablas y barre todo;
+    /// `reset=false` parte del watermark `rollup_max_rowid` y acumula el delta.
+    /// En ambos casos el UPSERT por `(source_id, template_id, bucket)` suma los
+    /// conteos, así que repetir un `sync` sobre las mismas filas es seguro
+    /// siempre que el watermark avance (lo hace: queda en MAX(rowid) al final).
+    fn build_rollups_from(&self, bucket_ms: i64, reset: bool) -> Result<(usize, usize)> {
         use std::collections::BTreeMap;
         if bucket_ms <= 0 {
             return Err("build_rollups: bucket_ms debe ser > 0".into());
         }
-        // Fase 1: escanear eventos y agregar en memoria (sin escribir).
-        // Clave: (source_id, template, bucket) -> (count, first_id, last_id).
+        let since_rowid: i64 = if reset {
+            0
+        } else {
+            self.meta("rollup_max_rowid")?.and_then(|v| v.parse().ok()).unwrap_or(0)
+        };
+
+        // Fase 1: escanear eventos (solo el delta si no es reset) y agregar en
+        // memoria. Clave: (source_id, template, bucket) -> (count, first_id, last_id).
         let mut agg: BTreeMap<(String, String, i64), (i64, String, String)> = BTreeMap::new();
         {
             let mut stmt = self.conn.prepare(
-                "SELECT id, source_id, at_epoch, title FROM events WHERE at_epoch > 0 ORDER BY rowid",
+                "SELECT id, source_id, at_epoch, title FROM events
+                 WHERE at_epoch > 0 AND rowid > ?1 ORDER BY rowid",
             )?;
-            let rows = stmt.query_map([], |r| {
+            let rows = stmt.query_map(params![since_rowid], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -336,10 +387,13 @@ impl Store {
             }
         }
 
-        // Fase 2: reescribir templates + rollups desde la agregación.
+        // Fase 2: UPSERT de templates + rollups. En reset se vacían primero (no
+        // habrá conflictos); en incremental el ON CONFLICT suma sobre lo previo.
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM rollups", [])?;
-        tx.execute("DELETE FROM templates", [])?;
+        if reset {
+            tx.execute("DELETE FROM rollups", [])?;
+            tx.execute("DELETE FROM templates", [])?;
+        }
         let mut n_templates = 0usize;
         let mut n_rollups = 0usize;
         {
@@ -350,7 +404,10 @@ impl Store {
             let mut tpl_id = tx.prepare("SELECT id FROM templates WHERE source_id = ?1 AND template = ?2")?;
             let mut ins_rollup = tx.prepare(
                 "INSERT INTO rollups(source_id, template_id, bucket_epoch, count, first_id, last_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(source_id, template_id, bucket_epoch) DO UPDATE SET
+                    count = count + excluded.count,
+                    last_id = excluded.last_id",
             )?;
             for ((source_id, template, bucket), (count, first_id, last_id)) in &agg {
                 let inserted = upsert_tpl.execute(params![source_id, template])?;
@@ -362,30 +419,84 @@ impl Store {
                 n_rollups += 1;
             }
         }
+        // Watermark al tope actual: el próximo sync parte de aquí.
+        let max_rowid: i64 =
+            tx.query_row("SELECT COALESCE(MAX(rowid), 0) FROM events", [], |r| r.get(0))?;
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES ('rollup_max_rowid', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![max_rowid.to_string()],
+        )?;
         tx.commit()?;
         Ok((n_templates, n_rollups))
     }
 
-    /// Rellena `events_fts` (contenido externo) desde `events`. Se llama al
-    /// final de la ingesta; es idempotente (vacía antes de rellenar).
+    /// Reconstruye `events_fts` (contenido externo) desde cero. Idempotente
+    /// (vacía antes). Deja el watermark `fts_max_rowid` en el máximo actual para
+    /// que los `sync` siguientes sean incrementales ([`Store::fts_sync`]). Úsalo
+    /// en `init` y tras una divergencia (donde los rowids se reasignan).
     pub fn rebuild_fts(&self) -> Result<()> {
         self.conn.execute("INSERT INTO events_fts(events_fts) VALUES ('delete-all')", [])?;
         self.conn.execute(
             "INSERT INTO events_fts(rowid, title, body) SELECT rowid, title, body FROM events",
             [],
         )?;
+        self.set_fts_watermark()?;
         Ok(())
     }
 
-    /// Compacta el índice al terminar la ingesta: FTS `optimize` + `ANALYZE` +
-    /// `wal_checkpoint(TRUNCATE)` + `VACUUM`.
-    pub fn optimize(&self) -> Result<()> {
-        self.conn.execute("INSERT INTO events_fts(events_fts) VALUES ('optimize')", [])?;
-        self.conn.execute_batch(
-            "ANALYZE;
-             PRAGMA wal_checkpoint(TRUNCATE);
-             VACUUM;",
+    /// Indexa en `events_fts` SOLO los eventos nuevos (rowid > watermark), sin
+    /// reescribir todo el índice. Para `sync`/`add` cuando no hubo divergencia
+    /// (los rowids solo crecen). O(delta), no O(N).
+    pub fn fts_sync(&self) -> Result<()> {
+        let wm: i64 = self
+            .meta("fts_max_rowid")?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT INTO events_fts(rowid, title, body)
+             SELECT rowid, title, body FROM events WHERE rowid > ?1",
+            params![wm],
         )?;
+        self.set_fts_watermark()?;
+        Ok(())
+    }
+
+    /// Fija `meta.fts_max_rowid` al máximo rowid actual de `events`.
+    fn set_fts_watermark(&self) -> Result<()> {
+        let max: i64 = self
+            .conn
+            .query_row("SELECT COALESCE(MAX(rowid), 0) FROM events", [], |r| r.get(0))?;
+        self.set_meta("fts_max_rowid", &max.to_string())
+    }
+
+    /// Cierre ligero tras la ingesta: FTS `optimize` + estadísticas +
+    /// `wal_checkpoint(TRUNCATE)`. **Sin `VACUUM`**: a escala (≥10M) el VACUUM
+    /// copiaba el `.db` entero en RAM (OOM) y costaba segundos en cada `sync`.
+    /// Para compactar el fichero explícitamente, usa [`Store::compact`].
+    ///
+    /// `full_analyze`: en `init`/reconstrucción completa se hace `ANALYZE`
+    /// entero (estadísticas deterministas → `.db` byte-reproducible). En un
+    /// `sync` incremental se usa `PRAGMA optimize`, que solo re-analiza las
+    /// tablas cuyas estadísticas quedaron obsoletas: a 2M filas un `ANALYZE`
+    /// completo costaba ~15 s en CADA sync (O(N)); `PRAGMA optimize` es gratis
+    /// cuando el delta es pequeño y mantiene buenos planes al crecer el índice.
+    pub fn optimize(&self, full_analyze: bool) -> Result<()> {
+        self.conn.execute("INSERT INTO events_fts(events_fts) VALUES ('optimize')", [])?;
+        if full_analyze {
+            self.conn.execute_batch("ANALYZE;")?;
+        } else {
+            self.conn.execute_batch("PRAGMA optimize;")?;
+        }
+        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+
+    /// Compacta el fichero (`VACUUM`), recuperando páginas libres. Opcional y
+    /// explícito (`chrono init --compact`): a gran escala es caro en tiempo y
+    /// memoria, por eso NO se hace en cada ingesta.
+    pub fn compact(&self) -> Result<()> {
+        self.conn.execute_batch("VACUUM;")?;
         Ok(())
     }
 }

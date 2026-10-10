@@ -323,7 +323,8 @@ fn optimize_no_falla_tras_ingesta_y_fts() {
         w.commit().unwrap();
     }
     store.rebuild_fts().unwrap();
-    store.optimize().unwrap();
+    store.optimize(true).unwrap();
+    store.optimize(false).unwrap();
 
     let events: i64 = store.conn().query_row("SELECT count(*) FROM events", [], |r| r.get(0)).unwrap();
     assert_eq!(events, 1);

@@ -9,6 +9,22 @@ use rusqlite::{params, Transaction};
 use crate::json::attrs_to_json;
 use crate::Result;
 
+/// Cachés `clave -> rowid` de actores y entidades, preservadas ENTRE lotes de
+/// ingesta (los rowids son válidos una vez commiteados, así que un lote nuevo
+/// puede reusarlos sin re-consultar). Permite commitear por lotes sin perder la
+/// aceleración de caché (clave para no desplomar la ingesta de git a escala).
+#[derive(Debug, Default)]
+pub struct WriterCaches {
+    actors: HashMap<String, i64>,
+    entities: HashMap<String, i64>,
+}
+
+impl WriterCaches {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// Acumula una ingesta en una única transacción. Si se hace `Drop` sin llamar
 /// a [`Writer::commit`], `rusqlite::Transaction` revierte automáticamente.
 pub struct Writer<'a> {
@@ -20,6 +36,18 @@ pub struct Writer<'a> {
 impl<'a> Writer<'a> {
     pub(crate) fn new(tx: Transaction<'a>) -> Self {
         Writer { tx, actors: HashMap::new(), entities: HashMap::new() }
+    }
+
+    /// Como [`Writer::new`] pero sembrado con cachés de un lote anterior.
+    pub(crate) fn new_seeded(tx: Transaction<'a>, caches: WriterCaches) -> Self {
+        Writer { tx, actors: caches.actors, entities: caches.entities }
+    }
+
+    /// Commitea el lote y DEVUELVE las cachés, para sembrar el siguiente lote.
+    pub fn finish(self) -> Result<WriterCaches> {
+        let caches = WriterCaches { actors: self.actors, entities: self.entities };
+        self.tx.commit()?;
+        Ok(caches)
     }
 
     /// Inserta un evento COMPLETO: upsert de actor (y su alias en

@@ -45,6 +45,9 @@ const SIZE_CAP: usize = 4000;
 const ROLLUP_BUCKET_MS: i64 = 60_000;
 /// Cada cuántos eventos se refresca el indicador de progreso (como el Go).
 const PROGRESS_EVERY: usize = 2000;
+/// Eventos por lote de ingesta: se commitea cada tantos para acotar el WAL y
+/// mantener el caudal plano a escala (ver `ingest_source`).
+const INGEST_BATCH: usize = 100_000;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -167,7 +170,7 @@ pub fn init(start: &Path, symbols: bool, as_kind: Option<&str>) -> Result<()> {
 
     eprintln!("{}", t("  building search index…", "  construyendo índice de búsqueda…"));
     store.rebuild_fts()?;
-    finalize(&root, &store, &git_path_if_git(src.kind(), &ingest_path))?;
+    finalize(&root, &store, &git_path_if_git(src.kind(), &ingest_path), false)?;
     write_meta(&store, src, &root)?;
 
     if symbols && src.kind() == "git" {
@@ -233,8 +236,17 @@ pub fn add(db: &Path, start: &Path, symbols: bool, as_kind: Option<&str>) -> Res
     )?;
 
     eprintln!("{}", t("  building search index…", "  construyendo índice de búsqueda…"));
-    store.rebuild_fts()?;
-    finalize(&index_root, &store, &git_path_if_git(src.kind(), &ingest_path))?;
+    // Re-ingesta (already): se borraron filas con rowids arbitrarios, así que el
+    // watermark incremental ya no vale → reconstrucción completa. Fuente nueva:
+    // solo se indexan sus filas (O(delta)), sin re-tocar el resto del índice.
+    if already {
+        store.rebuild_fts()?;
+    } else {
+        store.fts_sync()?;
+    }
+    // Misma lógica para rollups: re-ingesta → reconstrucción completa (los
+    // conteos de la fuente borrada ya no valen); fuente nueva → solo el delta.
+    finalize(&index_root, &store, &git_path_if_git(src.kind(), &ingest_path), !already)?;
 
     if symbols && src.kind() == "git" {
         ingest_symbols(&ingest_path, &store, None)?;
@@ -287,6 +299,7 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
     let mut total = 0usize;
     let mut synced_any = false;
     let mut matched_any = false;
+    let mut diverged_any = false;
     // Solo las fuentes git que REALMENTE reingirieron necesitan refrescar
     // tamaños/tags/forge; si git no cambió (atajo de HEAD), no se re-tira del
     // forge de GitHub aunque otra fuente de log sí traiga eventos nuevos.
@@ -322,31 +335,40 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
             Some(Watermark { kind: s.kind.clone(), value: s.watermark.clone() })
         };
 
-        let (n, new_wm) = match ingest_source(adapter, &path, wm, &mut store, &index_root) {
-            Ok((n, new_wm, _manifest)) => (n, new_wm),
+        let (n, new_wm, diverged) = match ingest_source(adapter, &path, wm, &mut store, &index_root) {
+            Ok((n, new_wm, _manifest)) => (n, new_wm, false),
             Err(IngestError::Diverged) => {
                 eprintln!("{}", t(
                     format!("  divergence in {} — reindexing that source", s.id),
                     format!("  divergencia en {} — se reindexa esa fuente", s.id),
                 ));
                 store.delete_source_events(&s.id)?;
-                ingest_source(adapter, &path, None, &mut store, &index_root)
+                let (n, new_wm) = ingest_source(adapter, &path, None, &mut store, &index_root)
                     .map(|(n, new_wm, _)| (n, new_wm))
-                    .map_err(|e| e.into_boxed())?
+                    .map_err(|e| e.into_boxed())?;
+                (n, new_wm, true)
             }
             Err(e) => return Err(e.into_boxed()),
         };
         store.set_source_watermark(&s.id, &new_wm.value, &now)?;
-        if s.kind == "git" {
-            changed_git_paths.push(s.path.clone());
-            // Recomputar símbolos del delta (old HEAD..HEAD) si el índice los usa.
-            if symbols_enabled {
-                let since_sha = s.watermark.strip_prefix("sha:").filter(|s| !s.is_empty());
-                ingest_symbols(&path, &store, since_sha)?;
+        // Una divergencia borró y reingirió la fuente: el índice cambió aunque el
+        // conteo neto sea 0 (p.ej. el fichero encogió), así que FTS debe
+        // reconstruirse por completo y finalize debe correr.
+        if diverged {
+            diverged_any = true;
+        }
+        if n > 0 || diverged {
+            synced_any = true;
+            if s.kind == "git" {
+                changed_git_paths.push(s.path.clone());
+                // Recomputar símbolos del delta (old HEAD..HEAD) si el índice los usa.
+                if symbols_enabled {
+                    let since_sha = s.watermark.strip_prefix("sha:").filter(|s| !s.is_empty());
+                    ingest_symbols(&path, &store, since_sha)?;
+                }
             }
         }
         total += n;
-        synced_any = true;
     }
 
     if filter_id.is_some() && !matched_any {
@@ -364,8 +386,15 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
     }
 
     eprintln!("{}", t("  building search index…", "  construyendo índice de búsqueda…"));
-    store.rebuild_fts()?;
-    finalize(&index_root, &store, &changed_git_paths)?;
+    // Una divergencia reescribe rowids arbitrarios: el watermark incremental de
+    // FTS ya no es fiable, así que se reconstruye entero. Sin divergencia, solo
+    // se indexan las filas nuevas (events.rowid > fts_max_rowid): O(delta).
+    if diverged_any {
+        store.rebuild_fts()?;
+    } else {
+        store.fts_sync()?;
+    }
+    finalize(&index_root, &store, &changed_git_paths, !diverged_any)?;
     eprintln!("{}", t(format!("sync: {total} new events"), format!("sync: {total} eventos nuevos")));
     Ok(())
 }
@@ -563,39 +592,56 @@ fn ingest_source(
 
     let mut count = 0usize;
     let mut stderr = std::io::stderr();
+    // Ingesta POR LOTES: se commitea cada INGEST_BATCH eventos (preservando las
+    // cachés actor/entidad del writer) para que el WAL no crezca hasta el tamaño
+    // del .db y el caudal no se desplome a escala. El orden de inserción y los
+    // rowids son idénticos a un único commit (determinismo intacto).
     {
-        let mut w = store.writer()?;
-        loop {
-            let mut ev = match cur.next() {
-                Ok(Some(ev)) => ev,
-                Ok(None) => break,
-                Err(e) => return Err(IngestError::Other(e.to_string().into())),
-            };
-            // Cap de body (declarado en meta): recorte en frontera de carácter.
-            if body_max_bytes > 0 && ev.body.len() > body_max_bytes {
-                let mut cut = body_max_bytes;
-                while cut > 0 && !ev.body.is_char_boundary(cut) {
-                    cut -= 1;
+        let mut caches = chrono_store::WriterCaches::new();
+        let mut done = false;
+        while !done {
+            let mut w = store.writer_seeded(std::mem::take(&mut caches))?;
+            let mut in_batch = 0usize;
+            loop {
+                let mut ev = match cur.next() {
+                    Ok(Some(ev)) => ev,
+                    Ok(None) => {
+                        done = true;
+                        break;
+                    }
+                    Err(e) => return Err(IngestError::Other(e.to_string().into())),
+                };
+                // Cap de body (declarado en meta): recorte en frontera de carácter.
+                if body_max_bytes > 0 && ev.body.len() > body_max_bytes {
+                    let mut cut = body_max_bytes;
+                    while cut > 0 && !ev.body.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    ev.body.truncate(cut);
                 }
-                ev.body.truncate(cut);
+                w.add_event(&ev)?;
+                let labels = classifier.classify(&ev);
+                w.add_labels(&ev.id, &labels)?;
+                count += 1;
+                in_batch += 1;
+                if count.is_multiple_of(PROGRESS_EVERY) {
+                    let _ = write!(stderr, "\r  {count}…");
+                    let _ = stderr.flush();
+                }
+                // Cap de eventos por fuente (declarado en meta).
+                if max_events > 0 && count >= max_events {
+                    done = true;
+                    break;
+                }
+                if in_batch >= INGEST_BATCH {
+                    break; // cierra el lote, commitea y abre otro.
+                }
             }
-            w.add_event(&ev)?;
-            let labels = classifier.classify(&ev);
-            w.add_labels(&ev.id, &labels)?;
-            count += 1;
-            if count.is_multiple_of(PROGRESS_EVERY) {
-                let _ = write!(stderr, "\r  {count}…");
-                let _ = stderr.flush();
-            }
-            // Cap de eventos por fuente (declarado en meta).
-            if max_events > 0 && count >= max_events {
-                break;
-            }
+            caches = w.finish()?;
         }
         if count >= PROGRESS_EVERY {
             let _ = writeln!(stderr, "\r  {count}");
         }
-        w.commit()?;
     }
 
     let wm = cur.watermark();
@@ -613,7 +659,16 @@ fn ingest_source(
 /// (`deleted`) del último repo pisaría al del anterior (las entidades `file`
 /// son globales, no por fuente). El caso soportado es 1 git + N fuentes de log
 /// (cuyas entidades no son `type='file'`, así que no se ven afectadas).
-fn finalize(index_root: &Path, store: &Store, git_paths: &[String]) -> Result<()> {
+/// `rollups_incremental`: si `true`, los rollups solo agregan el delta de
+/// eventos nuevos (O(delta), para `sync`/`add` sin divergencia); si `false`, se
+/// reconstruyen enteros (init, re-ingesta y divergencia, donde los conteos
+/// previos ya no son fiables).
+fn finalize(
+    index_root: &Path,
+    store: &Store,
+    git_paths: &[String],
+    rollups_incremental: bool,
+) -> Result<()> {
     for path in git_paths {
         finalize_git_sizes_and_deletions(Path::new(path), store)?;
         finalize_git_tags(Path::new(path), store)?;
@@ -654,12 +709,18 @@ fn finalize(index_root: &Path, store: &Store, git_paths: &[String]) -> Result<()
     }
 
     // Rollups Drain-light (plantillas + conteos por bucket) para `patterns`.
-    // Reconstrucción completa: barata en índices normales, O(eventos) a escala.
+    // Incremental en sync/add (solo el delta); completo en init/divergencia.
     eprintln!("{}", t("  clustering log templates…", "  agrupando plantillas…"));
-    store.build_rollups(ROLLUP_BUCKET_MS)?;
+    if rollups_incremental {
+        store.build_rollups_sync(ROLLUP_BUCKET_MS)?;
+    } else {
+        store.build_rollups(ROLLUP_BUCKET_MS)?;
+    }
     store.set_meta("rollup_bucket_ms", &ROLLUP_BUCKET_MS.to_string())?;
 
-    store.optimize()?;
+    // ANALYZE completo solo en reconstrucción (init/divergencia): a escala es
+    // O(N) y no debe correr en cada sync incremental (PRAGMA optimize basta).
+    store.optimize(!rollups_incremental)?;
     Ok(())
 }
 
