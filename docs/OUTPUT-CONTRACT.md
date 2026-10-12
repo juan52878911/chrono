@@ -35,6 +35,7 @@ This is **the product contract**: which questions chrono answers and their exact
 | `phases` | What were the project phases? | list of `{tag, date}` from tags/releases |
 | `search <text>` | Which commits talk about X? | list of `{sha, subject, date}` (FTS5/BM25) |
 | `similar <sha>` | Which commits are near-identical? | list of `{sha, subject, distance}` (SimHash) |
+| `session_patterns` | What did each agent session/task cost, and did its commits hold? (Rust port; needs a `nod` source) | `{summary, basis, tasks:[…], sessions:[…], notes}` — see `docs/NOD.md` |
 
 ## `result` examples
 

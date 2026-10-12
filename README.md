@@ -130,6 +130,24 @@ Options: `--db PATH`, `--since DATE`, `--lang en|es`.
 
 ---
 
+## Agent sessions (Nod) — Rust port
+
+[Nod](https://github.com/juan52878911/nod) measures the **process** of agent coding sessions in Claude Code and OpenCode (tokens, cost,
+permissions, waits, commits); chrono measures the **outcome** in git. The Rust port (`rust/`) joins them:
+
+```sh
+chrono add ~/.local/state/nod/events.jsonl --as nod   # nod source (incremental with chrono sync)
+chrono session_patterns                               # per task and per session
+chrono trace <sha>                                    # the Nod session that created a commit
+```
+
+`session_patterns` reports, per task and per session: tokens and cost, agent time vs time waiting for the human,
+denied permissions by tool, interruptions and loops, delivered commits (`vcs.commit`) and how many touch hotspots,
+30-day rework, incomplete changes, whether the branch or PR got merged, merge rate and cost per commit. Also exposed
+as an MCP tool. Each metric and when it can't be computed: [`docs/NOD.md`](docs/NOD.md) (Spanish).
+
+---
+
 ## With an AI (opencode / Claude Code)
 
 chrono speaks **MCP**. An AI can answer questions about your history by reading
