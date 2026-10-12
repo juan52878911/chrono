@@ -35,6 +35,10 @@ pub struct Trace {
 ///    revierten lo mismo) → `rel = "<rel>:<target>"`.
 /// 2. A tiene un link `(rel, target)` con `target == B.id` (A referencia a B,
 ///    p.ej. A revierte el commit B), y su inverso → `rel = "<rel>"`.
+/// 3. Caso particular de 2 para `rel = "commit"` (el `vcs.commit` de Nod): el
+///    target es el sha que imprimió git, normalmente abreviado; se resuelve por
+///    prefijo (≥ 4 hex) contra los commits del índice, solo si casa con UNO
+///    (un prefijo ambiguo no enlaza). También en sentido inverso.
 ///
 /// Orden determinista de `nodes`: por `depth` ASC, luego `at_epoch` ASC, luego
 /// `id` ASC. Error si `event_id` no existe. `max_depth`/`limit` deben ser > 0.
@@ -103,6 +107,30 @@ pub fn trace(conn: &Connection, event_id: &str, max_depth: i64, limit: usize) ->
     Ok(Trace { anchor, nodes })
 }
 
+/// Longitud mínima de un sha abreviado que se intenta resolver (como git).
+const MIN_SHA_PREFIX: usize = 4;
+
+fn is_full_sha(id: &str) -> bool {
+    id.len() == 40 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Resuelve un sha (completo o abreviado, como lo imprime git) contra los
+/// commits del índice: `Some(id)` solo si casa con exactamente UNO. Rango
+/// sobre la PK (`id >= p AND id < p||'g'`: tras un prefijo hex solo vienen
+/// dígitos hex, todos < 'g'), sin escanear `events`.
+pub(crate) fn resolve_commit_prefix(conn: &Connection, sha: &str) -> Result<Option<String>> {
+    let p = sha.to_ascii_lowercase();
+    if p.len() < MIN_SHA_PREFIX || p.len() > 40 || !p.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare_cached(
+        "SELECT id FROM events WHERE id >= ?1 AND id < ?1 || 'g' AND kind = 'commit' ORDER BY id LIMIT 2",
+    )?;
+    let ids: Vec<String> =
+        stmt.query_map(params![p], |r| r.get::<_, String>(0))?.collect::<std::result::Result<_, _>>()?;
+    Ok(if ids.len() == 1 { ids.into_iter().next() } else { None })
+}
+
 /// Lee un evento por id (`None` si no existe).
 fn fetch_event(conn: &Connection, id: &str) -> Result<Option<EventRow>> {
     Ok(conn
@@ -147,6 +175,30 @@ fn vecinos(conn: &Connection, nodo: &str) -> Result<Vec<(String, String)>> {
         }
         // 2a. Referencia directa: el target es el id de otro evento.
         out.push((target.clone(), rel.clone()));
+        // 3a. Sha abreviado de un `commit`: el commit que lo resuelve.
+        if rel == "commit" && target.len() < 40 {
+            if let Some(id) = resolve_commit_prefix(conn, target)? {
+                out.push((id, rel.clone()));
+            }
+        }
+    }
+
+    // 3b. Inverso de 3a: si el nodo es un commit (id = sha completo), los
+    // eventos con un link `commit` a un prefijo suyo que no sea ambiguo.
+    if is_full_sha(nodo) {
+        let prefijos: Vec<&str> = (MIN_SHA_PREFIX..40).map(|n| &nodo[..n]).collect();
+        let marcas = vec!["?"; prefijos.len()].join(",");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT event_id, target FROM links WHERE rel = 'commit' AND target IN ({marcas})"
+        ))?;
+        let filas: Vec<(String, String)> = stmt
+            .query_map(rusqlite::params_from_iter(prefijos.iter()), |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        for (id, target) in filas {
+            if resolve_commit_prefix(conn, &target)?.as_deref() == Some(nodo) {
+                out.push((id, "commit".to_string()));
+            }
+        }
     }
 
     // 2b. Referencia inversa: eventos cuyo link apunta a este nodo.
@@ -309,6 +361,69 @@ mod tests {
             resumen(&t),
             vec![("c2", 1, "ticket:T-1"), ("c3", 1, "ticket:T-1")]
         );
+    }
+
+    fn mk_commit(sha: &str, at_epoch: i64) -> Event {
+        Event { kind: "commit".to_string(), ..mk_event(sha, at_epoch, vec![]) }
+    }
+
+    fn mk_nod(id: &str, at_epoch: i64, sha: &str) -> Event {
+        Event {
+            source_id: "nod:/events.jsonl".to_string(),
+            kind: "nod.vcs.commit".to_string(),
+            ..mk_event(id, at_epoch, vec![lk("commit", sha), lk("ticket", "T-9")])
+        }
+    }
+
+    #[test]
+    fn vcs_commit_abreviado_enlaza_con_su_commit_en_los_dos_sentidos() {
+        let sha = "a18ffb6c0e5d4b3a29180f7e6d5c4b3a29180f7e";
+        let (_db, store) = build(
+            "vcs-commit",
+            &[
+                mk_commit(sha, 10),
+                // Otro commit que comparte solo los 3 primeros caracteres.
+                mk_commit("a18000000000000000000000000000000000000a", 5),
+                mk_nod("nod:i:r:10", 11, "a18ffb6"),
+            ],
+        );
+        let t = trace(store.conn(), "nod:i:r:10", 2, 10).unwrap();
+        assert_eq!(resumen(&t), vec![(sha, 1, "commit")]);
+        let t = trace(store.conn(), sha, 2, 10).unwrap();
+        assert_eq!(resumen(&t), vec![("nod:i:r:10", 1, "commit")]);
+        // El sha completo también enlaza (regla 2 de siempre).
+        let (_db2, store2) = build("vcs-commit-completo", &[mk_commit(sha, 10), mk_nod("n", 11, sha)]);
+        assert_eq!(resumen(&trace(store2.conn(), sha, 1, 10).unwrap()), vec![("n", 1, "commit")]);
+    }
+
+    #[test]
+    fn sha_abreviado_ambiguo_o_corto_no_enlaza() {
+        let (_db, store) = build(
+            "vcs-ambiguo",
+            &[
+                mk_commit("abcd000000000000000000000000000000000001", 10),
+                mk_commit("abcd000000000000000000000000000000000002", 20),
+                mk_nod("n1", 30, "abcd000"),
+                mk_nod("n2", 40, "abc"),
+            ],
+        );
+        let conn = store.conn();
+        assert_eq!(resolve_commit_prefix(conn, "abcd000").unwrap(), None);
+        assert_eq!(resolve_commit_prefix(conn, "abc").unwrap(), None);
+        assert_eq!(
+            resolve_commit_prefix(conn, "ABCD0000000000000000000000000000000000020").unwrap(),
+            None,
+            "más de 40 caracteres"
+        );
+        assert_eq!(
+            resolve_commit_prefix(conn, "ABCD000000000000000000000000000000000002").unwrap().as_deref(),
+            Some("abcd000000000000000000000000000000000002")
+        );
+        // n1 y n2 solo se conectan entre sí por la tarea, no con los commits.
+        let t = trace(conn, "abcd000000000000000000000000000000000001", 2, 10).unwrap();
+        assert!(t.nodes.is_empty());
+        let t = trace(conn, "n1", 1, 10).unwrap();
+        assert_eq!(resumen(&t), vec![("n2", 1, "ticket:T-9")]);
     }
 
     #[test]
