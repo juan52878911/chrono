@@ -17,6 +17,7 @@ mod owners;
 mod patterns;
 mod phases;
 mod search;
+mod session_patterns;
 mod similar;
 mod ticket;
 mod timeline;
@@ -28,11 +29,15 @@ pub use churn::{churn, ChurnRow};
 pub use correlate::{correlate, Correlation, EventRef};
 pub use coupling::{coupling, Coupled};
 pub use events::{events, EventFilter, EventRow};
-pub use hotspots::{hotspots, Hotspot};
+pub use hotspots::{hotspots, hotspots_of_type, Hotspot};
 pub use owners::{owners, Owner};
 pub use patterns::{patterns, Pattern};
 pub use phases::{phases, Phase};
 pub use search::{search, SearchHit};
+pub use session_patterns::{
+    session_patterns, Commits, Group, Incomplete, LoopInfo, Merge, Rework, SessionPatterns, SessionPatternsOpts, Summary,
+    ToolCount, Tokens,
+};
 pub use similar::{similar, SimilarRow};
 pub use ticket::{ticket, Ticket};
 pub use timeline::{timeline, TimelineBucket};

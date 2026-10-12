@@ -1,4 +1,4 @@
-//! Definición de los 11 tools MCP y su ejecución (`tools/call`).
+//! Definición de los tools MCP y su ejecución (`tools/call`).
 //!
 //! Convención de salida v2 (`entity`/`id`, no `path`/`sha`): mismos nombres de
 //! campo que `chrono-cli/src/query.rs` para las consultas que comparten
@@ -143,13 +143,25 @@ pub fn tool_defs() -> Vec<Value> {
         ),
         tool(
             "trace",
-            "Sigue la cadena de un evento por links (reverts, mismo ticket/PR).",
+            "Sigue la cadena de un evento por links (reverts, mismo ticket/PR, y el vcs.commit de una sesión de Nod ↔ su commit de git, con sha abreviado).",
             json!({
                 "id": str_prop("Id del evento ancla"),
                 "depth": json!({"type": "integer", "description": "Profundidad BFS (por defecto 5)"}),
                 "limit": json!({"type": "integer", "description": "Máximo de nodos (por defecto 50)"})
             }),
             &["id"],
+        ),
+        tool(
+            "session_patterns",
+            "Proceso (sesiones de Nod) × resultado (git), por tarea y por sesión: tokens, costo, tiempo del agente frente a espera del humano, permisos negados, interrupciones, bucles, commits entregados y cuántos tocan hotspots, retrabajo a 30 días, cambios incompletos, merge y costo por commit.",
+            json!({
+                "since": since_prop(),
+                "task": str_prop("Solo esta tarea (opcional)"),
+                "session": str_prop("Solo esta sesión (opcional)"),
+                "hotspots": json!({"type": "integer", "description": "Top N de hotspots que cuenta como hotspot (por defecto 25)"}),
+                "limit": json!({"type": "integer", "description": "Máximo de tareas y de sesiones (por defecto 25)"})
+            }),
+            &[],
         ),
         tool(
             "events",
@@ -281,6 +293,17 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
                 grep: args.get("grep").and_then(Value::as_str).filter(|s| !s.is_empty()),
             };
             events(conn, &filter, limit)?
+        }
+        "session_patterns" => {
+            let opts = chrono_metrics::SessionPatternsOpts {
+                since_epoch,
+                task: args.get("task").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string),
+                session: args.get("session").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string),
+                hotspot_limit: arg_i64(args, "hotspots", 25).max(1) as usize,
+                limit: arg_i64(args, "limit", 25).max(1) as usize,
+                ..Default::default()
+            };
+            session_patterns(store, opts)?
         }
         other => return Err(format!("herramienta desconocida: {other}").into()),
     };
@@ -541,4 +564,110 @@ fn correlate(conn: &Connection, id: &str, delta_ms: i64, limit: usize) -> Result
     };
     let related: Vec<Value> = corr.related.iter().map(event_json).collect();
     Ok(json!({"delta_ms": delta_ms, "anchor": event_json(&corr.anchor), "related": related}))
+}
+
+/// Horizonte en ms (último `last_sync_at` de las fuentes git, o ahora) y ramas
+/// locales → mergeada (git en vivo). Mismo criterio que el CLI.
+fn session_git_context(store: &chrono_store::Store) -> Result<(i64, std::collections::BTreeMap<String, bool>, String)> {
+    let last_sync: Option<String> = store
+        .conn()
+        .query_row("SELECT MAX(last_sync_at) FROM sources WHERE kind = 'git'", [], |r| r.get(0))
+        .unwrap_or(None);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    // `last_sync_at` puede llevar `.mmm`: `since` entiende hasta el segundo.
+    let horizon = last_sync
+        .as_deref()
+        .map(|s| since_to_epoch(s.split('.').next().unwrap_or(s)))
+        .filter(|e| *e > 0)
+        .unwrap_or(now_ms);
+    let mut merged = std::collections::BTreeMap::new();
+    let mut base = String::new();
+    // Sin repo legible (sin fuente git, o fuentes aún sin ruta) no hay datos de
+    // ramas: el merge sale solo de PRs y la consulta no falla.
+    let repo = match store.meta("repo_path")?.filter(|s| !s.is_empty()) {
+        Some(rp) => Some(rp),
+        None => store.list_sources().ok().and_then(|v| v.into_iter().find(|s| s.kind == "git").map(|s| s.path)),
+    };
+    if let Some(repo) = repo {
+        if let Ok((b, _cur, rows)) = chrono_source_git::branches(Path::new(&repo), "") {
+            base = b;
+            for r in rows {
+                merged.insert(r.name, r.merged);
+            }
+        }
+    }
+    Ok((horizon, merged, base))
+}
+
+fn group_json(g: &chrono_metrics::Group, key_name: &str, related_name: &str) -> Value {
+    const MAX: usize = 5;
+    let take = |v: &[String]| v.iter().take(MAX).cloned().collect::<Vec<_>>();
+    let t = &g.tokens;
+    let c = &g.commits;
+    let m = &g.merge;
+    let mut out = json!({
+        "profiles": take(&g.profiles),
+        "hosts": take(&g.hosts),
+        "tokens": {"input": t.input, "output": t.output, "cache_read": t.cache_read,
+                   "cache_write": t.cache_write, "total": t.total(), "subagents": t.subagents},
+        "cost_usd": g.cost_usd,
+        "time": {"agent_ms": g.agent_ms, "waiting_human_ms": g.waiting_ms,
+                 "waiting_decisions": g.waiting_decisions, "waiting_upper_bounds": g.waiting_upper_bounds},
+        "permissions": {"asked": g.permissions_asked, "denied": g.denied, "denied_by_user": g.denied_by_user,
+                        "denied_by_tool": g.denied_by_tool.iter().take(MAX)
+                            .map(|d| json!({"tool": d.tool, "denied": d.count})).collect::<Vec<_>>()},
+        "interruptions": g.interruptions,
+        "loops": {"count": g.loops.len(), "top": g.loops.iter().take(MAX)
+            .map(|l| json!({"tool": l.tool, "failures": l.failures, "session": l.session,
+                            "agent": if l.agent.is_empty() { Value::Null } else { json!(l.agent) }}))
+            .collect::<Vec<_>>()},
+        "commits": {"delivered": c.delivered.len(), "resolved": c.resolved.len(), "ids": take(&c.resolved),
+                    "unresolved": take(&c.unresolved), "touching_hotspots": c.touching_hotspots,
+                    "hotspots_touched": take(&c.hotspots_touched)},
+        "produced": take(&g.produced),
+        "rework": g.rework.as_ref().map(|r| json!({
+            "window_days": r.window_days, "files_delivered": r.files_delivered, "files_reworked": r.files_reworked,
+            "file_ratio": r.file_ratio, "lines_delivered": r.lines_delivered, "lines_reworked": r.lines_reworked,
+            "open_windows": r.open_windows, "reworked": take(&r.reworked)})),
+        "incomplete": g.incomplete.as_ref().map(|i| json!({
+            "edited_files": i.edited_files, "uncommitted": i.uncommitted.len(),
+            "examples": take(&i.uncommitted), "outside_repo": i.outside_repo})),
+        "merge": {"status": m.status, "via": if m.via.is_empty() { Value::Null } else { json!(m.via) },
+                  "branches": take(&m.branches),
+                  "prs": m.prs.iter().take(MAX).map(|(n, st, mg)| json!({"number": n, "state": st, "merged": mg})).collect::<Vec<_>>(),
+                  "reason": if m.reason.is_empty() { Value::Null } else { json!(m.reason) }},
+        "cost_per_commit": g.cost_per_commit,
+        "tokens_per_commit": g.tokens_per_commit,
+    });
+    out[key_name] = json!(g.key);
+    out[related_name] = json!(take(&g.related));
+    if key_name == "session" {
+        out["remote_session"] = json!(g.remote_session);
+    }
+    out
+}
+
+fn session_patterns(store: &chrono_store::Store, mut opts: chrono_metrics::SessionPatternsOpts) -> Result<Value> {
+    let (horizon, merged, base) = session_git_context(store)?;
+    opts.horizon_epoch = horizon;
+    opts.branch_merged = merged;
+    opts.base_branch = base.clone();
+    let sp = chrono_metrics::session_patterns(store.conn(), &opts)?;
+    let s = &sp.summary;
+    Ok(json!({
+        "summary": {"sessions": s.sessions, "tasks": s.tasks, "merge_rate": s.merge_rate,
+                    "tasks_merged": s.tasks_merged, "tasks_merge_known": s.tasks_merge_known,
+                    "totals": group_json(&s.all, "scope", "tasks")},
+        "basis": {"events_scanned": sp.events_scanned, "hotspots": sp.hotspots,
+                  "rework_window_days": opts.rework_days, "horizon_ms": horizon,
+                  "base_branch": if base.is_empty() { Value::Null } else { json!(base) }},
+        "tasks_total": sp.tasks_total,
+        "tasks": sp.tasks.iter().map(|g| group_json(g, "task", "sessions")).collect::<Vec<_>>(),
+        "sessions_total": sp.sessions_total,
+        "sessions": sp.sessions.iter().map(|g| group_json(g, "session", "tasks")).collect::<Vec<_>>(),
+        "notes": sp.notes,
+    }))
 }

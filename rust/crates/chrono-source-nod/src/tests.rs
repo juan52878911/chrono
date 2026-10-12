@@ -96,6 +96,7 @@ fn fixture_real_mapea_los_13_eventos() {
     // turn.step: usage aplanado.
     let step = evs.iter().find(|e| e.kind == "nod.turn.step").unwrap();
     assert_eq!(step.attrs["usage.cache_read"], "28897");
+    assert_eq!(step.attrs["usage.input"], "2");
     assert_eq!(step.attrs["tools"], "Bash");
     assert_eq!(step.attrs["turn"], "cc377d46-25aa-4caa-96fc-18702c492153");
 

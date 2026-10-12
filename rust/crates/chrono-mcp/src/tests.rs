@@ -166,18 +166,19 @@ fn ping_responde_objeto_vacio() {
 }
 
 #[test]
-fn tools_list_incluye_los_diecisiete_tools() {
+fn tools_list_incluye_los_dieciocho_tools() {
     let (_db, state) = state_with_fixture();
     let resp = call(&state, 3, "tools/list", json!({}));
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools debe ser array");
-    assert_eq!(tools.len(), 17);
+    assert_eq!(tools.len(), 18);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     for expected in [
         "hotspots", "coupling", "owners", "churn", "search", "similar", "bugs", "tickets",
         "phases", "branches", "prs", "timeline", "top", "correlate", "patterns", "events", "trace",
+        "session_patterns",
     ] {
         assert!(
             names.contains(&expected),
@@ -231,7 +232,7 @@ fn tools_call_sin_indice_pide_chrono_init() {
 
     // tools/list debe seguir funcionando igual sin índice.
     let list = call(&state, 6, "tools/list", json!({}));
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 17);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 18);
 }
 
 #[test]
@@ -270,4 +271,16 @@ fn linea_json_invalida_se_ignora() {
     let (_db, state) = state_with_fixture();
     assert!(handle("esto no es json", &state).is_none());
     assert!(handle("", &state).is_none());
+}
+
+#[test]
+fn tools_call_session_patterns_sin_eventos_nod_avisa() {
+    let (_db, state) = state_with_fixture();
+    let resp = call(&state, 9, "tools/call", json!({"name": "session_patterns", "arguments": {}}));
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or_else(|| panic!("{resp}"));
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload["basis"]["events_scanned"], 0);
+    assert_eq!(payload["sessions_total"], 0);
+    assert_eq!(payload["basis"]["hotspots"][0], "src/hot.rs");
+    assert!(payload["notes"][0].as_str().unwrap().contains("no Nod events"));
 }

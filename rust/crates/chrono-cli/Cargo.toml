@@ -27,3 +27,8 @@ chrono-source-oslog = { path = "../chrono-source-oslog" }
 chrono-source-template = { path = "../chrono-source-template" }
 chrono-source-nod = { path = "../chrono-source-nod" }
 chrono-mcp = { path = "../chrono-mcp" }
+
+# Solo para los tests de integración (parsean la salida JSON del binario);
+# no entra en el binario.
+[dev-dependencies]
+serde_json = "1"

@@ -119,10 +119,9 @@ fn flatten_data(data: &Map<String, Value>, attrs: &mut BTreeMap<String, String>)
         let key = if attrs.contains_key(k) { format!("data.{k}") } else { k.clone() };
         match v {
             Value::Object(inner) => {
+                // Los objetos anidados del contrato (usage, repo, edit, context)
+                // no traen texto libre: se vuelcan enteros (`usage.input` sí).
                 for (k2, v2) in inner {
-                    if SKIP_DATA_KEYS.contains(&k2.as_str()) {
-                        continue;
-                    }
                     if let Some(s) = scalar(v2) {
                         attrs.insert(format!("{key}.{k2}"), s);
                     }

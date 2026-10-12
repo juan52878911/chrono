@@ -3,6 +3,7 @@
 //! `docs/OUTPUT-CONTRACT.md`, con la convención v2: `entity`/`id` en vez de
 //! `path`/`sha`.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use chrono_store::Store;
@@ -662,4 +663,206 @@ pub fn branches(store: &Store, repo: &Path, base: &str) -> Result<Json> {
             Json::Arr(items),
         ),
     )
+}
+
+/// Datos de git para `session_patterns`: horizonte observado (el
+/// `last_sync_at` más reciente de las fuentes git, o ahora) y rama → mergeada
+/// en la base (git en vivo; vacío si no hay repo o git falla).
+fn session_git_context(store: &Store) -> Result<(i64, BTreeMap<String, bool>, String)> {
+    let last_sync: Option<String> = store
+        .conn()
+        .query_row("SELECT MAX(last_sync_at) FROM sources WHERE kind = 'git'", [], |r| r.get(0))
+        .unwrap_or(None);
+    // `last_sync_at` puede llevar `.mmm`; `parse_since` entiende hasta el segundo.
+    let horizon = last_sync.as_deref().and_then(|s| parse_since(s.split('.').next().unwrap_or(s))).unwrap_or_else(now_epoch);
+    let mut merged = BTreeMap::new();
+    let mut base = String::new();
+    // Sin repo legible no hay datos de ramas (el merge sale solo de PRs).
+    if let Some(repo) = git_repo_path(store).ok().flatten() {
+        if let Ok((b, _current, rows)) = chrono_source_git::branches(Path::new(&repo), "") {
+            base = b;
+            for r in rows {
+                merged.insert(r.name, r.merged);
+            }
+        }
+    }
+    Ok((horizon, merged, base))
+}
+
+fn opt_str(s: &Option<String>) -> Json {
+    s.as_deref().map_or(Json::Null, Json::str)
+}
+
+fn strs(v: &[String], max: usize) -> Json {
+    Json::Arr(v.iter().take(max).map(|s| Json::str(s)).collect())
+}
+
+/// Serializa un grupo de `session_patterns`. Listas internas acotadas a 5.
+fn session_group_json(g: &chrono_metrics::Group, key_name: &str, related_name: &str) -> Json {
+    const MAX: usize = 5;
+    let t = &g.tokens;
+    let tokens = Json::obj()
+        .set("input", Json::Int(t.input))
+        .set("output", Json::Int(t.output))
+        .set("cache_read", Json::Int(t.cache_read))
+        .set("cache_write", Json::Int(t.cache_write))
+        .set("total", Json::Int(t.total()))
+        .set("subagents", Json::Int(t.subagents));
+    let time = Json::obj()
+        .set("agent_ms", Json::Int(g.agent_ms))
+        .set("waiting_human_ms", Json::Int(g.waiting_ms))
+        .set("waiting_decisions", Json::Int(g.waiting_decisions))
+        .set("waiting_upper_bounds", Json::Int(g.waiting_upper_bounds));
+    let permissions = Json::obj()
+        .set("asked", Json::Int(g.permissions_asked))
+        .set("denied", Json::Int(g.denied))
+        .set("denied_by_user", Json::Int(g.denied_by_user))
+        .set(
+            "denied_by_tool",
+            Json::Arr(
+                g.denied_by_tool
+                    .iter()
+                    .take(MAX)
+                    .map(|d| Json::obj().set("tool", Json::str(&d.tool)).set("denied", Json::Int(d.count)))
+                    .collect(),
+            ),
+        );
+    let loops = Json::obj().set("count", Json::Int(g.loops.len() as i64)).set(
+        "top",
+        Json::Arr(
+            g.loops
+                .iter()
+                .take(MAX)
+                .map(|l| {
+                    Json::obj()
+                        .set("tool", Json::str(&l.tool))
+                        .set("failures", Json::Int(l.failures))
+                        .set("session", Json::str(&l.session))
+                        .set("agent", if l.agent.is_empty() { Json::Null } else { Json::str(&l.agent) })
+                })
+                .collect(),
+        ),
+    );
+    let c = &g.commits;
+    let commits = Json::obj()
+        .set("delivered", Json::Int(c.delivered.len() as i64))
+        .set("resolved", Json::Int(c.resolved.len() as i64))
+        .set("ids", strs(&c.resolved, MAX))
+        .set("unresolved", strs(&c.unresolved, MAX))
+        .set("touching_hotspots", Json::Int(c.touching_hotspots))
+        .set("hotspots_touched", strs(&c.hotspots_touched, MAX));
+    let rework = match &g.rework {
+        None => Json::Null,
+        Some(r) => Json::obj()
+            .set("window_days", Json::Int(r.window_days))
+            .set("files_delivered", Json::Int(r.files_delivered))
+            .set("files_reworked", Json::Int(r.files_reworked))
+            .set("file_ratio", Json::Float(r.file_ratio))
+            .set("lines_delivered", Json::Int(r.lines_delivered))
+            .set("lines_reworked", Json::Int(r.lines_reworked))
+            .set("open_windows", Json::Int(r.open_windows))
+            .set("reworked", strs(&r.reworked, MAX)),
+    };
+    let incomplete = match &g.incomplete {
+        None => Json::Null,
+        Some(i) => Json::obj()
+            .set("edited_files", Json::Int(i.edited_files))
+            .set("uncommitted", Json::Int(i.uncommitted.len() as i64))
+            .set("examples", strs(&i.uncommitted, MAX))
+            .set("outside_repo", Json::Int(i.outside_repo)),
+    };
+    let m = &g.merge;
+    let merge = Json::obj()
+        .set("status", Json::str(&m.status))
+        .set("via", if m.via.is_empty() { Json::Null } else { Json::str(&m.via) })
+        .set("branches", strs(&m.branches, MAX))
+        .set(
+            "prs",
+            Json::Arr(
+                m.prs
+                    .iter()
+                    .take(MAX)
+                    .map(|(n, s, mg)| Json::obj().set("number", Json::Int(*n)).set("state", Json::str(s)).set("merged", Json::Bool(*mg)))
+                    .collect(),
+            ),
+        )
+        .set("reason", if m.reason.is_empty() { Json::Null } else { Json::str(&m.reason) });
+    let at = |e: i64| if e == 0 { Json::Null } else { Json::str(&epoch_to_iso8601(e)) };
+    let mut out = Json::obj().set(key_name, opt_str(&g.key));
+    if key_name == "session" {
+        out = out.set("remote_session", opt_str(&g.remote_session));
+    }
+    out.set(related_name, strs(&g.related, MAX))
+        .set("profiles", strs(&g.profiles, MAX))
+        .set("hosts", strs(&g.hosts, MAX))
+        .set("first_at", at(g.first_epoch))
+        .set("last_at", at(g.last_epoch))
+        .set("tokens", tokens)
+        .set("cost_usd", g.cost_usd.map_or(Json::Null, Json::Float))
+        .set("time", time)
+        .set("permissions", permissions)
+        .set("interruptions", Json::Int(g.interruptions))
+        .set("loops", loops)
+        .set("commits", commits)
+        .set("produced", strs(&g.produced, MAX))
+        .set("rework", rework)
+        .set("incomplete", incomplete)
+        .set("merge", merge)
+        .set("cost_per_commit", g.cost_per_commit.map_or(Json::Null, Json::Float))
+        .set("tokens_per_commit", g.tokens_per_commit.map_or(Json::Null, Json::Int))
+}
+
+/// `session_patterns`: proceso (Nod) × resultado (git) por tarea y por sesión.
+pub fn session_patterns(
+    store: &Store,
+    w: &Window,
+    task: Option<&str>,
+    session: Option<&str>,
+    hotspots: Option<&str>,
+    limit: Option<&str>,
+) -> Result<Json> {
+    const DEFAULT_LIMIT: usize = 25;
+    let limit = parse_limit(limit, DEFAULT_LIMIT)?;
+    let hotspot_limit = parse_limit(hotspots, 25)?;
+    let (horizon, branch_merged, base) = session_git_context(store)?;
+    let opts = chrono_metrics::SessionPatternsOpts {
+        since_epoch: w.since_epoch,
+        horizon_epoch: horizon,
+        rework_days: 30,
+        hotspot_limit,
+        limit,
+        task: task.map(str::to_string),
+        session: session.map(str::to_string),
+        branch_merged,
+        base_branch: base.clone(),
+    };
+    let sp = chrono_metrics::session_patterns(store.conn(), &opts)?;
+    let s = &sp.summary;
+    let summary = Json::obj()
+        .set("sessions", Json::Int(s.sessions))
+        .set("tasks", Json::Int(s.tasks))
+        .set("merge_rate", s.merge_rate.map_or(Json::Null, Json::Float))
+        .set("tasks_merged", Json::Int(s.tasks_merged))
+        .set("tasks_merge_known", Json::Int(s.tasks_merge_known))
+        .set("totals", session_group_json(&s.all, "scope", "tasks"));
+    let tasks: Vec<Json> = sp.tasks.iter().map(|g| session_group_json(g, "task", "sessions")).collect();
+    let sessions: Vec<Json> = sp.sessions.iter().map(|g| session_group_json(g, "session", "tasks")).collect();
+    let returned = tasks.len().max(sessions.len());
+    let result = Json::obj()
+        .set("summary", summary)
+        .set(
+            "basis",
+            Json::obj()
+                .set("events_scanned", Json::Int(sp.events_scanned))
+                .set("hotspots", strs(&sp.hotspots, sp.hotspots.len()))
+                .set("rework_window_days", Json::Int(30))
+                .set("horizon", Json::str(&epoch_to_iso8601(horizon)))
+                .set("base_branch", if base.is_empty() { Json::Null } else { Json::str(&base) }),
+        )
+        .set("tasks_total", Json::Int(sp.tasks_total as i64))
+        .set("tasks", Json::Arr(tasks))
+        .set("sessions_total", Json::Int(sp.sessions_total as i64))
+        .set("sessions", Json::Arr(sessions))
+        .set("notes", strs(&sp.notes, sp.notes.len()));
+    envelope(store, "session_patterns", w, limit, returned, result)
 }

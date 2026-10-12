@@ -58,9 +58,18 @@ Log-native (multi-source):
   timeline             Event counts per time bucket (--bucket 1h, --by level|kind).
   top <dim>            Most frequent values of a dimension (level|kind|actor|entity|attr:<k>).
   patterns             Most frequent log templates (Drain-light clustering).
-  trace <id>           Follow an event's links chain (reverts, same ticket/PR).
+  trace <id>           Follow an event's links chain (reverts, same ticket/PR, vcs.commit ↔ commit).
   events               Unified chronological stream across sources (--source/--kind/--level/--grep).
   correlate <id>       Events from OTHER sources within ±Δt of an event (--delta 1h).
+
+Process × outcome (Nod sessions + git):
+  session_patterns     Per task and per session: tokens, cost, agent vs human
+                       wait time, denied permissions, interruptions, loops,
+                       commits delivered (vcs.commit) and how many touch hotspots,
+                       30-day rework, incomplete changes, merge status, cost per
+                       commit. Needs a nod source (chrono add events.jsonl --as nod).
+                       --task ID, --session ID, --hotspots N (top N, default 25).
+                       A commit's Nod session: chrono trace <sha>.
 
 Diagnostics:
   tail                 Follow new events live across sources (tail -f; --interval 2s).
@@ -112,9 +121,19 @@ Log-native (multi-fuente):
   timeline             Conteo de eventos por bucket temporal (--bucket 1h, --by level|kind).
   top <dim>            Valores más frecuentes de una dimensión (level|kind|actor|entity|attr:<c>).
   patterns             Plantillas de log más frecuentes (clustering Drain-light).
-  trace <id>           Sigue la cadena de links de un evento (reverts, mismo ticket/PR).
+  trace <id>           Sigue la cadena de links de un evento (reverts, mismo ticket/PR, vcs.commit ↔ commit).
   events               Stream cronológico unificado de todas las fuentes (--source/--kind/--level/--grep).
   correlate <id>       Eventos de OTRAS fuentes en ±Δt de un evento (--delta 1h).
+
+Proceso × resultado (sesiones de Nod + git):
+  session_patterns     Por tarea y por sesión: tokens, costo, tiempo del agente
+                       frente a espera del humano, permisos negados,
+                       interrupciones, bucles, commits entregados (vcs.commit) y
+                       cuántos tocan hotspots, retrabajo a 30 días, cambios
+                       incompletos, estado de merge, costo por commit. Requiere
+                       una fuente nod (chrono add events.jsonl --as nod).
+                       --task ID, --session ID, --hotspots N (top N, por defecto 25).
+                       La sesión de Nod de un commit: chrono trace <sha>.
 
 Diagnóstico:
   tail                 Sigue eventos nuevos en vivo (tail -f; --interval 2s).
@@ -150,6 +169,9 @@ struct Flags {
     depth: Option<String>,
     interval: Option<String>,
     as_kind: Option<String>,
+    task: Option<String>,
+    session: Option<String>,
+    hotspots: Option<String>,
     pos: Vec<String>,
 }
 
@@ -224,6 +246,18 @@ fn parse_args(args: &[String]) -> Flags {
             "--as" if i + 1 < args.len() => {
                 i += 1;
                 f.as_kind = Some(args[i].clone());
+            }
+            "--task" if i + 1 < args.len() => {
+                i += 1;
+                f.task = Some(args[i].clone());
+            }
+            "--session" if i + 1 < args.len() => {
+                i += 1;
+                f.session = Some(args[i].clone());
+            }
+            "--hotspots" if i + 1 < args.len() => {
+                i += 1;
+                f.hotspots = Some(args[i].clone());
             }
             a if a.starts_with("--") && a != "--version" && a != "--help" => {}
             a => f.pos.push(a.to_string()),
@@ -424,6 +458,14 @@ fn main() {
             let id = require_pos(&f, "trace needs an <id>", "trace necesita un <id>");
             query::trace(&store, &id, f.depth.as_deref(), f.limit.as_deref())
         }
+        "session_patterns" => query::session_patterns(
+            &store,
+            &window,
+            f.task.as_deref(),
+            f.session.as_deref(),
+            f.hotspots.as_deref(),
+            f.limit.as_deref(),
+        ),
         "show" => {
             let id = require_pos(&f, "show needs an <id>", "show necesita un <id>");
             query::show(&store, &id, f.entity.as_deref())

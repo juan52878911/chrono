@@ -35,6 +35,24 @@ pub struct Hotspot {
 /// trazas también rankean. `MAX(size,1)` = fallback a frecuencia cuando no hay
 /// tamaño (logs y símbolos sin S2), sin alterar el top de git (que sí lo tiene).
 pub fn hotspots(conn: &Connection, since_epoch: i64, limit: usize, symbols_only: bool) -> Result<Vec<Hotspot>> {
+    hotspots_filtered(conn, since_epoch, limit, symbols_only, None)
+}
+
+/// La MISMA métrica que [`hotspots`], restringida a un `entities.type`
+/// (p.ej. `"file"`): en un índice multi-fuente evita que entidades de otras
+/// fuentes (tools de Nod, servicios de logs) ocupen puestos del top de ficheros.
+/// La usa `session_patterns` para decidir si un commit toca un hotspot.
+pub fn hotspots_of_type(conn: &Connection, since_epoch: i64, limit: usize, entity_type: &str) -> Result<Vec<Hotspot>> {
+    hotspots_filtered(conn, since_epoch, limit, false, Some(entity_type))
+}
+
+fn hotspots_filtered(
+    conn: &Connection,
+    since_epoch: i64,
+    limit: usize,
+    symbols_only: bool,
+    entity_type: Option<&str>,
+) -> Result<Vec<Hotspot>> {
     let op = crate::symbol_type_op(symbols_only);
     // Sin ventana (`since_epoch == 0`) el único filtro que aportaría el JOIN a
     // `events` sería `ev.at_epoch >= 0`. Si NINGÚN evento tiene `at_epoch < 0`
@@ -50,6 +68,7 @@ pub fn hotspots(conn: &Connection, since_epoch: i64, limit: usize, symbols_only:
              FROM touches t
              JOIN entities e ON e.id = t.entity_id
              WHERE e.deleted = 0 AND e.excluded = 0 AND e.type {op} 'symbol'
+               AND (?2 IS NULL OR e.type = ?2)
              GROUP BY e.id
              ORDER BY (CAST(COUNT(*) AS REAL) * MAX(e.size, 1)) DESC
              LIMIT ?1",
@@ -61,6 +80,7 @@ pub fn hotspots(conn: &Connection, since_epoch: i64, limit: usize, symbols_only:
              JOIN events ev ON ev.id = t.event_id
              JOIN entities e ON e.id = t.entity_id
              WHERE e.deleted = 0 AND e.excluded = 0 AND e.type {op} 'symbol' AND ev.at_epoch >= ?1
+               AND (?3 IS NULL OR e.type = ?3)
              GROUP BY e.id
              ORDER BY (CAST(COUNT(*) AS REAL) * MAX(e.size, 1)) DESC
              LIMIT ?2",
@@ -71,9 +91,9 @@ pub fn hotspots(conn: &Connection, since_epoch: i64, limit: usize, symbols_only:
         Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
     };
     let rows = if fast_path {
-        stmt.query_map(params![limit as i64], map)?
+        stmt.query_map(params![limit as i64, entity_type], map)?
     } else {
-        stmt.query_map(params![since_epoch, limit as i64], map)?
+        stmt.query_map(params![since_epoch, limit as i64, entity_type], map)?
     };
 
     let mut out = Vec::new();
