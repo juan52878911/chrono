@@ -1,0 +1,11 @@
+[package]
+name = "chrono-source-nod"
+description = "Adaptador Source del flujo Nod v1 (sobres JSONL de sesiones con agentes) para chrono."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono-core = { path = "../chrono-core" }
+serde_json = "1"

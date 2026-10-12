@@ -71,8 +71,8 @@ pub fn repo_root(start: &Path) -> Result<PathBuf> {
 /// Error accionable cuando ninguna fuente registrada reconoce `path`.
 fn unrecognized_source_err(path: &Path) -> Box<dyn std::error::Error + Send + Sync> {
     t(
-        format!("I don't recognize this source at {}; expected a git repo, a .jsonl/.csv file, or a text log (syslog/nginx).", path.display()),
-        format!("no reconozco esta fuente en {}; se esperaba un repo git, un fichero .jsonl/.csv o un log de texto (syslog/nginx).", path.display()),
+        format!("I don't recognize this source at {}; expected a git repo, a .jsonl/.csv file, a Nod event file, or a text log (syslog/nginx). Use --as <kind> to force one.", path.display()),
+        format!("no reconozco esta fuente en {}; se esperaba un repo git, un fichero .jsonl/.csv, un fichero de eventos de Nod o un log de texto (syslog/nginx). Usa --as <tipo> para forzarlo.", path.display()),
     )
     .into()
 }
@@ -88,6 +88,7 @@ fn build_registry() -> Registry {
     r.register(Box::new(chrono_source_changelog::ChangelogSource::new()));
     r.register(Box::new(chrono_source_oslog::OsLogSource::new()));
     r.register(Box::new(chrono_source_template::TemplateSource::new()));
+    r.register(Box::new(chrono_source_nod::NodSource::new()));
     r
 }
 
@@ -123,8 +124,8 @@ fn resolve_source<'a>(
     let src = match as_kind.filter(|s| !s.is_empty()) {
         Some(kind) => registry.by_kind(kind).ok_or_else(|| {
             t(
-                format!("unknown source kind {kind:?} for --as (try: git, jsonl, csv, textlog, changelog, oslog, template)"),
-                format!("kind de fuente desconocido {kind:?} para --as (prueba: git, jsonl, csv, textlog, changelog, oslog, template)"),
+                format!("unknown source kind {kind:?} for --as (try: git, jsonl, csv, textlog, changelog, oslog, template, nod)"),
+                format!("kind de fuente desconocido {kind:?} para --as (prueba: git, jsonl, csv, textlog, changelog, oslog, template, nod)"),
             )
         })?,
         None => registry.pick(start).ok_or_else(|| unrecognized_source_err(start))?,
@@ -306,7 +307,13 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
     let mut changed_git_paths: Vec<String> = Vec::new();
     for s in &sources {
         if let Some(ref want) = filter_id {
-            if &s.id != want {
+            // También casa por ruta: una fuente añadida con `--as` puede no
+            // ser la que `detect` elegiría hoy (p.ej. un fichero de Nod aún
+            // vacío, o uno de `template`).
+            let same_path = source_arg
+                .and_then(|p| std::fs::canonicalize(p).ok())
+                .is_some_and(|p| p.to_string_lossy() == s.path);
+            if &s.id != want && !same_path {
                 continue;
             }
         }
@@ -583,6 +590,9 @@ fn ingest_source(
         let _ = store.set_meta("max_events_per_source", &max_events.to_string());
     }
     let classifier = RulesClassifier::new(cfg);
+    // Nod es telemetría del PROCESO (sesiones con agentes), no cambios del
+    // repo: no se clasifica (un tool `fix_*` o un prompt no son un fix).
+    let classify = source.kind() != "nod";
 
     let mut cur: Box<dyn Cursor> = match source.open(path, watermark, &source_cfg) {
         Ok(c) => c,
@@ -620,8 +630,10 @@ fn ingest_source(
                     ev.body.truncate(cut);
                 }
                 w.add_event(&ev)?;
-                let labels = classifier.classify(&ev);
-                w.add_labels(&ev.id, &labels)?;
+                if classify {
+                    let labels = classifier.classify(&ev);
+                    w.add_labels(&ev.id, &labels)?;
+                }
                 count += 1;
                 in_batch += 1;
                 if count.is_multiple_of(PROGRESS_EVERY) {

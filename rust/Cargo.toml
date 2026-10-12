@@ -13,6 +13,7 @@ members = [
     "crates/chrono-source-changelog",
     "crates/chrono-source-oslog",
     "crates/chrono-source-template",
+    "crates/chrono-source-nod",
     "crates/chrono-mcp",
     "crates/chrono-cli",
 ]
