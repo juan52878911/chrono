@@ -30,7 +30,7 @@
 //!
 //! Tiempos en MILISEGUNDOS (`at_epoch`, como todo el dominio).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -556,6 +556,10 @@ impl Acc {
 
 /// ¿Aporta este tipo de evento a alguna métrica? (Para no crear grupos de
 /// tarea vacíos con eventos como `session.start`, que no llevan tarea.)
+fn sacc_agent(by_session: &mut BTreeMap<String, Acc>, session: &str, ms: i64) {
+    by_session.entry(session.to_string()).or_default().agent_ms += ms;
+}
+
 fn contributes(ty: &str) -> bool {
     matches!(
         ty,
@@ -887,6 +891,7 @@ pub fn session_patterns(conn: &Connection, opts: &SessionPatternsOpts) -> Result
     // inicio de turnos (respaldo de duration_ms) y raíces/ramas por sesión.
     let mut tool_ok: HashMap<(String, String), bool> = HashMap::new();
     let mut turn_start: HashMap<(String, String, String), i64> = HashMap::new();
+    let mut turn_closed: HashSet<(String, String, String)> = HashSet::new();
     let mut session_roots: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut session_branches: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for e in &events {
@@ -896,6 +901,9 @@ pub fn session_patterns(conn: &Connection, opts: &SessionPatternsOpts) -> Result
             }
             "turn.start" => {
                 turn_start.insert((e.instance.clone(), e.session.clone(), e.turn.clone()), e.at_epoch);
+            }
+            "turn.end" => {
+                turn_closed.insert((e.instance.clone(), e.session.clone(), e.turn.clone()));
             }
             "session.start" => {
                 let roots = session_roots.entry(e.session.clone()).or_default();
@@ -912,12 +920,29 @@ pub fn session_patterns(conn: &Connection, opts: &SessionPatternsOpts) -> Result
         }
     }
 
+    // Turnos todavía abiertos (turn.start sin turn.end): una sesión autónoma que se analiza a sí
+    // misma desde dentro de su único turno —la reflexión de un `claude -p`— daba 0 s de agente.
+    // Se cuenta hasta su último evento, y ese tiempo va a la tarea de ese evento.
+    let mut open_last: HashMap<usize, i64> = HashMap::new();
+    {
+        let mut last_idx: HashMap<(String, String, String), usize> = HashMap::new();
+        for (i, e) in events.iter().enumerate() {
+            let k = (e.instance.clone(), e.session.clone(), e.turn.clone());
+            if turn_start.contains_key(&k) && !turn_closed.contains(&k) {
+                last_idx.insert(k, i);
+            }
+        }
+        for (k, i) in last_idx {
+            open_last.insert(i, turn_start[&k]);
+        }
+    }
+
     let mut all = Acc::default();
     let mut by_session: BTreeMap<String, Acc> = BTreeMap::new();
     let mut by_task: BTreeMap<Option<String>, Acc> = BTreeMap::new();
     let mut last_cost: HashMap<(String, String, String), f64> = HashMap::new();
 
-    for e in &events {
+    for (i, e) in events.iter().enumerate() {
         let task_key = if e.task.is_empty() { None } else { Some(e.task.clone()) };
         if let Some(t) = &opts.task {
             if task_key.as_deref() != Some(t.as_str()) {
@@ -958,6 +983,12 @@ pub fn session_patterns(conn: &Connection, opts: &SessionPatternsOpts) -> Result
             let tacc = by_task.entry(task_key.clone()).or_default();
             tacc.add(e, agent_ms, cost_delta, ed, ok, pr);
             tacc.related.insert(e.session.clone());
+        }
+        if let Some(start) = open_last.get(&i) {
+            let open_ms = (e.at_epoch - start).max(0);
+            all.agent_ms += open_ms;
+            sacc_agent(&mut by_session, &e.session, open_ms);
+            by_task.entry(task_key.clone()).or_default().agent_ms += open_ms;
         }
     }
 

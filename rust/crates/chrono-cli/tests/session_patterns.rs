@@ -381,3 +381,32 @@ fn merge_no_cuenta_la_base_si_la_tarea_tiene_otra_rama() {
     assert_eq!(t2["merge"]["branches"], serde_json::json!(["main"]));
     assert_eq!(t2["merge"]["status"], "merged", "trabajada directamente en la base");
 }
+
+/// Un turno sin `turn.end` (una sesión autónoma que se analiza desde dentro de su único turno) cuenta
+/// como tiempo de agente hasta su último evento, y ese tiempo es de la tarea de ese evento. Un turno
+/// cerrado sigue contando su `duration_ms`, sin sumar dos veces.
+#[test]
+fn turno_abierto_cuenta_hasta_su_ultimo_evento() {
+    let dir = tempdir("abierto");
+    let ms = |s: i64| s * 1000;
+    let src = r#"{"instance":"i-1","run":"r1","host":"claude","profile":"p","privacy":"completo"}"#;
+    let abierta = format!(
+        r#"{{"nod":1,"source":{src},"events":[{{"seq":1,"ts":{t0},"type":"session.start","session":"s-a","data":{{"interactive":false}}}},{{"seq":2,"ts":{t0},"type":"turn.start","session":"s-a","turn":"u1","data":{{}}}},{{"seq":3,"ts":{t1},"type":"task.set","session":"s-a","task":"EP-9","data":{{"task":"EP-9","source":"trycore"}}}},{{"seq":4,"ts":{t2},"type":"turn.step","session":"s-a","turn":"u1","task":"EP-9","data":{{"index":0,"usage":{{"input":1,"output":1,"cache_read":0,"cache_write":0}}}}}},{{"seq":5,"ts":{t3},"type":"tool.call","session":"s-a","turn":"u1","task":"EP-9","data":{{"tool":"Bash","tool_use_id":"x1"}}}}]}}"#,
+        t0 = ms(T0), t1 = ms(T0) + 5, t2 = ms(T0 + 5), t3 = ms(T0 + 40)
+    );
+    let src2 = src.replace("\"r1\"", "\"r2\"");
+    let cerrada = format!(
+        r#"{{"nod":1,"source":{src2},"events":[{{"seq":1,"ts":{t0},"type":"session.start","session":"s-b","data":{{"interactive":false}}}},{{"seq":2,"ts":{t0},"type":"turn.start","session":"s-b","turn":"u2","task":"EP-8","data":{{}}}},{{"seq":3,"ts":{t1},"type":"turn.end","session":"s-b","turn":"u2","task":"EP-8","data":{{"outcome":"answer","duration_ms":10000}}}}]}}"#,
+        t0 = ms(T0 + 100), t1 = ms(T0 + 110)
+    );
+    let nod = dir.0.join("events.jsonl");
+    std::fs::write(&nod, format!("{abierta}\n{cerrada}\n")).unwrap();
+    chrono(&["init", nod.to_str().unwrap()], &dir.0);
+    let db = dir.0.join(".chrono/index.db");
+    let out: Value =
+        serde_json::from_str(&chrono(&["session_patterns", "--db", db.to_str().unwrap()], &dir.0)).unwrap();
+    let r = &out["result"];
+    assert_eq!(find(&r["tasks"], "task", "EP-9")["time"]["agent_ms"], 40_000, "turno abierto: de turn.start al último evento");
+    assert_eq!(find(&r["tasks"], "task", "EP-8")["time"]["agent_ms"], 10_000, "turno cerrado: su duration_ms");
+    assert_eq!(find(&r["sessions"], "session", "s-a")["time"]["agent_ms"], 40_000);
+}
