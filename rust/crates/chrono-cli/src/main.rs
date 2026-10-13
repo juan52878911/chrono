@@ -36,7 +36,8 @@ Index:
                        --as nod for a Nod event file that is still empty).
   sync [path]          Process only the delta since the last watermark (all sources).
 
-Queries (JSON, schema_version 2: `entity`/`id`):
+Queries (JSON, schema_version 2: `entity`/`id`; add --compact for a plain-text table of `result`
+only, without metadata: about 2-5x smaller and byte-identical for the same index, meant for agents):
   hotspots             Entities that change most and weigh most.
   coupling <entity>    What changes together with this entity.
   owners <path>        Ownership by author and bus factor.
@@ -172,6 +173,7 @@ struct Flags {
     task: Option<String>,
     session: Option<String>,
     hotspots: Option<String>,
+    compact: bool,
     pos: Vec<String>,
 }
 
@@ -219,6 +221,7 @@ fn parse_args(args: &[String]) -> Flags {
                 f.entity = Some(args[i].clone());
             }
             "--symbols" => f.symbols = true,
+            "--compact" => f.compact = true,
             "--source" if i + 1 < args.len() => {
                 i += 1;
                 f.source = Some(args[i].clone());
@@ -482,6 +485,7 @@ fn main() {
         }
     };
     match out {
+        Ok(j) if f.compact => print!("{}", j.compact()),
         Ok(j) => print!("{}", j.pretty()),
         Err(e) => fatal(e),
     }

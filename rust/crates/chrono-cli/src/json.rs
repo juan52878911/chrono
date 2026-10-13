@@ -94,6 +94,123 @@ impl Json {
     }
 }
 
+/// Salida compacta para un agente (`--compact`): solo el `result` del envelope, sin metadatos ni
+/// `generated_at`, así que el mismo índice da siempre los mismos bytes. Una lista de objetos sale como
+/// tabla (una cabecera y una fila por elemento, columnas separadas por tabulador); un objeto anidado se
+/// aplana como `clave.subclave`; una lista de valores, separada por comas. Si el presupuesto recortó el
+/// resultado, lo dice en una última línea.
+impl Json {
+    pub fn compact(&self) -> String {
+        let mut out = String::new();
+        match self.get("result") {
+            Some(r) => compact_value("", r, &mut out),
+            None => compact_value("", self, &mut out),
+        }
+        if let Some(tb) = self.get("token_budget") {
+            if matches!(tb.get("truncated"), Some(Json::Bool(true))) {
+                let n = |k: &str| match tb.get(k) {
+                    Some(Json::Int(v)) => v.to_string(),
+                    _ => "?".to_string(),
+                };
+                out.push_str(&format!("truncated: {} of max {} (raise --limit)\n", n("returned"), n("max_items")));
+            }
+        }
+        out
+    }
+
+    fn get(&self, key: &str) -> Option<&Json> {
+        match self {
+            Json::Obj(fields) => fields.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    fn is_scalar(&self) -> bool {
+        !matches!(self, Json::Arr(_) | Json::Obj(_))
+    }
+}
+
+fn scalar_text(v: &Json) -> String {
+    match v {
+        Json::Null => "-".to_string(),
+        Json::Bool(b) => b.to_string(),
+        Json::Int(n) => n.to_string(),
+        Json::Float(f) if f.is_finite() => {
+            let s = format!("{:.3}", f);
+            let s = s.trim_end_matches('0').trim_end_matches('.');
+            if s.is_empty() || s == "-0" { "0".to_string() } else { s.to_string() }
+        }
+        Json::Float(_) => "-".to_string(),
+        Json::Str(s) => s.replace(['\t', '\n', '\r'], " "),
+        Json::Arr(items) => {
+            if items.is_empty() {
+                "-".to_string()
+            } else {
+                items.iter().map(scalar_text).collect::<Vec<_>>().join(",")
+            }
+        }
+        Json::Obj(fields) => fields.iter().map(|(k, v)| format!("{k}={}", scalar_text(v))).collect::<Vec<_>>().join(","),
+    }
+}
+
+/// Columnas de una fila: escalares tal cual; un objeto, aplanado un nivel (`clave.subclave`).
+fn row_cells(row: &Json, prefix: &str, cols: &mut Vec<(String, String)>) {
+    if let Json::Obj(fields) = row {
+        for (k, v) in fields {
+            let name = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+            match v {
+                Json::Obj(_) if prefix.is_empty() => row_cells(v, &name, cols),
+                _ => cols.push((name, scalar_text(v))),
+            }
+        }
+    }
+}
+
+fn compact_value(key: &str, v: &Json, out: &mut String) {
+    match v {
+        Json::Obj(fields) => {
+            for (k, val) in fields {
+                let name = if key.is_empty() { k.clone() } else { format!("{key}.{k}") };
+                compact_value(&name, val, out);
+            }
+        }
+        Json::Arr(items) if !items.is_empty() && items.iter().all(|i| matches!(i, Json::Obj(_))) => {
+            // Cabecera: la unión de columnas en orden de aparición (filas heterogéneas incluidas).
+            let rows: Vec<Vec<(String, String)>> = items
+                .iter()
+                .map(|r| {
+                    let mut c = Vec::new();
+                    row_cells(r, "", &mut c);
+                    c
+                })
+                .collect();
+            let mut header: Vec<String> = Vec::new();
+            for r in &rows {
+                for (c, _) in r {
+                    if !header.contains(c) {
+                        header.push(c.clone());
+                    }
+                }
+            }
+            out.push_str(&format!("{} ({}):\n", if key.is_empty() { "rows" } else { key }, rows.len()));
+            out.push_str(&header.join("\t"));
+            out.push('\n');
+            for r in &rows {
+                let line: Vec<String> = header
+                    .iter()
+                    .map(|h| r.iter().find(|(c, _)| c == h).map(|(_, v)| v.clone()).unwrap_or_else(|| "-".to_string()))
+                    .collect();
+                out.push_str(&line.join("\t"));
+                out.push('\n');
+            }
+        }
+        _ => {
+            debug_assert!(v.is_scalar() || matches!(v, Json::Arr(_)));
+            out.push_str(&format!("{}: {}\n", if key.is_empty() { "value" } else { key }, scalar_text(v)));
+        }
+    }
+}
+
 fn indent(out: &mut String, depth: usize) {
     for _ in 0..depth {
         out.push_str("  ");
@@ -118,6 +235,41 @@ fn write_str(s: &str, out: &mut String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compact_es_tabla_sin_envelope_y_determinista() {
+        let env = Json::obj()
+            .set("schema_version", Json::Int(5))
+            .set("generated_at", Json::str("2026-10-13T00:00:00Z"))
+            .set("token_budget", Json::obj().set("max_items", Json::Int(2)).set("returned", Json::Int(2)).set("truncated", Json::Bool(true)))
+            .set(
+                "result",
+                Json::obj().set("for", Json::str("a.rs")).set(
+                    "coupled",
+                    Json::Arr(vec![
+                        Json::obj().set("b", Json::str("b.rs")).set("support", Json::Int(7)).set("confidence", Json::Float(0.8)),
+                        Json::obj().set("b", Json::str("c\tx.rs")).set("support", Json::Int(3)).set("confidence", Json::Float(1.0 / 3.0)),
+                    ]),
+                ),
+            );
+        let c = env.compact();
+        assert_eq!(c, "for: a.rs\ncoupled (2):\nb\tsupport\tconfidence\nb.rs\t7\t0.8\nc x.rs\t3\t0.333\ntruncated: 2 of max 2 (raise --limit)\n");
+        assert!(!c.contains("generated_at") && !c.contains("schema_version"));
+        assert_eq!(c, env.compact());
+    }
+
+    #[test]
+    fn compact_aplana_objetos_y_rellena_columnas() {
+        let r = Json::obj().set(
+            "owners",
+            Json::Arr(vec![
+                Json::obj().set("name", Json::str("Ana")).set("tip", Json::obj().set("sha", Json::str("abc"))),
+                Json::obj().set("name", Json::str("Luis")).set("tags", Json::Arr(vec![Json::str("x"), Json::str("y")])),
+            ]),
+        );
+        let c = Json::obj().set("result", r).compact();
+        assert_eq!(c, "owners (2):\nname\ttip.sha\ttags\nAna\tabc\t-\nLuis\t-\tx,y\n");
+    }
+
     use super::*;
 
     #[test]
