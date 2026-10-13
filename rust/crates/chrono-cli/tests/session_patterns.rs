@@ -332,3 +332,52 @@ fn session_patterns_sin_nod_ni_git_avisa() {
     let notes: Vec<&str> = r["notes"].as_array().unwrap().iter().map(|n| n.as_str().unwrap()).collect();
     assert!(notes.iter().any(|n| n.contains("no git commits")));
 }
+
+/// La rama base cuenta como mergeada consigo misma: si una sesión arrancó en `main` y luego trabajó en una
+/// rama que no se ha integrado, la tarea no puede salir `merged` por la base. Solo una tarea que vive
+/// únicamente en la base (se trabajó directamente sobre ella) sale `merged` por ella.
+#[test]
+fn merge_no_cuenta_la_base_si_la_tarea_tiene_otra_rama() {
+    let dir = tempdir("base");
+    let repo = dir.0.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"], T0);
+    write(&repo, "a.txt", "a\n");
+    commit(&repo, "inicio", T0);
+    git(&repo, &["checkout", "-q", "-b", "feature/EP-1-login"], T0 + D);
+    write(&repo, "b.txt", "b\n");
+    let sha_feat = commit(&repo, "EP-1 login", T0 + D);
+    git(&repo, &["checkout", "-q", "main"], T0 + D + 60);
+    write(&repo, "c.txt", "c\n");
+    let sha_main = commit(&repo, "EP-2 directo en main", T0 + 2 * D);
+    let root = repo.to_string_lossy().to_string();
+
+    let ms = |s: i64| s * 1000;
+    let env = |run: &str, session: &str, task: &str, branch: &str, sha: &str, at: i64| {
+        format!(
+            r#"{{"nod":1,"source":{{"instance":"i-1","run":"{run}","host":"claude","profile":"p","privacy":"completo"}},"events":[{{"seq":1,"ts":{t0},"type":"session.start","session":"{session}","data":{{"interactive":true,"repo":{{"root":"{root}","branch":"main"}}}}}},{{"seq":2,"ts":{t1},"type":"task.set","session":"{session}","task":"{task}","data":{{"task":"{task}","source":"trycore"}}}},{{"seq":3,"ts":{t2},"type":"vcs.commit","session":"{session}","task":"{task}","data":{{"sha":"{sha}","branch":"{branch}"}}}}]}}"#,
+            t0 = ms(at), t1 = ms(at) + 1, t2 = ms(at) + 2
+        )
+    };
+    let nod = dir.0.join("events.jsonl");
+    std::fs::write(
+        &nod,
+        format!("{}\n{}\n", env("r1", "s-a", "EP-1", "feature/EP-1-login", &sha_feat, T0 + D), env("r2", "s-b", "EP-2", "main", &sha_main, T0 + 2 * D)),
+    )
+    .unwrap();
+    let db = repo.join(".chrono/index.db");
+    let db_s = db.to_string_lossy().to_string();
+    chrono(&["init", &root], &dir.0);
+    chrono(&["add", nod.to_str().unwrap(), "--as", "nod", "--db", &db_s], &dir.0);
+    let out: Value = serde_json::from_str(&chrono(&["session_patterns", "--db", &db_s], &dir.0)).unwrap();
+    let r = &out["result"];
+
+    let t1 = find(&r["tasks"], "task", "EP-1");
+    assert_eq!(t1["merge"]["branches"], serde_json::json!(["feature/EP-1-login", "main"]));
+    assert_eq!(t1["merge"]["status"], "not_merged", "la sesión arrancó en main, pero su rama no está integrada");
+    assert_eq!(t1["merge"]["via"], "branch");
+
+    let t2 = find(&r["tasks"], "task", "EP-2");
+    assert_eq!(t2["merge"]["branches"], serde_json::json!(["main"]));
+    assert_eq!(t2["merge"]["status"], "merged", "trabajada directamente en la base");
+}

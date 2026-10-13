@@ -821,7 +821,19 @@ impl Ctx<'_> {
         if prs.iter().any(|p| p.2) {
             return mk("merged", "pr", "", prs);
         }
-        let known: Vec<bool> = branches.iter().filter_map(|b| self.opts.branch_merged.get(b).copied()).collect();
+        // La base cuenta como mergeada consigo misma. Si el grupo tiene otra rama conocida (la sesión arrancó en
+        // la base y luego trabajó en una rama), decide esa rama; la base solo cuenta cuando es la única.
+        let base = &self.opts.base_branch;
+        let other: Vec<bool> = branches
+            .iter()
+            .filter(|b| base.is_empty() || *b != base)
+            .filter_map(|b| self.opts.branch_merged.get(b).copied())
+            .collect();
+        let known: Vec<bool> = if other.is_empty() {
+            branches.iter().filter_map(|b| self.opts.branch_merged.get(b).copied()).collect()
+        } else {
+            other
+        };
         if known.iter().any(|m| *m) {
             return mk("merged", "branch", "", prs);
         }
