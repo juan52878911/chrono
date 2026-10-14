@@ -17,7 +17,7 @@ use crate::config::{self, scalar_to_string, JsonlOverrides};
 use crate::path::Scope;
 use crate::simhash::{fnv1a64_line, simhash, tokenize};
 use crate::timeutil::{epoch_to_iso8601, parse_time_value};
-use chrono_core::{Actor, Event, Touch};
+use chrono_core::{Actor, Event, Link, Touch};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
@@ -114,18 +114,34 @@ fn scalar_attrs(scope: &Scope<'_>) -> BTreeMap<String, String> {
 pub fn line_to_events(obj: &Map<String, Value>, raw_line: &str, offset: u64, ov: &JsonlOverrides, source_id: &str) -> Vec<Event> {
     match &ov.explode {
         None => {
-            let id = compute_id(obj, raw_line, offset);
-            vec![build_event(&Scope::root_only(obj), id, raw_line, ov, source_id)]
+            let scope = Scope::root_only(obj);
+            let id = configured_id(&scope, ov, source_id).unwrap_or_else(|| compute_id(obj, raw_line, offset));
+            vec![build_event(&scope, id, raw_line, ov, source_id)]
         }
         Some(spec) => spec
             .elements(obj)
             .into_iter()
             .map(|(idx, elem)| {
                 let scope = Scope { elem: Some(elem), root: obj };
-                build_event(&scope, exploded_id(raw_line, offset, idx), raw_line, ov, source_id)
+                let id = configured_id(&scope, ov, source_id).unwrap_or_else(|| exploded_id(raw_line, offset, idx));
+                build_event(&scope, id, raw_line, ov, source_id)
             })
             .collect(),
     }
+}
+
+/// Id desde `id_field`, si está configurado y resuelve. Lleva delante el nombre
+/// del fichero de la fuente (`runs.cmd.jsonl:38635246893`): el mismo número
+/// puede ser el id de una ejecución en una fuente y de un job en otra, y los ids
+/// de evento son únicos en todo el índice.
+fn configured_id(scope: &Scope<'_>, ov: &JsonlOverrides, source_id: &str) -> Option<String> {
+    let field = ov.id_field.as_deref()?;
+    let v = field_value(scope, field);
+    if v.is_empty() {
+        return None;
+    }
+    let base = source_id.rsplit(['/', ':']).next().unwrap_or(source_id);
+    Some(format!("{base}:{v}"))
 }
 
 fn build_event(scope: &Scope<'_>, id: String, raw_line: &str, ov: &JsonlOverrides, source_id: &str) -> Event {
@@ -171,10 +187,26 @@ fn build_event(scope: &Scope<'_>, id: String, raw_line: &str, ov: &JsonlOverride
     let toks = tokenize(&title);
     let hash = simhash(&toks);
 
+    let kind = ov
+        .kind_field
+        .as_deref()
+        .map(|f| field_value(scope, f))
+        .filter(|k| !k.is_empty())
+        .or_else(|| ov.kind.clone())
+        .unwrap_or_else(|| "log".to_string());
+    let links: Vec<Link> = ov
+        .links
+        .iter()
+        .filter_map(|(rel, field)| {
+            let target = field_value(scope, field);
+            (!target.is_empty()).then(|| Link { rel: rel.clone(), target })
+        })
+        .collect();
+
     Event {
         id,
         source_id: source_id.to_string(),
-        kind: "log".to_string(),
+        kind,
         at,
         at_epoch,
         actor,
@@ -183,7 +215,7 @@ fn build_event(scope: &Scope<'_>, id: String, raw_line: &str, ov: &JsonlOverride
         level,
         attrs: scalar_attrs(scope),
         touches: vec![Touch { entity, entity_type: "log-source".to_string(), weight: 1, attrs: BTreeMap::new() }],
-        links: Vec::new(),
+        links,
         simhash: hash,
         is_bulk: false, // un único touch por evento: nunca es "bulk" en logs.
     }
@@ -369,5 +401,27 @@ mod tests {
         let evs = line_to_events(&sample, "{}", 0, &ov_with(&[("explode", "xs[]")]), "s");
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].attrs["k"], "v");
+    }
+
+    #[test]
+    fn kind_id_field_y_links_configurables() {
+        let ov = JsonlOverrides {
+            kind: Some("ci.run".into()),
+            id_field: Some("databaseId".into()),
+            links: vec![("commit".into(), "headSha".into()), ("url".into(), "url".into()), ("nada".into(), "falta".into())],
+            ..Default::default()
+        };
+        let line = r#"{"databaseId":38635246893,"headSha":"da96b30d","url":"https://x/1","conclusion":"failure","createdAt":"2026-10-14T19:02:58Z","displayTitle":"Merge #114"}"#;
+        let o: Map<String, Value> = serde_json::from_str(line).unwrap();
+        let ev = &line_to_events(&o, line, 0, &ov, "jsonl:/r/.chrono/cmd/runs.cmd.jsonl")[0];
+        assert_eq!(ev.kind, "ci.run");
+        assert_eq!(ev.id, "runs.cmd.jsonl:38635246893");
+        assert_eq!(
+            ev.links,
+            vec![Link { rel: "commit".into(), target: "da96b30d".into() }, Link { rel: "url".into(), target: "https://x/1".into() }]
+        );
+        // kind_field gana a kind cuando resuelve.
+        let ov2 = JsonlOverrides { kind: Some("x".into()), kind_field: Some("conclusion".into()), ..Default::default() };
+        assert_eq!(line_to_events(&o, line, 0, &ov2, "jsonl:/a")[0].kind, "failure");
     }
 }

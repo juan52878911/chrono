@@ -84,6 +84,20 @@ pub struct JsonlOverrides {
     pub entity_field: Option<String>,
     pub actor_field: Option<String>,
     pub explode: Option<ExplodeSpec>,
+    /// `kind` fijo de los eventos (por defecto `log`): `ci.run`, `deploy`… Es lo
+    /// que permite a `correlate --kind`/`events --kind` separar fuentes que no
+    /// son logs (ejecuciones de CI, despliegues, incidentes).
+    pub kind: Option<String>,
+    /// Campo del que sale el `kind` de cada evento (gana a `kind` si resuelve).
+    pub kind_field: Option<String>,
+    /// Campo con el id estable del registro (`databaseId`, `run_id`…). Sin él,
+    /// el id es el de siempre (`id`/`_id`/`uuid` o hash de línea+offset).
+    pub id_field: Option<String>,
+    /// Enlaces `rel=campo` separados por comas (`commit=headSha,url=url`): un
+    /// `Link { rel, target: valor del campo }` por cada uno que resuelva. Con
+    /// `rel=commit` el evento queda unido al commit (lo siguen `trace` y la
+    /// resolución por prefijo de sha).
+    pub links: Vec<(String, String)>,
 }
 
 /// Resolución de campos para una única línea u otra "muestra" representativa
@@ -158,7 +172,22 @@ pub fn overrides_from(cfg: &SourceConfig) -> JsonlOverrides {
         entity_field: override_of(&cfg.options, "entity_field"),
         actor_field: override_of(&cfg.options, "actor_field"),
         explode,
+        kind: override_of(&cfg.options, "kind"),
+        kind_field: override_of(&cfg.options, "kind_field"),
+        id_field: override_of(&cfg.options, "id_field"),
+        links: option_trimmed(&cfg.options, "links").map(|s| parse_links(&s)).unwrap_or_default(),
     }
+}
+
+/// `rel=campo,rel2=campo2` → pares; ignora los trozos sin `=` o vacíos.
+fn parse_links(s: &str) -> Vec<(String, String)> {
+    s.split(',')
+        .filter_map(|part| {
+            let (rel, field) = part.split_once('=')?;
+            let (rel, field) = (rel.trim(), field.trim());
+            (!rel.is_empty() && !field.is_empty()).then(|| (rel.to_string(), field.to_string()))
+        })
+        .collect()
 }
 
 /// Resuelve el selector para UN ámbito concreto: el override si lo hay (se

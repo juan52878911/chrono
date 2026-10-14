@@ -1,0 +1,40 @@
+{
+  "commands": {
+    "gh-runs": {
+      "run": ["gh", "run", "list", "--repo", "OWNER/REPO", "--limit", "500",
+              "--json", "databaseId,workflowName,displayTitle,headBranch,headSha,event,status,conclusion,createdAt,updatedAt,url,number,attempt"],
+      "options": {
+        "kind": "ci.run", "id_field": "databaseId", "time_field": "createdAt",
+        "message_field": "displayTitle", "level_field": "conclusion",
+        "entity_field": "workflowName", "actor_field": "headBranch",
+        "links": "commit=headSha,url=url"
+      }
+    },
+    "gh-deploys": {
+      "run": ["sh", "-c", "for w in 'CD Sandbox' 'CD Producción'; do gh run list --repo OWNER/REPO --workflow \"$w\" --limit 200 --json databaseId,workflowName,displayTitle,headBranch,headSha,conclusion,createdAt,updatedAt,url; done | jq -s add"],
+      "options": {
+        "kind": "ci.deploy", "id_field": "databaseId", "time_field": "createdAt",
+        "message_field": "displayTitle", "level_field": "conclusion",
+        "entity_field": "workflowName", "actor_field": "headBranch",
+        "links": "commit=headSha,url=url"
+      }
+    },
+    "gh-steps": {
+      "run": ["bash", ".chrono/scripts/gh-steps.sh", "OWNER/REPO", "60"],
+      "timeout_secs": 900,
+      "options": {
+        "kind": "ci.step", "explode": "steps", "id_field": "step_id",
+        "time_field": "started_at", "message_field": "step", "level_field": "conclusion",
+        "entity_field": "job", "actor_field": "workflow", "links": "commit=head_sha"
+      }
+    },
+    "gh-fallos": {
+      "run": ["bash", ".chrono/scripts/gh-fallos.sh", "OWNER/REPO", "25"],
+      "timeout_secs": 900,
+      "options": {
+        "kind": "ci.log", "time_field": "ts", "message_field": "msg", "level_field": "level",
+        "entity_field": "job", "actor_field": "workflow", "links": "commit=head_sha"
+      }
+    }
+  }
+}

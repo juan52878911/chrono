@@ -19,6 +19,7 @@ mod phases;
 mod search;
 mod session_patterns;
 mod similar;
+mod stats;
 mod ticket;
 mod timeline;
 mod top;
@@ -40,7 +41,8 @@ pub use session_patterns::{
 };
 pub use similar::{similar, SimilarRow};
 pub use ticket::{ticket, Ticket};
-pub use timeline::{timeline, TimelineBucket};
+pub use stats::{stats, StatRow};
+pub use timeline::{timeline, timeline_scoped, EventScope, TimelineBucket};
 pub use top::{top, TopValue, top_filtered, TopFilter};
 pub use trace::{trace, Trace, TraceNode};
 

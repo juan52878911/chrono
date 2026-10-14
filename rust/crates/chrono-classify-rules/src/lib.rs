@@ -70,7 +70,43 @@ pub struct Config {
     /// Cap de eventos ingeridos por fuente (0 = sin cap, por defecto). Si >0,
     /// se corta la ingesta y se declara en `meta` (`max_events_per_source`).
     pub max_events_per_source: usize,
+    /// Fuentes de COMANDO: nombre -> qué ejecutar y cómo leer su salida. Se
+    /// añaden con `chrono add cmd:<nombre>` y `chrono sync` las vuelve a
+    /// ejecutar. Es lo que hace a chrono generalista sin red propia: cualquier
+    /// herramienta que imprima JSON (gh, kubectl, docker, una API vía curl, un
+    /// script) se convierte en una fuente más, correlacionable con el resto.
+    /// Solo se ejecuta lo que está escrito aquí, nunca algo que venga de los datos.
+    pub commands: BTreeMap<String, CommandSpec>,
 }
+
+/// Una fuente de comando (ver [`Config::commands`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CommandSpec {
+    /// argv: programa y argumentos, SIN shell (`["gh", "run", "list", …]`).
+    /// Para encadenar, el usuario pone su propio `["sh", "-c", "…"]`.
+    pub run: Vec<String>,
+    /// Ruta JSON al array de registros dentro de la salida (`data.items`,
+    /// `jobs`). Vacía: la salida es un array, un objeto (un registro) o NDJSON.
+    pub records: String,
+    /// Opciones del adaptador JSONL para esos registros: `time_field`,
+    /// `message_field`, `level_field`, `entity_field`, `kind`, `id_field`,
+    /// `links`, `explode`… (las mismas que `source_options`).
+    pub options: BTreeMap<String, String>,
+    /// Tiempo máximo de ejecución, en segundos (por defecto 120).
+    pub timeout_secs: u64,
+    /// Directorio de trabajo; vacío = la raíz del índice.
+    pub cwd: String,
+}
+
+impl Default for CommandSpec {
+    fn default() -> Self {
+        CommandSpec { run: Vec::new(), records: String::new(), options: BTreeMap::new(), timeout_secs: 120, cwd: String::new() }
+    }
+}
+
+/// Sufijo del caché de una fuente de comando: `<nombre>.cmd.jsonl`.
+pub const COMMAND_CACHE_SUFFIX: &str = ".cmd.jsonl";
 
 impl Default for Config {
     fn default() -> Self {
@@ -256,6 +292,7 @@ impl Config {
             source_options: BTreeMap::new(),
             body_max_bytes: 0,
             max_events_per_source: 0,
+            commands: BTreeMap::new(),
         }
     }
 
@@ -271,6 +308,12 @@ impl Config {
         if let Some(base) = ingest_path.file_name().and_then(|s| s.to_str()) {
             if let Some(opts) = self.source_options.get(base) {
                 return opts.clone();
+            }
+            // El caché de una fuente de comando hereda las opciones del comando.
+            if let Some(spec) = base.strip_suffix(COMMAND_CACHE_SUFFIX).and_then(|n| self.commands.get(n)) {
+                let mut opts = spec.options.clone();
+                opts.entry("adapter".to_string()).or_insert_with(|| "jsonl".to_string());
+                return opts;
             }
         }
         BTreeMap::new()

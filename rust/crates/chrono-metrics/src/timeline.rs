@@ -110,6 +110,105 @@ pub fn timeline(
     Ok(out)
 }
 
+/// Qué eventos cuenta un `timeline`/`stats` acotado. Todos opcionales; vacío =
+/// sin filtro. `source` y `kind` aceptan un prefijo (`ci.*`, o un tipo de
+/// fuente sin `:`), como en `events`/`patterns`.
+#[derive(Debug, Clone, Default)]
+pub struct EventScope<'a> {
+    pub source: Option<&'a str>,
+    pub grep: Option<&'a str>,
+    pub level: Option<&'a str>,
+    pub kind: Option<&'a str>,
+}
+
+impl EventScope<'_> {
+    pub fn is_empty(&self) -> bool {
+        [self.source, self.grep, self.level, self.kind].iter().all(|v| v.map_or(true, str::is_empty))
+    }
+
+    /// `(cláusulas SQL sobre el alias `e`, parámetros)`, numerados desde `first`.
+    pub(crate) fn sql(&self, first: usize) -> (String, Vec<String>) {
+        let mut sql = String::new();
+        let mut params: Vec<String> = Vec::new();
+        let mut push = |clause: &str, value: String| {
+            let n = first + params.len();
+            sql.push_str(&format!(" AND {}", clause.replace("?N", &format!("?{n}"))));
+            params.push(value);
+        };
+        if let Some(s) = self.source.filter(|s| !s.is_empty()) {
+            let like = if s.contains(':') { format!("{s}%") } else { format!("{s}:%") };
+            push("e.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?N)", like);
+        }
+        if let Some(g) = self.grep.filter(|g| !g.is_empty()) {
+            push("e.title LIKE ?N", format!("%{g}%"));
+        }
+        if let Some(l) = self.level.filter(|l| !l.is_empty()) {
+            push("e.level = ?N COLLATE NOCASE", l.to_string());
+        }
+        if let Some(k) = self.kind.filter(|k| !k.is_empty()) {
+            match k.strip_suffix('*') {
+                Some(prefix) => push("e.kind LIKE ?N", format!("{prefix}%")),
+                None => push("e.kind = ?N", k.to_string()),
+            }
+        }
+        (sql, params)
+    }
+}
+
+/// Como [`timeline`], contando solo los eventos de `scope`: «¿desde cuándo
+/// aparece este error?», «¿cuántos despliegues fallidos por semana?». Siempre
+/// barre `events` (los rollups no guardan nivel ni kind).
+pub fn timeline_scoped(
+    conn: &Connection,
+    since_epoch: i64,
+    until_epoch: i64,
+    bucket_secs: i64,
+    group_by: Option<&str>,
+    scope: &EventScope,
+    limit: usize,
+) -> Result<Vec<TimelineBucket>> {
+    if scope.is_empty() {
+        return timeline(conn, since_epoch, until_epoch, bucket_secs, group_by, limit);
+    }
+    if bucket_secs <= 0 {
+        return Err("timeline: bucket_secs must be > 0".into());
+    }
+    let key_expr = match group_by {
+        None => "''",
+        Some("level") => "e.level",
+        Some("kind") => "e.kind",
+        Some(other) => return Err(format!("timeline: unsupported group_by: {other}").into()),
+    };
+    let (filters, extra) = scope.sql(5);
+    let sql = format!(
+        "SELECT bucket_epoch, key, COUNT(*) AS count FROM (
+             SELECT e.at_epoch - ((e.at_epoch % ?1 + ?1) % ?1) AS bucket_epoch, {key_expr} AS key
+             FROM events e
+             WHERE e.at_epoch > 0
+               AND (?2 = 0 OR e.at_epoch >= ?2)
+               AND (?3 = 0 OR e.at_epoch < ?3)
+               {filters}
+         )
+         GROUP BY bucket_epoch, key
+         ORDER BY bucket_epoch ASC, key ASC
+         LIMIT ?4"
+    );
+    let sql_limit: i64 = if limit == 0 { -1 } else { limit as i64 };
+    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&bucket_secs, &since_epoch, &until_epoch, &sql_limit];
+    for p in &extra {
+        bound.push(p);
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(bound), |r| {
+        Ok(TimelineBucket { bucket_epoch: r.get(0)?, key: r.get(1)?, count: r.get(2)? })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 /// Lee un valor de `meta` como `i64`, o `None` si la clave falta o no parsea.
 fn meta_i64(conn: &Connection, key: &str) -> Result<Option<i64>> {
     let v: Option<String> = conn

@@ -532,6 +532,7 @@ pub fn timeline(
     until: Option<&str>,
     bucket: Option<&str>,
     by: Option<&str>,
+    scope: &chrono_metrics::EventScope,
     limit: Option<&str>,
 ) -> Result<Json> {
     const DEFAULT_BUCKET: i64 = 3_600_000; // 1h en ms
@@ -559,7 +560,7 @@ pub fn timeline(
         None | Some("") => None,
         Some(b) => Some(b),
     };
-    let rows = chrono_metrics::timeline(store.conn(), w.since_epoch, until_epoch, bucket_ms, group_by, limit)?;
+    let rows = chrono_metrics::timeline_scoped(store.conn(), w.since_epoch, until_epoch, bucket_ms, group_by, scope, limit)?;
     let items: Vec<Json> = rows
         .iter()
         .map(|b| {
@@ -887,4 +888,35 @@ pub fn session_patterns(
         .set("sessions", Json::Arr(sessions))
         .set("notes", strs(&sp.notes, sp.notes.len()));
     envelope(store, "session_patterns", w, limit, returned, result)
+}
+
+/// `stats <attr>`: min/p50/p95/max/suma de un atributo numérico por grupo
+/// (`--by level|kind|entity|attr:<k>`), con los filtros de siempre.
+pub fn stats(
+    store: &Store,
+    w: &Window,
+    attr: &str,
+    by: Option<&str>,
+    scope: &chrono_metrics::EventScope,
+    limit: Option<&str>,
+) -> Result<Json> {
+    const DEFAULT_LIMIT: usize = 25;
+    let limit = parse_limit(limit, DEFAULT_LIMIT)?;
+    let rows = chrono_metrics::stats(store.conn(), attr, by, w.since_epoch, scope, limit)?;
+    let items: Vec<Json> = rows
+        .iter()
+        .map(|r| {
+            Json::obj()
+                .set("group", Json::str(&r.group))
+                .set("count", Json::Int(r.count))
+                .set("min", Json::Float(r.min))
+                .set("p50", Json::Float(r.p50))
+                .set("p95", Json::Float(r.p95))
+                .set("max", Json::Float(r.max))
+                .set("sum", Json::Float(r.sum))
+        })
+        .collect();
+    let n = items.len();
+    let result = Json::obj().set("attr", Json::str(attr)).set("by", by.map_or(Json::Null, Json::str)).set("groups", Json::Arr(items));
+    envelope(store, "stats", w, limit, n, result)
 }

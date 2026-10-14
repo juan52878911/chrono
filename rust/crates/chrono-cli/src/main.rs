@@ -9,6 +9,7 @@
 
 mod glob;
 mod i18n;
+mod command;
 mod index;
 mod json;
 mod query;
@@ -56,7 +57,10 @@ Symbols (git, needs 'init --symbols'):
   (entity key 'file#func'), e.g. chrono hotspots --by symbol.
 
 Log-native (multi-source):
-  timeline             Event counts per time bucket (--bucket 1h, --by level|kind).
+  timeline             Event counts per time bucket (--bucket 1h, --by level|kind;
+                       --source/--kind/--level/--grep narrow them).
+  stats <attr>         min/p50/p95/max/sum of a numeric attribute per group
+                       (--by level|kind|entity|attr:<k>; same filters as timeline).
   top <dim>            Most frequent values of a dimension (level|kind|actor|entity|attr:<k>);
                        --source, --grep and --level narrow the events counted.
   patterns             Most frequent log templates (Drain-light clustering);
@@ -122,7 +126,10 @@ Símbolos (git, requiere 'init --symbols'):
   (clave de entidad 'fichero#func'), p.ej. chrono hotspots --by symbol.
 
 Log-native (multi-fuente):
-  timeline             Conteo de eventos por bucket temporal (--bucket 1h, --by level|kind).
+  timeline             Conteo de eventos por bucket temporal (--bucket 1h, --by level|kind;
+                       --source/--kind/--level/--grep los acotan).
+  stats <attr>         min/p50/p95/max/suma de un atributo numérico por grupo
+                       (--by level|kind|entity|attr:<c>; mismos filtros que timeline).
   top <dim>            Valores más frecuentes de una dimensión (level|kind|actor|entity|attr:<c>);
                        --source, --grep y --level acotan los eventos que cuenta.
   patterns             Plantillas de log más frecuentes (clustering Drain-light);
@@ -281,6 +288,42 @@ fn usage() -> String {
     raw.replace("{v}", VERSION)
 }
 
+/// Ejecuta las fuentes de comando de la config (todas, o solo `only`) y
+/// devuelve el caché de `only`. Un comando que falla avisa y no para el resto:
+/// el sync de las demás fuentes no debe depender de que `gh` tenga red.
+fn refresh_commands(db: &Path, only: Option<&str>) -> Option<PathBuf> {
+    let root = index::index_root_of(db);
+    let cfg = chrono_classify_rules::load(&root);
+    let mut found = None;
+    for (name, spec) in &cfg.commands {
+        if only.is_some_and(|o| o != name) {
+            continue;
+        }
+        // En un sync completo solo se refrescan los comandos ya añadidos.
+        if only.is_none() && !command::cache_path(db, name).exists() {
+            continue;
+        }
+        match command::materialize(db, &root, name, spec) {
+            Ok(m) => {
+                eprintln!("{}", t(
+                    format!("  cmd:{name}: {} records, {} new", m.records, m.added),
+                    format!("  cmd:{name}: {} registros, {} nuevos", m.records, m.added),
+                ));
+                if only.is_some() {
+                    found = Some(m.cache);
+                }
+            }
+            Err(e) => {
+                eprintln!("chrono: cmd:{name}: {e}");
+                if only.is_some() {
+                    fatal(e.to_string());
+                }
+            }
+        }
+    }
+    found
+}
+
 fn fatal(msg: impl std::fmt::Display) -> ! {
     // "chrono: error:" no se traduce (paridad literal con el Go).
     eprintln!("chrono: error: {msg}");
@@ -321,7 +364,7 @@ fn require_pos(f: &Flags, msg_en: &str, msg_es: &str) -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let f = parse_args(&args);
+    let mut f = parse_args(&args);
     i18n::init(f.lang.as_deref());
 
     let Some(cmd) = f.pos.first().map(String::as_str) else {
@@ -361,8 +404,30 @@ fn main() {
 
     // Comandos que necesitan un índice existente.
     let db = resolve_db(&f);
+    // `--source cmd:<nombre>` es el alias de la fuente de un comando: su id real
+    // es la ruta absoluta del caché (`jsonl:/…/cmd/<nombre>.cmd.jsonl`).
+    if let Some(name) = f.source.as_deref().and_then(|s| s.strip_prefix(command::PREFIX)) {
+        let cache = command::cache_path(&db, name);
+        let abs = std::fs::canonicalize(&cache).unwrap_or(cache);
+        f.source = Some(format!("jsonl:{}", abs.display()));
+    }
     if cmd == "sync" {
-        let repo = f.pos.get(1).map(Path::new);
+        // Las fuentes de comando se refrescan ANTES del sync: vuelven a
+        // ejecutarse y añaden a su caché lo nuevo, que el sync procesa como el
+        // delta de cualquier fichero. `sync cmd:<nombre>` refresca solo esa.
+        let arg = f.pos.get(1).cloned();
+        let only = arg.as_deref().and_then(|a| a.strip_prefix(command::PREFIX));
+        let synced_path;
+        let repo = match only {
+            Some(name) => {
+                synced_path = refresh_commands(&db, Some(name));
+                synced_path.as_deref()
+            }
+            None => {
+                refresh_commands(&db, None);
+                arg.as_deref().map(Path::new)
+            }
+        };
         if let Err(e) = index::sync(&db, repo) {
             fatal(e);
         }
@@ -370,7 +435,18 @@ fn main() {
     }
     if cmd == "add" {
         let path = require_pos(&f, "add needs a <path> (a repo or a log file)", "add necesita una <ruta> (un repo o un fichero de log)");
-        if let Err(e) = index::add(&db, Path::new(&path), f.symbols, f.as_kind.as_deref()) {
+        // `add cmd:<nombre>`: ejecuta el comando de la config y añade su caché.
+        let (path, as_kind) = match path.strip_prefix(command::PREFIX) {
+            Some(name) => match refresh_commands(&db, Some(name)) {
+                Some(cache) => (cache.to_string_lossy().into_owned(), Some("jsonl".to_string())),
+                None => fatal(t(
+                    format!("no command {name:?} in .chrono/config.json (\"commands\")"),
+                    format!("no hay un comando {name:?} en .chrono/config.json (\"commands\")"),
+                )),
+            },
+            None => (path, f.as_kind.clone()),
+        };
+        if let Err(e) = index::add(&db, Path::new(&path), f.symbols, as_kind.as_deref()) {
             fatal(e);
         }
         return;
@@ -400,6 +476,13 @@ fn main() {
     // `--by symbol` cambia el alcance de las consultas de entidades a símbolos
     // (S1); por defecto (o `--by file`) se excluyen los símbolos.
     let symbols_only = f.by.as_deref() == Some("symbol");
+    // Filtros comunes de las consultas log-native que los aceptan (timeline, stats).
+    let scope = chrono_metrics::EventScope {
+        source: f.source.as_deref(),
+        grep: f.grep.as_deref(),
+        level: f.level.as_deref(),
+        kind: f.kind.as_deref(),
+    };
     let out = match cmd {
         "hotspots" => query::hotspots(&store, &window, symbols_only),
         "coupling" => {
@@ -438,7 +521,11 @@ fn main() {
             let id = require_pos(&f, "similar needs an <id>", "similar necesita un <id>");
             query::similar(&store, &id)
         }
-        "timeline" => query::timeline(&store, &window, f.until.as_deref(), f.bucket.as_deref(), f.by.as_deref(), f.limit.as_deref()),
+        "timeline" => query::timeline(&store, &window, f.until.as_deref(), f.bucket.as_deref(), f.by.as_deref(), &scope, f.limit.as_deref()),
+        "stats" => {
+            let attr = require_pos(&f, "stats needs an <attr> (a numeric attribute, e.g. duration_s)", "stats necesita un <attr> (un atributo numérico, p.ej. duration_s)");
+            query::stats(&store, &window, &attr, f.by.as_deref(), &scope, f.limit.as_deref())
+        }
         "top" => {
             let dim = require_pos(
                 &f,

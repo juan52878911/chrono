@@ -205,7 +205,7 @@ pub fn init(start: &Path, symbols: bool, as_kind: Option<&str>, db_override: Opt
 
 /// Raíz del índice a partir de la ruta del `.db` (`<root>/.chrono/index.db` →
 /// `<root>`). Ahí vive `.chrono/config.json`, compartido por TODAS las fuentes.
-fn index_root_of(db: &Path) -> PathBuf {
+pub(crate) fn index_root_of(db: &Path) -> PathBuf {
     db.parent()
         .and_then(|chrono_dir| chrono_dir.parent())
         .map(|r| r.to_path_buf())
