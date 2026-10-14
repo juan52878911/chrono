@@ -5,6 +5,11 @@ description: "Preguntas sobre la HISTORIA de un repo git con chrono en vez de le
 
 # Historia de un repo con chrono
 
+> **Requisito**: el binario `chrono` (port Rust ≥ 0.2). Si `chrono version` falla o no
+> reconoce el comando que necesitas, díselo al usuario con
+> `cargo install --git https://github.com/juan52878911/chrono chrono-cli --locked`
+> (necesita Rust). No lo instales sin su permiso.
+
 `git log --numstat` de un repo mediano son ~100 k tokens; `chrono hotspots` responde lo mismo en
 ~400 (medido: `bench/agentes/RESULTADOS.md` del repo de chrono). No leas la historia cruda para
 estas preguntas.

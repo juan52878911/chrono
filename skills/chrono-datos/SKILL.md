@@ -5,6 +5,11 @@ description: "Analizar datos GRANDES que no caben o no conviene meter en el cont
 
 # Datos masivos con chrono
 
+> **Requisito**: el binario `chrono` (port Rust ≥ 0.2). Si `chrono version` falla o no
+> reconoce el comando que necesitas, díselo al usuario con
+> `cargo install --git https://github.com/juan52878911/chrono chrono-cli --locked`
+> (necesita Rust). No lo instales sin su permiso.
+
 chrono indexa una vez y responde con agregados citables: 24 h de logs de un entorno (~1 M tokens)
 se resumen en ~1 100 (medido). Regla: **mide antes de leer**.
 

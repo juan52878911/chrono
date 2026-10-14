@@ -28,6 +28,26 @@ chrono needs **no database, no server, no network** (except `gh` for PRs). The i
 
 ---
 
+
+## As a Claude Code plugin
+
+chrono ships as a Claude Code plugin: three skills (git history incl. `explain`, large data, CI/CD)
+and the `chrono mcp` server, so the agent reads what chrono exposes instead of raw logs and `git log`.
+
+```text
+/plugin install chrono --marketplace juan52878911/chrono
+```
+
+(On older Claude Code: `/plugin marketplace add juan52878911/chrono` and then `/plugin install chrono@chrono`.)
+
+The plugin needs the `chrono` binary (Rust port ≥ 0.2) on your `PATH`:
+
+```bash
+cargo install --git https://github.com/juan52878911/chrono chrono-cli --locked
+```
+
+Then, inside a repo: `chrono init`. The skills tell the agent when chrono pays off and when it doesn't.
+
 ## Install
 
 ### Option A — One line (recommended, macOS & Linux)

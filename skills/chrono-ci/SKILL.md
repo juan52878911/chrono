@@ -5,13 +5,19 @@ description: "Observabilidad de CI/CD con chrono sobre GitHub Actions (u otro si
 
 # CI/CD con chrono
 
+> **Requisito**: el binario `chrono` (port Rust ≥ 0.2). Si `chrono version` falla o no
+> reconoce el comando que necesitas, díselo al usuario con
+> `cargo install --git https://github.com/juan52878911/chrono chrono-cli --locked`
+> (necesita Rust). No lo instales sin su permiso.
+
 Un log de fallo de Actions son ~60 k tokens; los de 25 fallos, ~1,3 M. Con chrono, las causas
 agrupadas de los 25 caben en ~500 (medido). No hagas `tail` del log: suele mostrar solo
 `exit code 1` y esconde la causa.
 
 ## Preparar (una vez por repo)
 
-El preset vive en el repo de chrono: `examples/github-actions/` (`config.json` + 2 scripts).
+El preset viene con chrono: `examples/github-actions/` (`config.json` + 2 scripts) en el repo
+https://github.com/juan52878911/chrono (o en la carpeta del plugin, si lo instalaste como plugin).
 
 1. `mkdir -p .chrono/scripts && cp <chrono>/examples/github-actions/*.sh .chrono/scripts/`
 2. Fusiona su clave `commands` en `.chrono/config.json` cambiando `OWNER/REPO` y los workflows

@@ -1,0 +1,15 @@
+{
+  "name": "chrono",
+  "owner": { "name": "Juan Bedoya", "url": "https://github.com/juan52878911" },
+  "metadata": { "description": "chrono: conocimiento de la historia de un repo, de sus logs y de su CI, acotado para una IA." },
+  "plugins": [
+    {
+      "name": "chrono",
+      "source": "./",
+      "description": "Skills y servidor MCP de chrono: historia de git (hotspots, acoplamiento, dueños, bugs, explain), datos masivos (logs, JSONL, CSV) y CI/CD (GitHub Actions u otros vía comandos), con respuestas deterministas y compactas.",
+      "version": "0.2.0",
+      "category": "development",
+      "keywords": ["git", "blame", "logs", "ci", "observability"]
+    }
+  ]
+}
