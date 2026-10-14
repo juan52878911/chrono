@@ -408,53 +408,20 @@ fn scope_from(args: &Value) -> chrono_metrics::EventScope<'_> {
     }
 }
 
-/// Inventario del índice: por fuente, nº de eventos, ventana, niveles y
-/// entidades principales. Orden estable por id de fuente.
 fn sources(conn: &Connection) -> Result<Value> {
-    let mut stmt = conn.prepare(
-        "SELECT s.ref, s.id, s.kind, COUNT(e.id),
-                (SELECT at FROM events WHERE source_ref = s.ref AND at_epoch > 0 ORDER BY at_epoch ASC LIMIT 1),
-                (SELECT at FROM events WHERE source_ref = s.ref AND at_epoch > 0 ORDER BY at_epoch DESC LIMIT 1)
-         FROM sources s LEFT JOIN events e ON e.source_ref = s.ref
-         GROUP BY s.ref ORDER BY s.id",
-    )?;
-    let rows: Vec<(i64, String, String, i64, Option<String>, Option<String>)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
-        .collect::<std::result::Result<_, _>>()?;
-    let mut out = Vec::new();
-    for (sref, id, kind, n, first, last) in rows {
-        let counts = |sql: &str| -> Result<Vec<Value>> {
-            let mut st = conn.prepare(sql)?;
-            let v = st
-                .query_map(params![sref], |r| Ok(json!({"value": r.get::<_, String>(0)?, "count": r.get::<_, i64>(1)?})))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(v)
-        };
-        let levels = counts(
-            "SELECT level, COUNT(*) c FROM events WHERE source_ref = ?1 AND level != ''
-             GROUP BY level ORDER BY c DESC, level LIMIT 10",
-        )?;
-        let kinds = counts(
-            "SELECT kind, COUNT(*) c FROM events WHERE source_ref = ?1 GROUP BY kind ORDER BY c DESC, kind LIMIT 5",
-        )?;
-        let entities = counts(
-            "SELECT en.key, COUNT(*) c FROM touches t JOIN events e ON e.id = t.event_id
-             JOIN entities en ON en.id = t.entity_id WHERE e.source_ref = ?1
-             GROUP BY en.key ORDER BY c DESC, en.key LIMIT 15",
-        )?;
-        // Las fuentes de comando se guardan como jsonl de su caché
-        // (`…/cmd/<nombre>.cmd.jsonl`); el alias es lo que acepta `source`.
-        let alias = id
-            .rsplit('/')
-            .next()
-            .and_then(|f| f.strip_suffix(".cmd.jsonl"))
-            .map(|n| format!("cmd:{n}"));
-        out.push(json!({
-            "source": id, "alias": alias, "kind": kind, "events": n, "first": first, "last": last,
-            "levels": levels, "kinds": kinds, "top_entities": entities,
-        }));
-    }
-    Ok(json!({"sources": out}))
+    let rows = chrono_metrics::sources(conn)?;
+    let vc = |v: &[(String, i64)]| -> Vec<Value> { v.iter().map(|(k, n)| json!({"value": k, "count": n})).collect() };
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|s| {
+            json!({
+                "source": s.source, "alias": s.alias, "kind": s.kind, "events": s.events,
+                "first": s.first, "last": s.last,
+                "levels": vc(&s.levels), "kinds": vc(&s.kinds), "top_entities": vc(&s.top_entities),
+            })
+        })
+        .collect();
+    Ok(json!({"sources": items}))
 }
 
 fn hotspots(conn: &Connection, since_epoch: i64) -> Result<Value> {

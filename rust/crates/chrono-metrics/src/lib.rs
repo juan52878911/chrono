@@ -20,6 +20,7 @@ mod phases;
 mod search;
 mod session_patterns;
 mod similar;
+mod sources;
 mod stats;
 mod ticket;
 mod timeline;
@@ -42,6 +43,7 @@ pub use session_patterns::{
     ToolCount, Tokens,
 };
 pub use similar::{similar, SimilarRow};
+pub use sources::{sources, SourceSummary};
 pub use ticket::{ticket, Ticket};
 pub use stats::{stats, StatRow};
 pub use timeline::{timeline, timeline_scoped, EventScope, TimelineBucket};

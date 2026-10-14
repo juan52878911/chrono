@@ -1,5 +1,5 @@
 {
-  "description": "chrono: instala el binario la primera vez y crea/actualiza el índice del repo en segundo plano al empezar cada sesión.",
+  "description": "chrono: instala el binario la primera vez, crea/actualiza el índice del repo al empezar cada sesión y, si el índice tiene logs, avisa al modelo de que los use para contar y rankear en vez de las líneas truncadas de Loki/Grafana.",
   "hooks": {
     "SessionStart": [
       {
@@ -8,6 +8,29 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/claude/session-start.sh\"",
             "timeout": 120
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/claude/log-hint.sh\" UserPromptSubmit",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__.*(grafana|loki|datadog|elastic|opensearch|splunk|newrelic|signoz|observ).*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/claude/log-hint.sh\" PostToolUse",
+            "timeout": 10
           }
         ]
       }

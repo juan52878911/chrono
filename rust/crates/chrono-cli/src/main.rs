@@ -50,6 +50,7 @@ only, without metadata: about 2-5x smaller and byte-identical for the same index
   prs                  Forge pull requests (state, merge, bug by label).
   branches [base]      Branch status vs base: ahead/behind, merged, stale, authors.
   phases               Project phases (tags/releases).
+  sources              What is indexed: per source, events, time window, levels, top entities.
   search <text>        Search events by text (FTS5, LIKE fallback).
   similar <id>         Near-duplicate events (by SimHash).
   show <id>            Show a commit's diff live (git, bounded; --entity <path>).
@@ -125,6 +126,7 @@ Consulta (JSON, schema_version 2: `entity`/`id`):
   prs                  PRs del forge (estado, merge, si es bug por label).
   branches [base]      Estado de ramas vs base: ahead/behind, mergeada, stale, autores.
   phases               Fases del proyecto (etiquetas).
+  sources              Qué hay indexado: por fuente, eventos, ventana, niveles y entidades principales.
   search <texto>       Busca eventos por texto (FTS5, con fallback a LIKE).
   similar <id>         Eventos casi-duplicados (por SimHash).
   show <id>            Muestra el diff de un commit en vivo (git, acotado; --entity <ruta>).
@@ -527,6 +529,7 @@ fn main() {
             query::branches(&store, Path::new(&repo_path), &base)
         }
         "phases" => query::phases(&store),
+        "sources" => query::sources(&store),
         "search" => {
             let text = require_pos(&f, "search needs a <text>", "search necesita un <texto>");
             query::search(&store, &text)

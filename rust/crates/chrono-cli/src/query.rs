@@ -305,6 +305,28 @@ pub fn phases(store: &Store) -> Result<Json> {
     envelope(store, "phases", &w, n, n, Json::obj().set("phases", Json::Arr(items)))
 }
 
+/// `sources`: qué hay indexado (por fuente: eventos, ventana, niveles, entidades).
+pub fn sources(store: &Store) -> Result<Json> {
+    let w = no_window();
+    let rows = chrono_metrics::sources(store.conn())?;
+    let pairs = |v: &[(String, i64)]| v.iter().map(|(k, n)| format!("{k}={n}")).collect::<Vec<_>>().join(" ");
+    let items: Vec<Json> = rows
+        .iter()
+        .map(|s| {
+            Json::obj()
+                .set("source", Json::str(s.alias.as_deref().unwrap_or(&s.source)))
+                .set("kind", Json::str(&s.kind))
+                .set("events", Json::Int(s.events))
+                .set("first", s.first.as_deref().map_or(Json::Null, Json::str))
+                .set("last", s.last.as_deref().map_or(Json::Null, Json::str))
+                .set("levels", Json::str(&pairs(&s.levels)))
+                .set("top_entities", Json::str(&pairs(&s.top_entities)))
+        })
+        .collect();
+    let n = items.len();
+    envelope(store, "sources", &w, n + 1, n, Json::obj().set("sources", Json::Arr(items)))
+}
+
 /// Ruta del repo git del índice, para `branches` (que lee git en vivo). Primero
 /// `meta.repo_path` (lo escribe `init` cuando la fuente primaria es git); si no
 /// está (p.ej. el git se añadió con `chrono add`), la primera fuente git de la
