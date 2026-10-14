@@ -424,34 +424,35 @@ pub fn trace(store: &Store, id: &str, depth: Option<&str>, limit: Option<&str>) 
     envelope(store, "trace", &w, limit, n, result)
 }
 
+/// `--until` → epoch en ms (0 = sin fin).
+fn until_epoch(until: Option<&str>) -> Result<i64> {
+    match until {
+        None | Some("") => Ok(0),
+        Some(s) => Ok(parse_since(s).ok_or_else(|| {
+            t(format!("invalid --until: {s:?} (use YYYY-MM-DD)"), format!("--until no válido: {s:?} (usa YYYY-MM-DD)"))
+        })?),
+    }
+}
+
 /// `events`: stream cronológico unificado de todas las fuentes, filtrable por
 /// `--source`/`--kind`/`--level`/`--grep` y la ventana `--since`/`--until`.
-#[allow(clippy::too_many_arguments)]
 pub fn events(
     store: &Store,
     w: &Window,
     until: Option<&str>,
-    source: Option<&str>,
-    kind: Option<&str>,
-    level: Option<&str>,
-    grep: Option<&str>,
+    scope: &chrono_metrics::EventScope,
     limit: Option<&str>,
 ) -> Result<Json> {
     const DEFAULT_LIMIT: usize = 100;
     let limit = parse_limit(limit, DEFAULT_LIMIT)?;
-    let until_epoch = match until {
-        None | Some("") => 0,
-        Some(s) => parse_since(s).ok_or_else(|| {
-            t(format!("invalid --until: {s:?} (use YYYY-MM-DD)"), format!("--until no válido: {s:?} (usa YYYY-MM-DD)"))
-        })?,
-    };
     let filter = chrono_metrics::EventFilter {
         since_epoch: w.since_epoch,
-        until_epoch,
-        source,
-        kind,
-        level,
-        grep,
+        until_epoch: until_epoch(until)?,
+        source: scope.source,
+        kind: scope.kind,
+        level: scope.level,
+        grep: scope.grep,
+        entity: scope.entity,
     };
     let rows = chrono_metrics::events(store.conn(), &filter, limit)?;
     let items: Vec<Json> = rows
@@ -474,18 +475,14 @@ pub fn events(
 pub fn patterns(
     store: &Store,
     w: &Window,
-    source: Option<&str>,
-    grep: Option<&str>,
-    level: Option<&str>,
+    until: Option<&str>,
+    scope: &chrono_metrics::EventScope,
     limit: Option<&str>,
 ) -> Result<Json> {
     const DEFAULT_LIMIT: usize = 25;
     let limit = parse_limit(limit, DEFAULT_LIMIT)?;
-    let rows = match level.filter(|l| !l.is_empty()) {
-        // Con nivel no sirven los rollups (no lo guardan): agrupa sobre los eventos.
-        Some(l) => chrono_metrics::patterns_by_level(store.conn(), w.since_epoch, source, grep, l, limit)?,
-        None => chrono_metrics::patterns_filtered(store.conn(), w.since_epoch, source, grep, limit)?,
-    };
+    let scope = chrono_metrics::EventScope { until_epoch: until_epoch(until)?, ..scope.clone() };
+    let rows = chrono_metrics::patterns_scoped(store.conn(), w.since_epoch, &scope, limit)?;
     let items: Vec<Json> = rows
         .iter()
         .map(|p| {
@@ -586,14 +583,20 @@ pub fn top(
     store: &Store,
     w: &Window,
     dim: &str,
-    source: Option<&str>,
-    grep: Option<&str>,
-    level: Option<&str>,
+    until: Option<&str>,
+    scope: &chrono_metrics::EventScope,
     limit: Option<&str>,
 ) -> Result<Json> {
     const DEFAULT_LIMIT: usize = 25;
     let limit = parse_limit(limit, DEFAULT_LIMIT)?;
-    let filter = chrono_metrics::TopFilter { source, grep, level };
+    let filter = chrono_metrics::TopFilter {
+        source: scope.source,
+        grep: scope.grep,
+        level: scope.level,
+        kind: scope.kind,
+        entity: scope.entity,
+        until_epoch: until_epoch(until)?,
+    };
     let rows = chrono_metrics::top_filtered(store.conn(), dim, w.since_epoch, &filter, limit)?;
     let items: Vec<Json> = rows
         .iter()
@@ -897,12 +900,14 @@ pub fn stats(
     w: &Window,
     attr: &str,
     by: Option<&str>,
+    until: Option<&str>,
     scope: &chrono_metrics::EventScope,
     limit: Option<&str>,
 ) -> Result<Json> {
     const DEFAULT_LIMIT: usize = 25;
     let limit = parse_limit(limit, DEFAULT_LIMIT)?;
-    let rows = chrono_metrics::stats(store.conn(), attr, by, w.since_epoch, scope, limit)?;
+    let scope = chrono_metrics::EventScope { until_epoch: until_epoch(until)?, ..scope.clone() };
+    let rows = chrono_metrics::stats(store.conn(), attr, by, w.since_epoch, &scope, limit)?;
     let items: Vec<Json> = rows
         .iter()
         .map(|r| {

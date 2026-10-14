@@ -1,6 +1,6 @@
 ---
 name: chrono-ci
-description: "Observabilidad de CI/CD con chrono sobre GitHub Actions (u otro sistema vía comandos): por qué falla el CI o un despliegue, qué workflow falla más, qué jobs/pasos se vuelven lentos, desde cuándo aparece un error, qué commit rompió un despliegue y cuál lo arregló. Usar ante un CI/despliegue en rojo o al revisar la salud del pipeline, en vez de leer logs de Actions enteros o hacer tail."
+description: "Observabilidad del PIPELINE de CI/CD con chrono sobre GitHub Actions (u otro sistema vía comandos): por qué falla un workflow o un despliegue, qué workflow falla más, qué jobs/pasos se vuelven lentos, qué commit rompió un despliegue y cuál lo arregló. Usar ante un CI/despliegue en rojo o al revisar la salud del pipeline, en vez de leer logs de Actions enteros. NO es para los logs de los servicios en ejecución (Loki/Grafana, errores, excepciones o reinicios de una app o base de datos): eso es chrono-datos."
 ---
 
 # CI/CD con chrono

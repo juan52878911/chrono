@@ -134,11 +134,24 @@ fn handle(line: &str, state: &State) -> Option<String> {
     }
 }
 
+/// Lo que el cliente MCP pone en el contexto del modelo al conectar (p. ej.
+/// Claude Code lo muestra como instrucciones del servidor): cuándo conviene
+/// chrono sin que nadie tenga que pedirlo.
+const INSTRUCTIONS: &str = "chrono es un índice local de eventos (historia de git, logs, CI/despliegues y salidas de comandos como cmd:loki) que responde con cifras EXACTAS sobre todo lo indexado, sin topes de líneas ni muestreo.
+
+Úsalo sin esperar a que te lo pidan:
+- Antes de contar, rankear o resumir logs/eventos con otra herramienta (Loki/Grafana, gh, grep), llama a `sources` para ver si chrono ya tiene esos datos y su ventana. Si los tiene, las cifras salen de chrono: `top` (cuántos por nivel/servicio: dim=entity con level=FATAL), `patterns` (mensajes más repetidos, con level=FATAL,ERROR,CRITICAL), `timeline` (cuándo; picos e incidentes) y `events` (leer los mensajes de una ventana, p. ej. justo antes de un reinicio o una traza completa).
+- Las herramientas que devuelven líneas crudas (Loki, por ejemplo) cortan en 100 por consulta: no cuentes ni rankees con ellas. Úsalas solo para el detalle que chrono no tenga.
+- Filtros comunes en top/patterns/timeline/events/stats: since/until (ISO), level (lista con comas), entity (servicio o fichero, lista con comas), source, kind, grep.
+- En un repo git: antes de un cambio arriesgado, hotspots/coupling/owners/bugs/explain dicen qué es peligroso tocar y por qué está así.
+Cita las cifras tal cual vienen; si chrono no tiene un dato, dilo en vez de estimarlo.";
+
 fn initialize_result() -> Value {
     json!({
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": {"tools": {}},
         "serverInfo": {"name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION")},
+        "instructions": INSTRUCTIONS,
     })
 }
 

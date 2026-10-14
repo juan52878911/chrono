@@ -2,7 +2,7 @@
 //! la vista de "trazabilidad en el tiempo": qué pasó, en qué orden, mezclando
 //! git + logs + deploys + lo que haya en el índice. Lee `events` crudos.
 
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 
 use crate::Result;
 
@@ -27,65 +27,59 @@ pub struct EventFilter<'a> {
     /// Fuente: un `kind` ("git", "jsonl"…) → casa `source_id` por prefijo
     /// `kind:%`; o un `source_id` completo (con ':') → casa exacto/prefijo.
     pub source: Option<&'a str>,
+    /// Exacto, o prefijo con `*` (`ci.*`).
     pub kind: Option<&'a str>,
+    /// Uno o varios niveles separados por coma, sin distinguir mayúsculas.
     pub level: Option<&'a str>,
-    /// Substring en `title` (LIKE `%grep%`, sensible a mayúsculas según collation).
+    /// Substring en `title` (LIKE `%grep%`).
     pub grep: Option<&'a str>,
+    /// Una o varias entidades exactas separadas por coma (servicio, fichero…).
+    pub entity: Option<&'a str>,
 }
 
 /// Eventos en orden CRONOLÓGICO (`at_epoch` ASC, luego `id` ASC), aplicando los
 /// filtros. Solo eventos con `at_epoch > 0` (los sin tiempo no entran en una
 /// vista temporal). `limit` acota (salida "bounded for an AI").
 pub fn events(conn: &Connection, f: &EventFilter, limit: usize) -> Result<Vec<EventRow>> {
-    // Patrón de fuente: kind → "kind:%"; source_id con ':' → "<id>%" (prefijo).
-    let source_like: Option<String> = f.source.filter(|s| !s.is_empty()).map(|s| {
-        if s.contains(':') {
-            format!("{s}%")
-        } else {
-            format!("{s}:%")
-        }
-    });
-    let grep_like: Option<String> = f.grep.filter(|s| !s.is_empty()).map(|g| format!("%{g}%"));
-
+    // Mismas reglas de filtro que `top`/`patterns`/`timeline` (ver `EventScope`).
+    let scope = crate::EventScope {
+        source: f.source,
+        grep: f.grep,
+        level: f.level,
+        kind: f.kind,
+        entity: f.entity,
+        until_epoch: f.until_epoch,
+    };
+    let (filters, extra) = scope.sql(3);
     // v5: events.source_ref es entero; el string ("git:/path") se recupera por
-    // JOIN a sources, y el filtro `--source` (prefijo) opera sobre ese string
-    // `s.id` → semántica idéntica a la antigua columna `events.source_id`. El
-    // JOIN es INNER pero todo evento tiene un source_ref válido (lo garantiza el
-    // Writer), así que no se pierde ninguna fila.
-    let sql = "SELECT e.id, s.id, e.kind, e.at, e.at_epoch, e.level, e.title
+    // JOIN a sources. El JOIN es INNER pero todo evento tiene un source_ref
+    // válido (lo garantiza el Writer), así que no se pierde ninguna fila.
+    let sql = format!(
+        "SELECT e.id, s.id, e.kind, e.at, e.at_epoch, e.level, e.title
          FROM events e JOIN sources s ON s.ref = e.source_ref
          WHERE e.at_epoch > 0
            AND (?1 = 0 OR e.at_epoch >= ?1)
-           AND (?2 = 0 OR e.at_epoch < ?2)
-           AND (?3 IS NULL OR s.id LIKE ?3)
-           AND (?4 IS NULL OR e.kind = ?4)
-           AND (?5 IS NULL OR e.level = ?5)
-           AND (?6 IS NULL OR e.title LIKE ?6)
+           {filters}
          ORDER BY e.at_epoch ASC, e.id ASC
-         LIMIT ?7";
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(
-        params![
-            f.since_epoch,
-            f.until_epoch,
-            source_like,
-            f.kind.filter(|s| !s.is_empty()),
-            f.level.filter(|s| !s.is_empty()),
-            grep_like,
-            limit as i64,
-        ],
-        |r| {
-            Ok(EventRow {
-                id: r.get(0)?,
-                source_id: r.get(1)?,
-                kind: r.get(2)?,
-                at: r.get(3)?,
-                at_epoch: r.get(4)?,
-                level: r.get(5)?,
-                title: r.get(6)?,
-            })
-        },
-    )?;
+         LIMIT ?2"
+    );
+    let limit = limit as i64;
+    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&f.since_epoch, &limit];
+    for p in &extra {
+        bound.push(p);
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(bound), |r| {
+        Ok(EventRow {
+            id: r.get(0)?,
+            source_id: r.get(1)?,
+            kind: r.get(2)?,
+            at: r.get(3)?,
+            at_epoch: r.get(4)?,
+            level: r.get(5)?,
+            title: r.get(6)?,
+        })
+    })?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row?);

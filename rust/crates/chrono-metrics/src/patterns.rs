@@ -66,12 +66,6 @@ pub fn patterns_filtered(
 }
 
 /// Como [`patterns_filtered`], acotado además a un NIVEL (`ERROR`, `failure`…).
-///
-/// Los `rollups` no guardan el nivel, así que esto agrupa en el momento sobre
-/// `events` en vez de leer los agregados. Es O(eventos de ese nivel), que en la
-/// práctica son pocos: lo que se busca con `--level` son los errores, y son la
-/// minoría (en 24 h de logs reales, 114 de 17 505). El nivel se compara sin
-/// distinguir mayúsculas, porque cada fuente lo escribe a su manera.
 pub fn patterns_by_level(
     conn: &Connection,
     since_epoch: i64,
@@ -80,19 +74,38 @@ pub fn patterns_by_level(
     level: &str,
     limit: usize,
 ) -> Result<Vec<Pattern>> {
+    let scope = crate::EventScope { source, grep, level: Some(level), ..Default::default() };
+    patterns_scoped(conn, since_epoch, &scope, limit)
+}
+
+/// Plantillas con los mismos filtros que `events`/`top`/`timeline` (ver
+/// [`crate::EventScope`]): «las 3 plantillas FATAL más frecuentes», «las de
+/// `product_service` entre las 18 y las 19».
+///
+/// Si solo se filtra por fuente y/o texto, lee los `rollups` como siempre. Con
+/// nivel, tipo, entidad o fin de ventana no sirven (no los guardan), así que
+/// agrupa en el momento sobre `events`: O(eventos que casan), que en la práctica
+/// son pocos, porque lo que se acota así son los errores (en 24 h de logs
+/// reales, 114 de 17 505). `grep` casa entonces con el título del evento.
+pub fn patterns_scoped(conn: &Connection, since_epoch: i64, scope: &crate::EventScope, limit: usize) -> Result<Vec<Pattern>> {
     use std::collections::HashMap;
-    let source_like: Option<String> = source
-        .filter(|s| !s.is_empty())
-        .map(|s| if s.contains(':') { format!("{s}%") } else { format!("{s}:%") });
-    let mut stmt = conn.prepare(
+    if scope.only_source_grep() {
+        return patterns_filtered(conn, since_epoch, scope.source, scope.grep, limit);
+    }
+    let (filters, extra) = scope.sql(2);
+    let sql = format!(
         "SELECT e.id, e.title
-         FROM events e JOIN sources s ON s.ref = e.source_ref
+         FROM events e
          WHERE (?1 = 0 OR e.at_epoch >= ?1)
-           AND e.level = ?2 COLLATE NOCASE
-           AND (?3 IS NULL OR s.id LIKE ?3)
-         ORDER BY e.rowid",
-    )?;
-    let rows = stmt.query_map(params![since_epoch, level, source_like], |r| {
+           {filters}
+         ORDER BY e.rowid"
+    );
+    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&since_epoch];
+    for p in &extra {
+        bound.push(p);
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(bound), |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
     })?;
     // plantilla -> (cuenta, último id): el mismo `example_id` que los rollups
@@ -100,13 +113,7 @@ pub fn patterns_by_level(
     let mut agg: HashMap<String, (i64, String)> = HashMap::new();
     for row in rows {
         let (id, title) = row?;
-        let template = chrono_core::templatize(&title);
-        if let Some(g) = grep.filter(|g| !g.is_empty()) {
-            if !template.contains(g) {
-                continue;
-            }
-        }
-        let e = agg.entry(template).or_insert((0, String::new()));
+        let e = agg.entry(chrono_core::templatize(&title)).or_insert((0, String::new()));
         e.0 += 1;
         e.1 = id;
     }
@@ -257,5 +264,35 @@ mod tests {
         assert_eq!(pats[1].template, "timeout after <NUM> s");
         let solo_timeout = patterns_by_level(store.conn(), 0, None, Some("timeout"), "error", 10).unwrap();
         assert_eq!(solo_timeout.len(), 1);
+    }
+
+    #[test]
+    fn patterns_scoped_acota_por_varios_niveles_entidad_y_ventana() {
+        let db = TempDb::new();
+        let mut store = Store::open(db.path()).unwrap();
+        let mk = |id: &str, at: i64, level: &str, svc: &str, title: &str| Event {
+            level: level.to_string(),
+            touches: vec![chrono_core::Touch { entity: svc.to_string(), entity_type: "service".into(), weight: 1, ..Default::default() }],
+            ..ev(id, at, title)
+        };
+        {
+            let mut w = store.writer().unwrap();
+            w.add_event(&mk("a", 100, "FATAL", "postgres", "terminating connection 1")).unwrap();
+            w.add_event(&mk("b", 101, "fatal", "postgres", "terminating connection 2")).unwrap();
+            w.add_event(&mk("c", 102, "ERROR", "api", "boom 3")).unwrap();
+            w.add_event(&mk("d", 103, "INFO", "postgres", "ready 4")).unwrap();
+            w.add_event(&mk("e", 200, "CRITICAL", "api", "rls 5")).unwrap();
+            w.commit().unwrap();
+        }
+        let scope = |level, entity, until_epoch| crate::EventScope { level, entity, until_epoch, ..Default::default() };
+        let all = patterns_scoped(store.conn(), 0, &scope(Some("FATAL, error,Critical"), None, 0), 10).unwrap();
+        let total: i64 = all.iter().map(|p| p.count).sum();
+        assert_eq!(total, 4, "lista de niveles sin distinguir mayúsculas ni espacios: {all:?}");
+        let pg = patterns_scoped(store.conn(), 0, &scope(Some("FATAL,ERROR"), Some("postgres"), 0), 10).unwrap();
+        assert_eq!(pg.len(), 1);
+        assert_eq!(pg[0].count, 2);
+        let antes = patterns_scoped(store.conn(), 0, &scope(Some("ERROR,CRITICAL"), Some("api,otro"), 150), 10).unwrap();
+        assert_eq!(antes.len(), 1, "until excluye el CRITICAL de at=200: {antes:?}");
+        assert_eq!(antes[0].template, "boom <NUM>");
     }
 }

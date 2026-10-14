@@ -110,46 +110,91 @@ pub fn timeline(
     Ok(out)
 }
 
-/// Qué eventos cuenta un `timeline`/`stats` acotado. Todos opcionales; vacío =
-/// sin filtro. `source` y `kind` aceptan un prefijo (`ci.*`, o un tipo de
-/// fuente sin `:`), como en `events`/`patterns`.
+/// Qué eventos cuenta una consulta acotada (`timeline`, `stats`, `top`,
+/// `patterns`, `events`). Todos opcionales; vacío = sin filtro. Las mismas
+/// reglas en todas, para que CLI y MCP filtren igual:
+/// - `source`: tipo de fuente (`jsonl`, `cmd`…) o prefijo de su id.
+/// - `kind`: exacto, o prefijo con `*` (`ci.*`).
+/// - `level`: uno o varios separados por coma (`FATAL,ERROR`), sin distinguir
+///   mayúsculas.
+/// - `grep`: subcadena del título (sin distinguir mayúsculas en ASCII).
+/// - `entity`: una o varias entidades exactas separadas por coma (el servicio
+///   en logs, el fichero en git).
+/// - `until_epoch`: fin de la ventana en ms (exclusivo; 0 = sin fin).
 #[derive(Debug, Clone, Default)]
 pub struct EventScope<'a> {
     pub source: Option<&'a str>,
     pub grep: Option<&'a str>,
     pub level: Option<&'a str>,
     pub kind: Option<&'a str>,
+    pub entity: Option<&'a str>,
+    pub until_epoch: i64,
+}
+
+/// `,A,B,` en mayúsculas y sin espacios: el parámetro de una lista separada por
+/// comas, para casar con `instr(?, ',' || x || ',')`.
+fn comma_list(raw: &str, upper: bool) -> String {
+    let items: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| if upper { s.to_uppercase() } else { s.to_string() })
+        .collect();
+    format!(",{},", items.join(","))
 }
 
 impl EventScope<'_> {
     pub fn is_empty(&self) -> bool {
-        [self.source, self.grep, self.level, self.kind].iter().all(|v| v.map_or(true, str::is_empty))
+        self.until_epoch <= 0
+            && [self.source, self.grep, self.level, self.kind, self.entity].iter().all(|v| v.map_or(true, str::is_empty))
+    }
+
+    /// Solo filtra por fuente y/o texto: lo único que saben responder los
+    /// rollups de `patterns`.
+    pub fn only_source_grep(&self) -> bool {
+        self.until_epoch <= 0 && [self.level, self.kind, self.entity].iter().all(|v| v.map_or(true, str::is_empty))
     }
 
     /// `(cláusulas SQL sobre el alias `e`, parámetros)`, numerados desde `first`.
     pub(crate) fn sql(&self, first: usize) -> (String, Vec<String>) {
+        self.sql_on("e", first)
+    }
+
+    /// Como [`EventScope::sql`], sobre la tabla o alias `t` de `events`.
+    pub(crate) fn sql_on(&self, t: &str, first: usize) -> (String, Vec<String>) {
         let mut sql = String::new();
         let mut params: Vec<String> = Vec::new();
         let mut push = |clause: &str, value: String| {
             let n = first + params.len();
-            sql.push_str(&format!(" AND {}", clause.replace("?N", &format!("?{n}"))));
+            sql.push_str(&format!(" AND {}", clause.replace("?N", &format!("?{n}")).replace("$t", t)));
             params.push(value);
         };
         if let Some(s) = self.source.filter(|s| !s.is_empty()) {
             let like = if s.contains(':') { format!("{s}%") } else { format!("{s}:%") };
-            push("e.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?N)", like);
+            push("$t.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?N)", like);
         }
         if let Some(g) = self.grep.filter(|g| !g.is_empty()) {
-            push("e.title LIKE ?N", format!("%{g}%"));
+            push("$t.title LIKE ?N", format!("%{g}%"));
         }
-        if let Some(l) = self.level.filter(|l| !l.is_empty()) {
-            push("e.level = ?N COLLATE NOCASE", l.to_string());
+        if let Some(l) = self.level.filter(|l| !l.trim().is_empty()) {
+            push("instr(?N, ',' || UPPER($t.level) || ',') > 0", comma_list(l, true));
         }
         if let Some(k) = self.kind.filter(|k| !k.is_empty()) {
             match k.strip_suffix('*') {
-                Some(prefix) => push("e.kind LIKE ?N", format!("{prefix}%")),
-                None => push("e.kind = ?N", k.to_string()),
+                Some(prefix) => push("$t.kind LIKE ?N", format!("{prefix}%")),
+                None => push("$t.kind = ?N", k.to_string()),
             }
+        }
+        if let Some(en) = self.entity.filter(|e| !e.trim().is_empty()) {
+            push(
+                "EXISTS (SELECT 1 FROM touches tq JOIN entities enq ON enq.id = tq.entity_id
+                         WHERE tq.event_id = $t.id AND instr(?N, ',' || enq.key || ',') > 0)",
+                comma_list(en, false),
+            );
+        }
+        if self.until_epoch > 0 {
+            // Texto contra columna INTEGER: SQLite le aplica la afinidad numérica.
+            push("$t.at_epoch < ?N", self.until_epoch.to_string());
         }
         (sql, params)
     }

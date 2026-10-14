@@ -34,7 +34,7 @@ pub use events::{events, EventFilter, EventRow};
 pub use explain::{co_changes, commit_facts, explain, parse_target, utc_date, Blamed, CoChange, CommitFacts, ExplainedCommit, Explanation, FixCertainty, TicketRef};
 pub use hotspots::{hotspots, hotspots_of_type, Hotspot};
 pub use owners::{owners, Owner};
-pub use patterns::{patterns, patterns_by_level, patterns_filtered, Pattern};
+pub use patterns::{patterns, patterns_by_level, patterns_filtered, patterns_scoped, Pattern};
 pub use phases::{phases, Phase};
 pub use search::{search, SearchHit};
 pub use session_patterns::{

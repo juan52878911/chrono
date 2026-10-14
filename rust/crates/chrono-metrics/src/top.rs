@@ -43,21 +43,8 @@ fn valid_attr_key(key: &str) -> bool {
 /// (`EXPLAIN QUERY PLAN`: `SCAN events USING COVERING INDEX idx_events_level`;
 /// para actor, `SCAN actors` + `SEARCH events USING COVERING INDEX
 /// idx_events_actor`). El SQL es el de siempre; el plan lo fija el índice.
-/// Filtros comunes a todas las dimensiones (?3 fuente, ?4 título, ?5 nivel), con la misma semántica que
-/// `events`: fuente por tipo (`tipo:%`) o por prefijo de id; título por subcadena; nivel exacto.
-const EVENT_FILTERS: &str = "AND (?3 IS NULL OR events.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?3))
-               AND (?4 IS NULL OR events.title LIKE ?4)
-               AND (?5 IS NULL OR events.level = ?5)";
-
 fn top_sql(from_clause: &str, value_expr: &str) -> String {
     top_sql_with(from_clause, value_expr, "")
-}
-
-/// La consulta de `top` con los filtros de [`EVENT_FILTERS`]. Va aparte de [`top_sql`] para que la consulta
-/// sin filtros sea exactamente la de siempre: con las condiciones presentes, aunque valgan NULL, SQLite deja
-/// de usar los índices covering (`idx_events_actor`…) y recorre `events` entero.
-fn top_sql_filtered(from_clause: &str, value_expr: &str) -> String {
-    top_sql_with(from_clause, value_expr, EVENT_FILTERS)
 }
 
 fn top_sql_with(from_clause: &str, value_expr: &str, filters: &str) -> String {
@@ -94,35 +81,38 @@ pub fn top(conn: &Connection, dim: &str, since_epoch: i64, limit: usize) -> Resu
     top_filtered(conn, dim, since_epoch, &TopFilter::default(), limit)
 }
 
-/// Acota `top` a una fuente, a los eventos cuyo título contiene un texto y/o a un nivel. En un índice
-/// que mezcla git, Nod y logs, sin esto la dimensión `entity` la dominan las herramientas de Nod.
+/// Acota `top` con los mismos filtros que `events`/`patterns`/`timeline` (ver
+/// [`crate::EventScope`]): fuente, texto, nivel(es), tipo, entidad(es) y fin de
+/// ventana. En un índice que mezcla git, Nod y logs, sin esto la dimensión
+/// `entity` la dominan las herramientas de Nod; con `level` responde «en qué
+/// servicios caen los FATAL».
 #[derive(Default)]
 pub struct TopFilter<'a> {
     pub source: Option<&'a str>,
     pub grep: Option<&'a str>,
     pub level: Option<&'a str>,
+    pub kind: Option<&'a str>,
+    pub entity: Option<&'a str>,
+    pub until_epoch: i64,
 }
 
 pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilter, limit: usize) -> Result<Vec<TopValue>> {
-    let source_like: Option<String> = f
-        .source
-        .filter(|s| !s.is_empty())
-        .map(|s| if s.contains(':') { format!("{s}%") } else { format!("{s}:%") });
-    let grep_like: Option<String> = f.grep.filter(|g| !g.is_empty()).map(|g| format!("%{g}%"));
-    let level: Option<&str> = f.level.filter(|l| !l.is_empty());
-    let filtered = source_like.is_some() || grep_like.is_some() || level.is_some();
+    let scope = crate::EventScope {
+        source: f.source,
+        grep: f.grep,
+        level: f.level,
+        kind: f.kind,
+        entity: f.entity,
+        until_epoch: f.until_epoch,
+    };
+    let map = |r: &rusqlite::Row| Ok(TopValue { value: r.get(0)?, count: r.get(1)? });
+    let limit = limit as i64;
     if let Some(key) = dim.strip_prefix("attr:") {
         if !valid_attr_key(key) {
             return Err(format!("top: invalid attr key: {key:?}").into());
         }
         let path = format!("$.{key}");
-        let filters = if filtered {
-            "AND (?4 IS NULL OR events.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?4))
-                   AND (?5 IS NULL OR events.title LIKE ?5)
-                   AND (?6 IS NULL OR events.level = ?6)"
-        } else {
-            ""
-        };
+        let (filters, extra) = scope.sql_on("events", 4);
         let sql = format!(
             "SELECT value, COUNT(*) AS count FROM (
                  SELECT json_extract(events.attrs, ?1) AS value
@@ -135,13 +125,12 @@ pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilte
              ORDER BY count DESC, value ASC
              LIMIT ?3"
         );
+        let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&path, &since_epoch, &limit];
+        for p in &extra {
+            bound.push(p);
+        }
         let mut stmt = conn.prepare(&sql)?;
-        let map = |r: &rusqlite::Row| Ok(TopValue { value: r.get(0)?, count: r.get(1)? });
-        let rows = if filtered {
-            stmt.query_map(params![path, since_epoch, limit as i64, source_like, grep_like, level], map)?
-        } else {
-            stmt.query_map(params![path, since_epoch, limit as i64], map)?
-        };
+        let rows = stmt.query_map(rusqlite::params_from_iter(bound), map)?;
         return collect(rows);
     }
 
@@ -160,16 +149,21 @@ pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilte
         other => return Err(format!("top: unsupported dimension: {other}").into()),
     };
 
-    let map = |r: &rusqlite::Row| Ok(TopValue { value: r.get(0)?, count: r.get(1)? });
-    if filtered {
-        let mut stmt = conn.prepare(&top_sql_filtered(from_clause, value_expr))?;
-        let rows = stmt.query_map(params![since_epoch, limit as i64, source_like, grep_like, level], map)?;
-        collect(rows)
-    } else {
+    // Sin filtros, la consulta de siempre: con condiciones presentes, aunque
+    // valgan NULL, SQLite deja de usar los índices covering y recorre `events`.
+    if scope.is_empty() {
         let mut stmt = conn.prepare(&top_sql(from_clause, value_expr))?;
-        let rows = stmt.query_map(params![since_epoch, limit as i64], map)?;
-        collect(rows)
+        let rows = stmt.query_map(params![since_epoch, limit], map)?;
+        return collect(rows);
     }
+    let (filters, extra) = scope.sql_on("events", 3);
+    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&since_epoch, &limit];
+    for p in &extra {
+        bound.push(p);
+    }
+    let mut stmt = conn.prepare(&top_sql_with(from_clause, value_expr, &filters))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(bound), map)?;
+    collect(rows)
 }
 
 #[cfg(test)]
@@ -386,7 +380,7 @@ mod tests {
         }
         w.commit().unwrap();
         let tv = |v: &str, n: i64| TopValue { value: v.to_string(), count: n };
-        let f = |source, grep, level| TopFilter { source, grep, level };
+        let f = |source, grep, level| TopFilter { source, grep, level, ..Default::default() };
         let conn = store.conn();
         assert_eq!(top_filtered(conn, "entity", 0, &f(Some("template"), None, None), 10).unwrap(),
                    vec![tv("EP-003", 2), tv("EP-002", 1)]);

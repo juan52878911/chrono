@@ -172,13 +172,13 @@ fn tools_list_incluye_los_dieciocho_tools() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools debe ser array");
-    assert_eq!(tools.len(), 19);
+    assert_eq!(tools.len(), 21);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     for expected in [
         "hotspots", "coupling", "owners", "churn", "search", "similar", "bugs", "tickets",
         "phases", "branches", "explain", "prs", "timeline", "top", "correlate", "patterns", "events", "trace",
-        "session_patterns",
+        "session_patterns", "sources", "stats",
     ] {
         assert!(
             names.contains(&expected),
@@ -232,7 +232,7 @@ fn tools_call_sin_indice_pide_chrono_init() {
 
     // tools/list debe seguir funcionando igual sin índice.
     let list = call(&state, 6, "tools/list", json!({}));
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 19);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 21);
 }
 
 #[test]
@@ -283,4 +283,25 @@ fn tools_call_session_patterns_sin_eventos_nod_avisa() {
     assert_eq!(payload["sessions_total"], 0);
     assert_eq!(payload["basis"]["hotspots"][0], "src/hot.rs");
     assert!(payload["notes"][0].as_str().unwrap().contains("no Nod events"));
+}
+
+#[test]
+fn consultas_de_eventos_exponen_los_filtros_comunes() {
+    let (_db, state) = state_with_fixture();
+    let resp = call(&state, 30, "tools/list", json!({}));
+    let tools = resp["result"]["tools"].as_array().unwrap();
+    for name in ["top", "patterns", "timeline", "events", "stats"] {
+        let t = tools.iter().find(|t| t["name"] == name).unwrap();
+        for prop in ["since", "until", "level", "entity", "source", "kind", "grep"] {
+            assert!(t["inputSchema"]["properties"].get(prop).is_some(), "{name} no expone '{prop}'");
+        }
+    }
+}
+
+#[test]
+fn initialize_trae_instrucciones_de_cuando_usar_chrono() {
+    let (_db, state) = state_with_fixture();
+    let resp = call(&state, 31, "initialize", json!({}));
+    let text = resp["result"]["instructions"].as_str().unwrap();
+    assert!(text.contains("sources") && text.contains("level"), "{text}");
 }

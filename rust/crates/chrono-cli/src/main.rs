@@ -60,17 +60,19 @@ Symbols (git, needs 'init --symbols'):
   Add --by symbol to hotspots/coupling/owners/churn to scope to functions
   (entity key 'file#func'), e.g. chrono hotspots --by symbol.
 
-Log-native (multi-source):
-  timeline             Event counts per time bucket (--bucket 1h, --by level|kind;
-                       --source/--kind/--level/--grep narrow them).
+Log-native (multi-source). timeline, stats, top, patterns and events share the same filters:
+  --since/--until (window; until exclusive), --level FATAL,ERROR (list, any case),
+  --entity svc1,svc2 (the service in logs, the file in git), --source <kind|id|cmd:name>,
+  --kind <kind|prefix*>, --grep <text>.
+  timeline             Event counts per time bucket (--bucket 1h, --by level|kind).
   stats <attr>         min/p50/p95/max/sum of a numeric attribute per group
-                       (--by level|kind|entity|attr:<k>; same filters as timeline).
-  top <dim>            Most frequent values of a dimension (level|kind|actor|entity|attr:<k>);
-                       --source, --grep and --level narrow the events counted.
-  patterns             Most frequent log templates (Drain-light clustering);
-                       --source <kind|id>, --grep <text> and --level narrow them.
+                       (--by level|kind|entity|attr:<k>).
+  top <dim>            Exact counts of the most frequent values of a dimension
+                       (level|kind|actor|entity|attr:<k>), e.g. top entity --level FATAL.
+  patterns             Most frequent log templates (Drain-light clustering),
+                       e.g. patterns --level FATAL,ERROR,CRITICAL --limit 3.
   trace <id>           Follow an event's links chain (reverts, same ticket/PR, vcs.commit ↔ commit).
-  events               Unified chronological stream across sources (--source/--kind/--level/--grep).
+  events               Unified chronological stream across sources.
   correlate <id>       Events from OTHER sources within ±Δt of an event (--delta 1h;
                        --kind commit,ci.* keeps only those kinds).
 
@@ -133,17 +135,19 @@ Símbolos (git, requiere 'init --symbols'):
   Añade --by symbol a hotspots/coupling/owners/churn para acotar a funciones
   (clave de entidad 'fichero#func'), p.ej. chrono hotspots --by symbol.
 
-Log-native (multi-fuente):
-  timeline             Conteo de eventos por bucket temporal (--bucket 1h, --by level|kind;
-                       --source/--kind/--level/--grep los acotan).
+Log-native (multi-fuente). timeline, stats, top, patterns y events comparten filtros:
+  --since/--until (ventana; until exclusivo), --level FATAL,ERROR (lista, sin mayúsculas),
+  --entity svc1,svc2 (el servicio en logs, el fichero en git), --source <tipo|id|cmd:nombre>,
+  --kind <tipo|prefijo*>, --grep <texto>.
+  timeline             Conteo de eventos por bucket temporal (--bucket 1h, --by level|kind).
   stats <attr>         min/p50/p95/max/suma de un atributo numérico por grupo
-                       (--by level|kind|entity|attr:<c>; mismos filtros que timeline).
-  top <dim>            Valores más frecuentes de una dimensión (level|kind|actor|entity|attr:<c>);
-                       --source, --grep y --level acotan los eventos que cuenta.
-  patterns             Plantillas de log más frecuentes (clustering Drain-light);
-                       --source <tipo|id>, --grep <texto> y --level las acotan.
+                       (--by level|kind|entity|attr:<c>).
+  top <dim>            Recuento exacto de los valores más frecuentes de una dimensión
+                       (level|kind|actor|entity|attr:<c>), p.ej. top entity --level FATAL.
+  patterns             Plantillas de log más frecuentes (clustering Drain-light),
+                       p.ej. patterns --level FATAL,ERROR,CRITICAL --limit 3.
   trace <id>           Sigue la cadena de links de un evento (reverts, mismo ticket/PR, vcs.commit ↔ commit).
-  events               Stream cronológico unificado de todas las fuentes (--source/--kind/--level/--grep).
+  events               Stream cronológico unificado de todas las fuentes.
   correlate <id>       Eventos de OTRAS fuentes en ±Δt de un evento (--delta 1h;
                        --kind commit,ci.* se queda solo con esos tipos).
 
@@ -490,6 +494,8 @@ fn main() {
         grep: f.grep.as_deref(),
         level: f.level.as_deref(),
         kind: f.kind.as_deref(),
+        entity: f.entity.as_deref(),
+        until_epoch: 0,
     };
     let out = match cmd {
         "hotspots" => query::hotspots(&store, &window, symbols_only),
@@ -532,7 +538,7 @@ fn main() {
         "timeline" => query::timeline(&store, &window, f.until.as_deref(), f.bucket.as_deref(), f.by.as_deref(), &scope, f.limit.as_deref()),
         "stats" => {
             let attr = require_pos(&f, "stats needs an <attr> (a numeric attribute, e.g. duration_s)", "stats necesita un <attr> (un atributo numérico, p.ej. duration_s)");
-            query::stats(&store, &window, &attr, f.by.as_deref(), &scope, f.limit.as_deref())
+            query::stats(&store, &window, &attr, f.by.as_deref(), f.until.as_deref(), &scope, f.limit.as_deref())
         }
         "top" => {
             let dim = require_pos(
@@ -540,26 +546,10 @@ fn main() {
                 "top needs a <dim> (level|kind|actor|entity|attr:<key>)",
                 "top necesita una <dim> (level|kind|actor|entity|attr:<clave>)",
             );
-            query::top(&store, &window, &dim, f.source.as_deref(), f.grep.as_deref(), f.level.as_deref(), f.limit.as_deref())
+            query::top(&store, &window, &dim, f.until.as_deref(), &scope, f.limit.as_deref())
         }
-        "patterns" => query::patterns(
-            &store,
-            &window,
-            f.source.as_deref(),
-            f.grep.as_deref(),
-            f.level.as_deref(),
-            f.limit.as_deref(),
-        ),
-        "events" => query::events(
-            &store,
-            &window,
-            f.until.as_deref(),
-            f.source.as_deref(),
-            f.kind.as_deref(),
-            f.level.as_deref(),
-            f.grep.as_deref(),
-            f.limit.as_deref(),
-        ),
+        "patterns" => query::patterns(&store, &window, f.until.as_deref(), &scope, f.limit.as_deref()),
+        "events" => query::events(&store, &window, f.until.as_deref(), &scope, f.limit.as_deref()),
         "bench" => query::bench(&store, &db),
         "explain" => {
             let target = require_pos(&f, "explain needs a <file>[:FROM-TO]", "explain necesita un <fichero>[:DESDE-HASTA]");

@@ -1,0 +1,14 @@
+{
+  "commands": {
+    "loki": {
+      "run": ["python3", "-I", ".chrono/scripts/loki-jsonl.py",
+              "{service=~\".+\", service!~\"cadvisor|node_exporter|alloy|loki|prometheus|grafana|tempo\"}",
+              "now-24h", "now"],
+      "timeout_secs": 300,
+      "options": {
+        "kind": "log", "time_field": "ts", "message_field": "msg",
+        "level_field": "level", "entity_field": "service"
+      }
+    }
+  }
+}

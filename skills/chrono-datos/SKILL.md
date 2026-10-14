@@ -1,52 +1,77 @@
 ---
 name: chrono-datos
-description: "Analizar datos GRANDES que no caben o no conviene meter en el contexto —logs (texto o JSON), JSONL/NDJSON, CSV, volcados de una API, salidas de comandos de miles de líneas, logs exportados de Grafana/Loki— con chrono en vez de leerlos, hacer grep a ciegas o delegarlos a un subagente. Usar en cuanto un fichero o una salida pase de unos 50 KB o tenga miles de líneas parecidas."
+description: "Logs de servicios y aplicaciones en ejecución (Loki/Grafana u otro MCP de observabilidad, ficheros, comandos, APIs) con cifras EXACTAS usando chrono en vez de leerlos: cuántos errores hay y en qué servicios, cuáles se repiten más, desde cuándo, qué pasó antes de un reinicio o una caída, la causa de una excepción. También ante cualquier fichero o salida de más de ~50 KB o miles de líneas parecidas (JSONL, CSV, syslog, volcados). No hace falta que se nombre chrono. (Para el pipeline de CI/CD de GitHub Actions: chrono-ci.)"
 ---
 
-# Datos masivos con chrono
+# Logs y datos masivos con chrono
 
-> **Requisito**: el binario `chrono` (port Rust ≥ 0.2). Si `chrono version` falla o no
-> reconoce el comando que necesitas, díselo al usuario con
-> `cargo install --git https://github.com/juan52878911/chrono chrono-cli --locked`
-> (necesita Rust). No lo instales sin su permiso.
+chrono indexa una vez y responde con agregados exactos sobre TODO lo indexado: 24 h de logs de
+un entorno (~1 M tokens) se resumen en ~1 100 (medido). Las herramientas que devuelven líneas
+crudas mienten por omisión: el MCP de Grafana corta en 100 líneas por consulta, y un modelo que
+cuenta sobre esa muestra da cifras falsas con aplomo (medido: 6 de 12 totales mal sin chrono,
+12 de 12 bien con él).
 
-chrono indexa una vez y responde con agregados citables: 24 h de logs de un entorno (~1 M tokens)
-se resumen en ~1 100 (medido). Regla: **mide antes de leer**.
+## 0. ¿Lo tiene ya chrono?
 
-## 1. ¿Merece la pena?
+Antes de contar con otra herramienta, mira qué hay indexado:
 
-`wc -c <fichero>` (o el tamaño de la salida). Menos de ~20 KB: léelo y ya. Más de ~50 KB, o miles
-de líneas con la misma forma: chrono.
+- MCP de chrono: tool `sources` → fuentes, nº de eventos, ventana (`first`/`last`), niveles y
+  entidades principales. Una fuente con alias `cmd:loki` (o similar) son los logs de Loki ya volcados.
+- Terminal: `chrono top kind --compact` y `chrono top entity --compact`.
 
-## 2. Meterlo en un índice
+Si la ventana que te piden está dentro, las cifras salen de chrono (sección 2). Si no está,
+cárgalo (sección 1) o, si no puedes, dilo y usa la otra herramienta solo para leer detalle.
 
-- Fuera de un repo, o para no mezclar: `chrono init <repo> --db /tmp/analisis/index.db` y después
-  `--db` en cada comando.
-- Fichero: `chrono add <fichero> --db …`. Detecta JSONL/NDJSON, CSV, syslog/nginx y texto.
-  Fuerza el formato con `--as jsonl|csv|textlog|template`.
-- Salida de un comando: guárdala en un fichero (`… > /tmp/x.jsonl`) y añádelo, o declárala como
-  fuente de comando en `.chrono/config.json` (`commands`) para poder repetirla con `chrono sync`.
-- Si los campos no se detectan solos, en `source_options` (o en `options` del comando):
-  `time_field`, `message_field`, `level_field`, `entity_field`, `kind`, `id_field`,
-  `links` (`commit=sha`), `explode` (un array → un evento por elemento).
+## 1. Meterlo en el índice
 
-## 3. Preguntar (siempre `--compact`)
+- **Loki/Grafana**: el preset `examples/grafana-loki` del repo de chrono es una fuente de comando
+  (`cmd:loki`) que pagina la API sin tope; `chrono add cmd:loki` la carga y `chrono sync` trae solo lo
+  nuevo (el plugin de Claude Code ejecuta `sync` al empezar la sesión).
+- **Fichero**: `chrono add <fichero>`. Detecta JSONL/NDJSON, CSV, syslog/nginx y texto
+  (`--as jsonl|csv|textlog|template` para forzarlo).
+- **Salida de un comando**: declárala en `.chrono/config.json` → `commands` y `chrono add cmd:<nombre>`,
+  o guárdala en un fichero y añádelo.
+- Fuera de un repo, o para no mezclar: `--db /tmp/analisis/index.db` en cada comando.
+- Si los campos no se detectan solos, en `options` del comando (o `source_options`):
+  `time_field`, `message_field`, `level_field`, `entity_field` (el servicio), `kind`, `id_field`,
+  `links` (`commit=sha`), `explode`.
 
-| Quiero saber | Consulta |
-|---|---|
-| Reparto por nivel / tipo / origen | `chrono top level` · `top kind` · `top entity` · `top attr:<campo>` |
-| Qué está pasando (agrupado) | `chrono patterns --level ERROR` (o `--grep texto`) |
-| Desde cuándo / con qué ritmo | `chrono timeline --bucket 1h --grep "<texto>"` (`--by level`) |
-| Cuánto (latencias, tamaños, duraciones) | `chrono stats <atributo> --by entity` → min/p50/p95/max |
-| Los eventos concretos | `chrono events --level ERROR --limit 20` |
-| Qué pasó alrededor de un evento en OTRAS fuentes | `chrono correlate <id> --delta 30m --kind commit` |
+## 2. Preguntar
 
-Acota con `--source <tipo|id|cmd:nombre>`, `--level`, `--grep`, `--since`.
+Los mismos filtros en `top`, `patterns`, `timeline`, `events` y `stats`, en el MCP y en el CLI:
+`since`/`until` (ISO; `until` exclusivo), `level` (lista con comas, sin distinguir mayúsculas),
+`entity` (servicio o fichero; lista con comas), `source` (`cmd:loki`, `jsonl`, `git`…), `kind`, `grep`.
+En el CLI son `--since`, `--until`, `--level`… y siempre `--compact`.
+
+| Quiero saber | MCP | CLI |
+|---|---|---|
+| Cuántas líneas por nivel | `top` dim=level | `chrono top level` |
+| En qué servicios caen los errores | `top` dim=entity, level=FATAL (una llamada por nivel para el reparto) | `chrono top entity --level FATAL` |
+| Los mensajes más repetidos | `patterns` level=FATAL,ERROR,CRITICAL limit=3 | `chrono patterns --level FATAL,ERROR,CRITICAL --limit 3` |
+| Qué escupe un servicio | `patterns` entity=product_service | `chrono patterns --entity product_service` |
+| Desde cuándo / picos / incidentes | `timeline` grep="<mensaje>" bucket_secs=600 | `chrono timeline --grep "<mensaje>" --bucket 10m` |
+| Qué pasó justo antes de X | `events` entity=postgres until=<ts> limit=30 | `chrono events --entity postgres --until <ts>` |
+| Una traza o excepción completa | `events` entity=<svc> since=<ts> limit=80 | `chrono events --entity <svc> --since <ts> --limit 80` |
+| Latencias, tamaños, duraciones | `stats` attr=duration_s by=entity | `chrono stats duration_s --by entity` |
+| Qué hubo en OTRAS fuentes alrededor | `correlate` id=<evento> delta_secs=1800 | `chrono correlate <id> --delta 30m --kind commit` |
+
+Patrones de trabajo:
+- **Cifras**: siempre de `top`/`patterns`/`timeline`, nunca contando líneas de `events` o de Loki.
+- **Causa de una excepción**: `patterns` o `events` con level=ERROR para ubicarla, y después
+  `events` del mismo servicio desde ese instante para leer la traza hasta la última línea
+  (`AttributeError: …`) y la petición que falló (`DELETE /api/… 500`).
+- **Reinicios/caídas**: `timeline` con grep del mensaje de apagado exacto (en Postgres,
+  `received fast shutdown request`; de arranque, `database system is ready to accept connections`),
+  entity del servicio y bucket_secs=60: cada bucket es un reinicio con su hora. Para lo que lo
+  precede, `timeline` con level=ERROR,FATAL en la misma ventana, o `events` con until=<hora>.
+  Ojo: un sidecar o contenedor de preflight del mismo servicio emite los mismos mensajes; si los
+  eventos traen `container`, sepáralos con `top dim=attr:container grep=<mensaje>`.
+- Cita los números tal cual vienen; si chrono no tiene un dato, dilo en vez de estimarlo.
 
 ## Cuándo NO
 
-- Datos pequeños: leer es más barato que indexar.
-- Necesitas el texto literal completo de algo concreto: localízalo con chrono (`events`, `show`) y
-  lee solo eso.
+- Datos pequeños (< ~20 KB): leer es más barato que indexar.
+- Necesitas el texto literal completo de algo concreto: localízalo con chrono y lee solo eso.
 
-Nunca pegues al usuario miles de líneas: resume con lo que da chrono y cita ids de ejemplo.
+> **Requisito**: el binario `chrono` ≥ 0.2.2. El plugin de Claude Code lo instala solo; fuera
+> del plugin: `cargo install --git https://github.com/juan52878911/chrono chrono-cli --locked`.

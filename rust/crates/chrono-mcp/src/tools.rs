@@ -33,6 +33,27 @@ fn since_prop() -> Value {
     str_prop("Ventana temporal ISO, p.ej. 2025-01-01 (opcional)")
 }
 
+/// Filtros comunes de las consultas sobre eventos (`top`, `patterns`,
+/// `timeline`, `events`, `stats`): las mismas reglas en todas (ver
+/// `chrono_metrics::EventScope`), mezcladas con las propiedades propias.
+fn with_scope(own: Value) -> Value {
+    let mut props = json!({
+        "since": str_prop("Inicio de la ventana, ISO (2026-10-13 o 2026-10-13T22:00:00Z) (opcional)"),
+        "until": str_prop("Fin de la ventana, ISO, exclusivo (opcional)"),
+        "level": str_prop("Nivel o niveles separados por coma, sin distinguir mayúsculas: FATAL,ERROR,CRITICAL (opcional)"),
+        "entity": str_prop("Entidad o entidades exactas separadas por coma: el servicio en logs (postgres,product_service), el fichero en git (opcional)"),
+        "source": str_prop("Fuente: tipo (git, jsonl, cmd…) o id/alias (cmd:loki) (opcional)"),
+        "kind": str_prop("Tipo de evento: commit, log, ci.run… o prefijo con * (ci.*) (opcional)"),
+        "grep": str_prop("Subcadena del mensaje/título (opcional)")
+    });
+    if let (Some(p), Some(o)) = (props.as_object_mut(), own.as_object()) {
+        for (k, v) in o {
+            p.insert(k.clone(), v.clone());
+        }
+    }
+    props
+}
+
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     let mut schema = json!({"type": "object", "properties": properties});
     if !required.is_empty() {
@@ -70,7 +91,7 @@ pub fn tool_defs() -> Vec<Value> {
         ),
         tool(
             "search",
-            "Busca commits por significado (texto completo).",
+            "Busca eventos por texto completo (FTS5): commits, logs, despliegues. Solo texto: para filtrar por nivel, servicio o ventana usa events/top/patterns.",
             json!({"query": str_prop("Texto a buscar")}),
             &["query"],
         ),
@@ -118,33 +139,29 @@ pub fn tool_defs() -> Vec<Value> {
         ),
         tool(
             "timeline",
-            "Conteo de eventos por bucket temporal (log-native, multi-fuente).",
-            json!({
-                "since": since_prop(),
-                "until": str_prop("Fin de la ventana ISO (opcional)"),
+            "Cuántos eventos hay por intervalo de tiempo (exacto, sobre todo el índice): «desde cuándo aparece este error», picos, incidentes. Con level/entity/grep cuenta solo esos.",
+            with_scope(json!({
                 "bucket_secs": json!({"type": "integer", "description": "Tamaño de bucket en segundos (por defecto 3600)"}),
                 "by": str_prop("Desglose: level | kind (opcional)"),
                 "limit": json!({"type": "integer", "description": "Máximo de buckets (por defecto 500)"})
-            }),
+            })),
             &[],
         ),
         tool(
             "top",
-            "Valores más frecuentes de una dimensión (level|kind|actor|entity|attr:<clave>).",
-            json!({
-                "dim": str_prop("Dimensión: level|kind|actor|entity|attr:<clave>"),
-                "since": since_prop(),
+            "Recuento EXACTO de los valores más frecuentes de una dimensión sobre todo el índice (sin tope de líneas): cuántos eventos por nivel, en qué servicios caen los FATAL (dim=entity, level=FATAL), qué tipos dominan.",
+            with_scope(json!({
+                "dim": str_prop("Dimensión: level | kind | actor | entity | attr:<clave>"),
                 "limit": json!({"type": "integer", "description": "Máximo de valores (por defecto 25)"})
-            }),
+            })),
             &["dim"],
         ),
         tool(
             "patterns",
-            "Plantillas de log más frecuentes (clustering Drain-light).",
-            json!({
-                "since": since_prop(),
+            "Mensajes de log más frecuentes agrupados en plantillas (los números variables se igualan), con su recuento EXACTO: «los 3 errores más repetidos» (level=FATAL,ERROR,CRITICAL), «qué escupe product_service» (entity=product_service).",
+            with_scope(json!({
                 "limit": json!({"type": "integer", "description": "Máximo de plantillas (por defecto 25)"})
-            }),
+            })),
             &[],
         ),
         tool(
@@ -171,16 +188,10 @@ pub fn tool_defs() -> Vec<Value> {
         ),
         tool(
             "events",
-            "Stream cronológico unificado de todas las fuentes, filtrable.",
-            json!({
-                "since": since_prop(),
-                "until": str_prop("Fin de la ventana ISO (opcional)"),
-                "source": str_prop("Fuente: kind (git|jsonl|…) o source_id (opcional)"),
-                "kind": str_prop("Tipo de evento (commit|log|release|…) (opcional)"),
-                "level": str_prop("Nivel/severidad exacto (ERROR, INFO…) (opcional)"),
-                "grep": str_prop("Substring en el título (opcional)"),
+            "Los eventos en orden cronológico con todos los filtros: leer los mensajes reales de una ventana (p.ej. lo que pasó justo antes de un reinicio, o una traza completa de product_service).",
+            with_scope(json!({
                 "limit": json!({"type": "integer", "description": "Máximo de eventos (por defecto 100)"})
-            }),
+            })),
             &[],
         ),
         tool(
@@ -192,6 +203,22 @@ pub fn tool_defs() -> Vec<Value> {
                 "limit": json!({"type": "integer", "description": "Máximo de correlacionados (por defecto 25)"})
             }),
             &["id"],
+        ),
+        tool(
+            "sources",
+            "Qué hay indexado: cada fuente (repo git, logs, comandos como cmd:loki) con su nº de eventos, ventana de tiempo, niveles y entidades principales. Llamar primero para saber si chrono ya tiene los datos que se buscan.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "stats",
+            "min/p50/p95/max/suma de un atributo numérico (duración, bytes…) por grupo, con los filtros de siempre.",
+            with_scope(json!({
+                "attr": str_prop("Atributo numérico, p.ej. duration_s"),
+                "by": str_prop("Agrupar por: level | kind | entity | attr:<clave> (opcional)"),
+                "limit": json!({"type": "integer", "description": "Máximo de grupos (por defecto 25)"})
+            })),
+            &["attr"],
         ),
     ]
 }
@@ -264,17 +291,45 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
         }
         "prs" => prs(conn, since)?,
         "timeline" => {
-            let until = args.get("until").and_then(Value::as_str).unwrap_or("");
             // El parámetro MCP es en SEGUNDOS (cómodo); `at_epoch` es ms → ×1000.
             let bucket_ms = arg_i64(args, "bucket_secs", 3600).max(1) * 1000;
             let by = args.get("by").and_then(Value::as_str).filter(|s| !s.is_empty());
             let limit = arg_i64(args, "limit", 500).max(1) as usize;
-            timeline(conn, since_epoch, since_to_epoch(until), bucket_ms, by, limit)?
+            let scope = scope_from(args);
+            let rows = chrono_metrics::timeline_scoped(conn, since_epoch, scope.until_epoch, bucket_ms, by, &scope, limit)?;
+            let buckets: Vec<Value> = rows
+                .iter()
+                .map(|b| json!({"bucket_epoch": b.bucket_epoch, "key": b.key, "count": b.count}))
+                .collect();
+            json!({"bucket_ms": bucket_ms, "by": by, "buckets": buckets})
         }
         "top" => {
             let dim = arg_str(args, "dim")?;
             let limit = arg_i64(args, "limit", 25).max(1) as usize;
-            top(conn, dim, since_epoch, limit)?
+            let sc = scope_from(args);
+            let filter = chrono_metrics::TopFilter {
+                source: sc.source,
+                grep: sc.grep,
+                level: sc.level,
+                kind: sc.kind,
+                entity: sc.entity,
+                until_epoch: sc.until_epoch,
+            };
+            let rows = chrono_metrics::top_filtered(conn, dim, since_epoch, &filter, limit)?;
+            let items: Vec<Value> = rows.iter().map(|v| json!({"value": v.value, "count": v.count})).collect();
+            json!({"dim": dim, "top": items})
+        }
+        "sources" => sources(conn)?,
+        "stats" => {
+            let attr = arg_str(args, "attr")?;
+            let by = args.get("by").and_then(Value::as_str).filter(|s| !s.is_empty());
+            let limit = arg_i64(args, "limit", 25).max(1) as usize;
+            let rows = chrono_metrics::stats(conn, attr, by, since_epoch, &scope_from(args), limit)?;
+            let groups: Vec<Value> = rows
+                .iter()
+                .map(|r| json!({"group": r.group, "count": r.count, "min": r.min, "p50": r.p50, "p95": r.p95, "max": r.max, "sum": r.sum}))
+                .collect();
+            json!({"attr": attr, "by": by, "groups": groups})
         }
         "correlate" => {
             let id = arg_str(args, "id")?;
@@ -284,7 +339,12 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
         }
         "patterns" => {
             let limit = arg_i64(args, "limit", 25).max(1) as usize;
-            patterns(conn, since_epoch, limit)?
+            let rows = chrono_metrics::patterns_scoped(conn, since_epoch, &scope_from(args), limit)?;
+            let items: Vec<Value> = rows
+                .iter()
+                .map(|p| json!({"template": p.template, "count": p.count, "example_id": p.example_id}))
+                .collect();
+            json!({"patterns": items})
         }
         "trace" => {
             let id = arg_str(args, "id")?;
@@ -293,15 +353,16 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
             trace(conn, id, depth, limit)?
         }
         "events" => {
-            let until = args.get("until").and_then(Value::as_str).unwrap_or("");
             let limit = arg_i64(args, "limit", 100).max(1) as usize;
+            let sc = scope_from(args);
             let filter = chrono_metrics::EventFilter {
                 since_epoch,
-                until_epoch: since_to_epoch(until),
-                source: args.get("source").and_then(Value::as_str).filter(|s| !s.is_empty()),
-                kind: args.get("kind").and_then(Value::as_str).filter(|s| !s.is_empty()),
-                level: args.get("level").and_then(Value::as_str).filter(|s| !s.is_empty()),
-                grep: args.get("grep").and_then(Value::as_str).filter(|s| !s.is_empty()),
+                until_epoch: sc.until_epoch,
+                source: sc.source,
+                kind: sc.kind,
+                level: sc.level,
+                grep: sc.grep,
+                entity: sc.entity,
             };
             events(conn, &filter, limit)?
         }
@@ -331,6 +392,69 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
 /// Lee un entero de `args[key]`, o `default` si falta o no es entero.
 fn arg_i64(args: &Value, key: &str, default: i64) -> i64 {
     args.get(key).and_then(Value::as_i64).unwrap_or(default)
+}
+
+/// Los filtros comunes de `args` (ver [`with_scope`]). `since` va aparte: cada
+/// consulta lo recibe como `since_epoch`.
+fn scope_from(args: &Value) -> chrono_metrics::EventScope<'_> {
+    let s = |k: &str| args.get(k).and_then(Value::as_str).filter(|v| !v.trim().is_empty());
+    chrono_metrics::EventScope {
+        source: s("source"),
+        grep: s("grep"),
+        level: s("level"),
+        kind: s("kind"),
+        entity: s("entity"),
+        until_epoch: s("until").map_or(0, since_to_epoch),
+    }
+}
+
+/// Inventario del índice: por fuente, nº de eventos, ventana, niveles y
+/// entidades principales. Orden estable por id de fuente.
+fn sources(conn: &Connection) -> Result<Value> {
+    let mut stmt = conn.prepare(
+        "SELECT s.ref, s.id, s.kind, COUNT(e.id),
+                (SELECT at FROM events WHERE source_ref = s.ref AND at_epoch > 0 ORDER BY at_epoch ASC LIMIT 1),
+                (SELECT at FROM events WHERE source_ref = s.ref AND at_epoch > 0 ORDER BY at_epoch DESC LIMIT 1)
+         FROM sources s LEFT JOIN events e ON e.source_ref = s.ref
+         GROUP BY s.ref ORDER BY s.id",
+    )?;
+    let rows: Vec<(i64, String, String, i64, Option<String>, Option<String>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    let mut out = Vec::new();
+    for (sref, id, kind, n, first, last) in rows {
+        let counts = |sql: &str| -> Result<Vec<Value>> {
+            let mut st = conn.prepare(sql)?;
+            let v = st
+                .query_map(params![sref], |r| Ok(json!({"value": r.get::<_, String>(0)?, "count": r.get::<_, i64>(1)?})))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(v)
+        };
+        let levels = counts(
+            "SELECT level, COUNT(*) c FROM events WHERE source_ref = ?1 AND level != ''
+             GROUP BY level ORDER BY c DESC, level LIMIT 10",
+        )?;
+        let kinds = counts(
+            "SELECT kind, COUNT(*) c FROM events WHERE source_ref = ?1 GROUP BY kind ORDER BY c DESC, kind LIMIT 5",
+        )?;
+        let entities = counts(
+            "SELECT en.key, COUNT(*) c FROM touches t JOIN events e ON e.id = t.event_id
+             JOIN entities en ON en.id = t.entity_id WHERE e.source_ref = ?1
+             GROUP BY en.key ORDER BY c DESC, en.key LIMIT 15",
+        )?;
+        // Las fuentes de comando se guardan como jsonl de su caché
+        // (`…/cmd/<nombre>.cmd.jsonl`); el alias es lo que acepta `source`.
+        let alias = id
+            .rsplit('/')
+            .next()
+            .and_then(|f| f.strip_suffix(".cmd.jsonl"))
+            .map(|n| format!("cmd:{n}"));
+        out.push(json!({
+            "source": id, "alias": alias, "kind": kind, "events": n, "first": first, "last": last,
+            "levels": levels, "kinds": kinds, "top_entities": entities,
+        }));
+    }
+    Ok(json!({"sources": out}))
 }
 
 fn hotspots(conn: &Connection, since_epoch: i64) -> Result<Value> {
@@ -590,28 +714,6 @@ fn prs(conn: &Connection, since: &str) -> Result<Value> {
     Ok(json!({"pull_requests": items}))
 }
 
-fn timeline(
-    conn: &Connection,
-    since_epoch: i64,
-    until_epoch: i64,
-    bucket_ms: i64,
-    by: Option<&str>,
-    limit: usize,
-) -> Result<Value> {
-    let rows = chrono_metrics::timeline(conn, since_epoch, until_epoch, bucket_ms, by, limit)?;
-    let buckets: Vec<Value> = rows
-        .iter()
-        .map(|b| json!({"bucket_epoch": b.bucket_epoch, "key": b.key, "count": b.count}))
-        .collect();
-    Ok(json!({"bucket_ms": bucket_ms, "by": by, "buckets": buckets}))
-}
-
-fn top(conn: &Connection, dim: &str, since_epoch: i64, limit: usize) -> Result<Value> {
-    let rows = chrono_metrics::top(conn, dim, since_epoch, limit)?;
-    let items: Vec<Value> = rows.iter().map(|v| json!({"value": v.value, "count": v.count})).collect();
-    Ok(json!({"dim": dim, "top": items}))
-}
-
 fn trace(conn: &Connection, id: &str, depth: i64, limit: usize) -> Result<Value> {
     let tr = chrono_metrics::trace(conn, id, depth, limit)?;
     let event_json = |e: &chrono_metrics::EventRow| {
@@ -640,15 +742,6 @@ fn events(conn: &Connection, filter: &chrono_metrics::EventFilter, limit: usize)
         }))
         .collect();
     Ok(json!({"events": items}))
-}
-
-fn patterns(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Value> {
-    let rows = chrono_metrics::patterns(conn, since_epoch, limit)?;
-    let items: Vec<Value> = rows
-        .iter()
-        .map(|p| json!({"template": p.template, "count": p.count, "example_id": p.example_id}))
-        .collect();
-    Ok(json!({"patterns": items}))
 }
 
 fn correlate(conn: &Connection, id: &str, delta_ms: i64, limit: usize) -> Result<Value> {

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Imprime la ruta de un binario `chrono` del port Rust (≥ 0.2) y, si no hay
+# Imprime la ruta de un binario `chrono` reciente (≥ $CHRONO_MIN) y, si no hay
 # ninguno, lo instala desde la release de GitHub (install.sh verifica SHA256)
 # en ~/.local/bin, sin sudo. Todo lo que no es la ruta va a stderr: lo usa el
 # servidor MCP, cuyo stdout es el protocolo.
@@ -7,8 +7,17 @@
 # Desactivar la instalación automática: CHRONO_AUTO_INSTALL=0.
 set -eu
 
-es_rust() { # el port Rust trae `explain`; el Go v0.1 no
-  "$1" help 2>/dev/null | grep -q "explain" 
+# Versión mínima que entiende lo que piden las skills y el MCP (filtros
+# level/entity/until en top/patterns/events, tool `sources`). Un binario más
+# viejo se ignora y se instala la release encima de ~/.local/bin.
+CHRONO_MIN="0.2.2"
+
+es_rust() { # `chrono 0.2.2` (o `0.2.2-dev`) ≥ CHRONO_MIN; el Go v0.1 no cumple
+  v=$("$1" --version 2>/dev/null | awk '{print $2}' | sed 's/-.*//')
+  [ -n "$v" ] || return 1
+  printf '%s\n%s\n' "$CHRONO_MIN" "$v" | awk -F. '
+    NR==1 { a=$1*1000000+$2*1000+$3 }
+    NR==2 { b=$1*1000000+$2*1000+$3; exit !(b>=a) }'
 }
 
 for c in "${CHRONO_BIN:-}" "$(command -v chrono 2>/dev/null || true)" \
