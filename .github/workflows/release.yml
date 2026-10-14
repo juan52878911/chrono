@@ -1,0 +1,75 @@
+# Release del port Rust: al empujar un tag vX.Y.Z compila `chrono` para las
+# cuatro plataformas que conoce install.sh y publica la release con los
+# tarballs `chrono-<tag>-<os>-<arch>.tar.gz` y SHA256SUMS (mismos nombres que
+# las releases Go, así `install.sh` no cambia).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag a publicar (debe existir)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-14, target: aarch64-apple-darwin, os: darwin, arch: arm64 }
+          - { runner: macos-14, target: x86_64-apple-darwin, os: darwin, arch: amd64 }
+          # musl: binario estático, el mismo fichero funciona en cualquier distro.
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-musl, os: linux, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, os: linux, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Toolchain
+        run: rustup target add ${{ matrix.target }}
+      - name: musl
+        if: matrix.os == 'linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - name: Compilar
+        working-directory: rust
+        run: cargo build --release --locked -p chrono-cli --target ${{ matrix.target }}
+      - name: Empaquetar
+        shell: bash
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          name="chrono-$tag-${{ matrix.os }}-${{ matrix.arch }}"
+          mkdir -p "dist/$name"
+          cp "rust/target/${{ matrix.target }}/release/chrono" "dist/$name/"
+          cp LICENSE README.md "dist/$name/" 2>/dev/null || true
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          "dist/$name/chrono" version || true   # solo informativo (no corre en el cruzado x86_64 de macOS si no hay Rosetta)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*.tar.gz
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publicar
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
+          gh release create "$tag" *.tar.gz SHA256SUMS --title "chrono $tag" \
+            --notes "Port Rust. Instalar: \`curl -fsSL https://raw.githubusercontent.com/juan52878911/chrono/main/install.sh | sh\` · Plugin de Claude Code: \`/plugin install chrono --marketplace juan52878911/chrono\`" \
+            || gh release upload "$tag" *.tar.gz SHA256SUMS --clobber

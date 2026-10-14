@@ -2,12 +2,26 @@
   "name": "chrono",
   "version": "0.2.0",
   "description": "Historia de git, logs y CI/CD indexados en local y consultados de forma determinista: qué es peligroso tocar, por qué un trozo de código está así (explain), causas agrupadas de fallos de CI y de logs masivos, sin leer miles de líneas. Skills + servidor MCP de chrono.",
-  "author": { "name": "Juan Bedoya", "url": "https://github.com/juan52878911" },
+  "author": {
+    "name": "Juan Bedoya",
+    "url": "https://github.com/juan52878911"
+  },
   "homepage": "https://github.com/juan52878911/chrono",
   "repository": "https://github.com/juan52878911/chrono",
   "license": "MIT",
-  "keywords": ["git", "history", "blame", "logs", "ci", "github-actions", "observability", "tokens"],
+  "keywords": [
+    "git",
+    "history",
+    "blame",
+    "logs",
+    "ci",
+    "github-actions",
+    "observability",
+    "tokens"
+  ],
   "mcpServers": {
-    "chrono": { "command": "chrono", "args": ["mcp"] }
+    "chrono": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/claude/mcp.sh"
+    }
   }
 }

@@ -1,0 +1,16 @@
+{
+  "description": "chrono: instala el binario la primera vez y crea/actualiza el índice del repo en segundo plano al empezar cada sesión.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/claude/session-start.sh\"",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}
