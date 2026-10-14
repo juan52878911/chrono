@@ -53,6 +53,8 @@ only, without metadata: about 2-5x smaller and byte-identical for the same index
   search <text>        Search events by text (FTS5, LIKE fallback).
   similar <id>         Near-duplicate events (by SimHash).
   show <id>            Show a commit's diff live (git, bounded; --entity <path>).
+  explain <file>[:A-B] Why this code is like this: commits that wrote those lines (git blame at the
+                       indexed revision), fix certainty, tickets/PRs, authors and what changes with it.
 
 Symbols (git, needs 'init --symbols'):
   Add --by symbol to hotspots/coupling/owners/churn to scope to functions
@@ -124,6 +126,8 @@ Consulta (JSON, schema_version 2: `entity`/`id`):
   search <texto>       Busca eventos por texto (FTS5, con fallback a LIKE).
   similar <id>         Eventos casi-duplicados (por SimHash).
   show <id>            Muestra el diff de un commit en vivo (git, acotado; --entity <ruta>).
+  explain <fich>[:A-B] Por qué este código está así: commits que escribieron esas líneas (git blame en
+                       la revisión indexada), certeza de arreglo, tickets/PRs, autores y qué cambia con él.
 
 Símbolos (git, requiere 'init --symbols'):
   Añade --by symbol a hotspots/coupling/owners/churn para acotar a funciones
@@ -557,6 +561,10 @@ fn main() {
             f.limit.as_deref(),
         ),
         "bench" => query::bench(&store, &db),
+        "explain" => {
+            let target = require_pos(&f, "explain needs a <file>[:FROM-TO]", "explain necesita un <fichero>[:DESDE-HASTA]");
+            query::explain(&store, &target, f.limit.as_deref())
+        }
         "correlate" => {
             let id = require_pos(&f, "correlate needs an <id>", "correlate necesita un <id>");
             query::correlate(&store, &id, f.delta.as_deref(), f.kind.as_deref(), f.limit.as_deref())

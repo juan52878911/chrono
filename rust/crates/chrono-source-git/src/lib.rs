@@ -14,6 +14,7 @@
 //! - La extracción de tickets es un parseo manual simple (`#123`, `ABC-123`);
 //!   los patrones configurables por repo quedan para más adelante.
 
+mod blame;
 mod branches;
 mod cursor;
 mod gitutil;
@@ -22,6 +23,7 @@ mod show;
 mod simhash;
 mod timeutil;
 
+pub use blame::{blame, file_lines, Blame, BlameCommit};
 pub use branches::{branches, Branch, BranchAuthor, BranchTip};
 pub use gitutil::{blob_lines, commit_exists, git_version, head_sha, is_shallow, ls_tree, Result};
 pub use show::{show, Show};

@@ -124,6 +124,7 @@ Every query accepts `--json` (default) and `--since DATE`. The index is
 | `phases` | Project phases (tags/releases). |
 | `search <text>` | Search commits by meaning (full-text). |
 | `similar <sha>` | Near-duplicate commits (by SimHash fingerprint). |
+| `explain <file>[:A-B]` | Why is this code like this? Commits that wrote those lines (`git blame` at the indexed revision), fix certainty (`yes`/`maybe`), tickets/PRs, authors, and what changes with those lines (functions too with `init --symbols`). Deterministic. |
 | `mcp` | MCP server over stdio (for an AI). |
 
 Options: `--db PATH`, `--since DATE`, `--lang en|es`.

@@ -112,6 +112,7 @@ El índice se **auto-descubre** subiendo desde el directorio actual, como git co
 | `phases` | Fases del proyecto (etiquetas/releases). |
 | `search <texto>` | Busca commits por significado (texto completo). |
 | `similar <sha>` | Commits casi-duplicados (por huella SimHash). |
+| `explain <fichero>[:A-B]` | ¿Por qué este código está así? Commits que escribieron esas líneas (`git blame` en la revisión indexada), certeza de arreglo (`yes`/`maybe`), tickets/PRs, autores y qué cambia con esas líneas (también funciones con `init --symbols`). Determinista. |
 | `mcp` | Servidor MCP por stdio (para una IA). |
 
 Opciones: `--db RUTA`, `--since FECHA`, `--lang en|es`.

@@ -22,6 +22,7 @@ Usa **siempre** `--compact` (tabla de texto, sin metadatos, pensada para agentes
 | Pregunta | Consulta |
 |---|---|
 | ¿Qué es peligroso tocar? | `chrono hotspots --compact` |
+| **Voy a leer/tocar estas líneas: ¿por qué están así?** | `chrono explain <fichero>:DESDE-HASTA --compact` |
 | ¿Qué se rompe si toco X? | `chrono coupling <fichero> --compact` |
 | ¿Quién conoce esto? ¿bus factor? | `chrono owners <ruta> --compact` |
 | ¿Dónde se concentran los arreglos y de qué tipo? | `chrono bugs --compact` |
@@ -31,6 +32,28 @@ Usa **siempre** `--compact` (tabla de texto, sin metadatos, pensada para agentes
 | Por funciones, no por fichero | añade `--by symbol` (requiere `chrono init --symbols`) |
 
 Ventana temporal: `--since AAAA-MM-DD`. Más filas: `--limit N` (la salida dice `truncated` si cortó).
+
+## `explain`: antes de tocar un trozo
+
+`chrono explain src/x.py:120-180 --compact` da, en unos cientos de tokens (frente a ~10 k de
+`git log -L`):
+
+- **por qué está así**: los commits que escribieron esas líneas, con fecha, autor, cuántas
+  líneas puso cada uno y su título;
+- **si eran arreglos**: `fix=yes` (prefijo `fix:` o revert), `maybe` (solo una palabra clave
+  en el mensaje: no lo afirmes como arreglo), `no`;
+- **tickets/PRs** de esos commits, si el índice los tiene;
+- **qué cambia con esas líneas** (`changes_with`): entidades que cambiaron en ≥2 de esos
+  commits; con `chrono init --symbols`, también las funciones concretas.
+
+Usa `changes_with` como **lista de «revisa también»**, no como certeza: medido sobre sesiones
+reales, ~4 de cada 10 de esos avisos acabaron siendo ficheros que hubo que tocar (frente a
+~2 de cada 10 de «lo de la misma carpeta»). Menciónalos al usuario antes de dar el cambio
+por terminado.
+
+La salida es determinista (mismo índice ⇒ mismos bytes) y es la fuente: cita sus ids y
+fechas tal cual; no completes con suposiciones lo que no aparece. Si el índice está atrasado
+respecto al código que lees (`revision` distinta de HEAD), haz `chrono sync` primero.
 
 ## Cuándo NO
 

@@ -41,7 +41,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
     json!({"name": name, "description": description, "inputSchema": schema})
 }
 
-/// Los 11 tools expuestos por el servidor (paridad con el Go + `branches`/`prs`).
+/// Los tools expuestos por el servidor (paridad con el Go + `branches`/`prs`).
 pub fn tool_defs() -> Vec<Value> {
     vec![
         tool(
@@ -97,6 +97,12 @@ pub fn tool_defs() -> Vec<Value> {
             "Fases del proyecto (etiquetas/releases).",
             json!({}),
             &[],
+        ),
+        tool(
+            "explain",
+            "Por qué un trozo de código está así: commits que escribieron esas líneas (git blame en la revisión indexada), si eran arreglos (yes/maybe/no), tickets/PRs, autores y qué cambia con él. Determinista.",
+            json!({"target": str_prop("fichero o fichero:DESDE-HASTA (líneas 1-based, inclusivas)"), "limit": {"type": "integer", "description": "Máximo de commits (por defecto 15)"}}),
+            &["target"],
         ),
         tool(
             "branches",
@@ -250,6 +256,11 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
         "branches" => {
             let base = args.get("base").and_then(Value::as_str).unwrap_or("");
             branches(store, base)?
+        }
+        "explain" => {
+            let target = arg_str(args, "target")?;
+            let limit = arg_i64(args, "limit", 15).max(1) as usize;
+            explain(store, target, limit)?
         }
         "prs" => prs(conn, since)?,
         "timeline" => {
@@ -419,6 +430,92 @@ fn phases(conn: &Connection) -> Result<Value> {
         .map(|p| json!({"name": p.name, "date": p.date}))
         .collect();
     Ok(json!({"phases": items}))
+}
+
+/// `explain`: mismo contenido y orden que `chrono explain` (las reglas viven en
+/// `chrono_metrics::explain`; aquí solo se ejecuta el blame y se serializa).
+fn explain(store: &chrono_store::Store, target: &str, limit: usize) -> Result<Value> {
+    let repo = match store.meta("repo_path")?.filter(|s| !s.is_empty()) {
+        Some(rp) => rp,
+        None => store.list_sources()?.into_iter().find(|s| s.kind == "git").map(|s| s.path).ok_or("no git source in the index")?,
+    };
+    let rev = store
+        .list_sources()?
+        .into_iter()
+        .find(|s| s.kind == "git")
+        .map(|s| s.watermark)
+        .or(store.meta("last_watermark")?)
+        .and_then(|w| w.strip_prefix("sha:").map(str::to_string))
+        .filter(|s| !s.is_empty())
+        .ok_or("the index has no git revision; run 'chrono sync'")?;
+    let (file, range) = chrono_metrics::parse_target(target)?;
+    let b = chrono_source_git::blame(Path::new(&repo), &rev, &file, range).map_err(|e| format!("explain {file}: {e}"))?;
+    let blamed: Vec<chrono_metrics::Blamed> = b
+        .commits
+        .iter()
+        .map(|c| chrono_metrics::Blamed { sha: c.sha.clone(), author: c.author.clone(), author_time: c.author_time, summary: c.summary.clone(), lines: c.lines })
+        .collect();
+    let x = chrono_metrics::explain(store.conn(), &file, &blamed, limit)?;
+    let commits: Vec<Value> = x
+        .commits
+        .iter()
+        .map(|ec| {
+            let (c, f) = (&ec.blamed, &ec.facts);
+            let mut row = json!({
+                "id": &c.sha[..10.min(c.sha.len())],
+                "date": chrono_metrics::utc_date(c.author_time),
+                "author": c.author,
+                "lines": c.lines,
+                "fix": f.fix.as_str(),
+            });
+            if !f.category.is_empty() {
+                row["category"] = json!(f.category);
+            }
+            row["title"] = json!(c.summary);
+            if !f.tickets.is_empty() {
+                let t: Vec<String> = f
+                    .tickets
+                    .iter()
+                    .map(|tk| if tk.title.is_empty() { tk.id.clone() } else { format!("{} {} {}: {}", tk.id, tk.kind, tk.state, tk.title) })
+                    .collect();
+                row["tickets"] = json!(t);
+            }
+            if f.is_bulk {
+                row["bulk"] = json!(true);
+            }
+            row
+        })
+        .collect();
+    let changes_with: Vec<Value> = x
+        .co_changes
+        .iter()
+        .map(|c| {
+            let mut o = json!({"entity": c.entity, "commits": c.commits, "of": x.co_base});
+            if !c.symbols.is_empty() {
+                o["symbols"] = json!(c.symbols.iter().map(|(n, k)| format!("{n} ({k})")).collect::<Vec<_>>());
+            }
+            o
+        })
+        .collect();
+    Ok(json!({
+        "file": file,
+        "from": b.from,
+        "to": b.to,
+        "file_lines": b.total_lines,
+        "revision": &rev[..12.min(rev.len())],
+        "summary": {
+            "commits": x.total_commits,
+            "fixes_yes": x.fixes_yes,
+            "fixes_maybe": x.fixes_maybe,
+            "not_indexed": x.not_indexed,
+            "oldest": x.oldest.map(chrono_metrics::utc_date),
+            "newest": x.newest.map(chrono_metrics::utc_date),
+        },
+        "commits": commits,
+        "authors": x.authors.iter().map(|(a, n)| json!({"author": a, "lines": n})).collect::<Vec<_>>(),
+        "changes_with": changes_with,
+        "truncated": x.total_commits > x.commits.len(),
+    }))
 }
 
 fn branches(store: &chrono_store::Store, base: &str) -> Result<Value> {

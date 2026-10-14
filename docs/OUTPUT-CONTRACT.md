@@ -35,6 +35,7 @@ This is **the product contract**: which questions chrono answers and their exact
 | `phases` | What were the project phases? | list of `{tag, date}` from tags/releases |
 | `search <text>` | Which commits talk about X? | list of `{sha, subject, date}` (FTS5/BM25) |
 | `similar <sha>` | Which commits are near-identical? | list of `{sha, subject, distance}` (SimHash) |
+| `explain <file>[:A-B]` | Why is this code like this, and what changes with it? | `{file, from, to, file_lines, revision, summary:{commits, fixes_yes, fixes_maybe, not_indexed, oldest, newest}, commits:[{id, date, author, lines, fix, category?, title, tickets?, bulk?}], authors:[{author, lines}], changes_with:[{entity, commits, of, symbols?}]}`. `git blame` at the indexed revision (never the working tree) with user blame config neutralized; commits newest first, ties by sha; dates UTC; `fix`: `yes` = conventional `fix:`/revert, `maybe` = keyword only, `-` = not indexed; `changes_with` = entities in ≥2 of those (non-bulk) commits, a file's own symbols excluded, other files' symbols grouped under their file. Same index ⇒ same bytes. |
 | `session_patterns` | What did each agent session/task cost, and did its commits hold? (Rust port; needs a `nod` source) | `{summary, basis, tasks:[…], sessions:[…], notes}` — see `docs/NOD.md` |
 
 ## `result` examples

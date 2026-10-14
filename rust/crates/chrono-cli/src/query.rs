@@ -920,3 +920,117 @@ pub fn stats(
     let result = Json::obj().set("attr", Json::str(attr)).set("by", by.map_or(Json::Null, Json::str)).set("groups", Json::Arr(items));
     envelope(store, "stats", w, limit, n, result)
 }
+
+/// `explain <fichero>[:desde-hasta]`: por qué un trozo de código está así.
+///
+/// `git blame` del rango en la revisión INDEXADA (no en el árbol de trabajo) +
+/// lo que el índice sabe de esos commits: si eran arreglos (`yes` = prefijo
+/// `fix:` o revert, `maybe` = solo una palabra clave), su categoría, sus
+/// tickets/PRs, los autores del trozo y qué otras entidades cambiaron en esos
+/// mismos commits (acoplamiento del trozo, sin commits masivos). Orden total y
+/// sin texto generado: el mismo índice da siempre la misma respuesta.
+pub fn explain(store: &Store, target: &str, limit: Option<&str>) -> Result<Json> {
+    const DEFAULT_LIMIT: usize = 15;
+    let limit = parse_limit(limit, DEFAULT_LIMIT)?;
+    let w = no_window();
+    let repo = git_repo_path(store)?.ok_or_else(|| {
+        t("no git source in the index; 'explain' needs a git repo", "no hay fuente git en el índice; 'explain' necesita un repo git")
+    })?;
+    // Revisión indexada: el watermark de la fuente git (`sha:<head>`).
+    let rev = store
+        .list_sources()?
+        .into_iter()
+        .find(|s| s.kind == "git")
+        .map(|s| s.watermark)
+        .or(store.meta("last_watermark")?)
+        .and_then(|w| w.strip_prefix("sha:").map(str::to_string))
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| t("the index has no git revision; run 'chrono sync'", "el índice no tiene revisión de git; ejecuta 'chrono sync'"))?;
+    let (file, range) = chrono_metrics::parse_target(target).map_err(|e| {
+        t(e.clone(), format!("rango no válido en {target:?} (usa fichero:DESDE-HASTA)"))
+    })?;
+    let b = chrono_source_git::blame(Path::new(&repo), &rev, &file, range)
+        .map_err(|e| t(format!("explain {file}: {e}"), format!("explain {file}: {e}")))?;
+
+    let blamed: Vec<chrono_metrics::Blamed> = b
+        .commits
+        .iter()
+        .map(|c| chrono_metrics::Blamed {
+            sha: c.sha.clone(),
+            author: c.author.clone(),
+            author_time: c.author_time,
+            summary: c.summary.clone(),
+            lines: c.lines,
+        })
+        .collect();
+    let x = chrono_metrics::explain(store.conn(), &file, &blamed, limit)?;
+    let date = chrono_metrics::utc_date;
+    let commits: Vec<Json> = x
+        .commits
+        .iter()
+        .map(|ec| {
+            let (c, f) = (&ec.blamed, &ec.facts);
+            let tickets: Vec<String> = f
+                .tickets
+                .iter()
+                .map(|tk| if tk.title.is_empty() { tk.id.clone() } else { format!("{} {} {}: {}", tk.id, tk.kind, tk.state, tk.title) })
+                .collect();
+            // Campos opcionales solo si tienen valor: una columna siempre vacía
+            // son tokens que el agente paga por nada. Sigue siendo determinista
+            // (depende solo de los datos).
+            let mut row = Json::obj()
+                .set("id", Json::str(&c.sha[..10.min(c.sha.len())]))
+                .set("date", Json::str(&date(c.author_time)))
+                .set("author", Json::str(&c.author))
+                .set("lines", Json::Int(c.lines as i64))
+                .set("fix", Json::str(f.fix.as_str()));
+            if !f.category.is_empty() {
+                row = row.set("category", Json::str(&f.category));
+            }
+            row = row.set("title", Json::str(&c.summary));
+            if !tickets.is_empty() {
+                row = row.set("tickets", Json::Arr(tickets.iter().map(|s| Json::str(s)).collect()));
+            }
+            if f.is_bulk {
+                row = row.set("bulk", Json::Bool(true));
+            }
+            row
+        })
+        .collect();
+    let total_commits = x.total_commits;
+    let result = Json::obj()
+        .set("file", Json::str(&file))
+        .set("from", Json::Int(b.from as i64))
+        .set("to", Json::Int(b.to as i64))
+        .set("file_lines", Json::Int(b.total_lines as i64))
+        .set("revision", Json::str(&rev[..12.min(rev.len())]))
+        .set(
+            "summary",
+            Json::obj()
+                .set("commits", Json::Int(x.total_commits as i64))
+                .set("fixes_yes", Json::Int(x.fixes_yes))
+                .set("fixes_maybe", Json::Int(x.fixes_maybe))
+                .set("not_indexed", Json::Int(x.not_indexed))
+                .set("oldest", x.oldest.map_or(Json::Null, |s| Json::str(&date(s))))
+                .set("newest", x.newest.map_or(Json::Null, |s| Json::str(&date(s)))),
+        )
+        .set("commits", Json::Arr(commits))
+        .set("authors", Json::Arr(x.authors.iter().map(|(a, n)| Json::obj().set("author", Json::str(a)).set("lines", Json::Int(*n))).collect()))
+        .set(
+            "changes_with",
+            Json::Arr(
+                x.co_changes
+                    .iter()
+                    .map(|c| {
+                        let mut o = Json::obj().set("entity", Json::str(&c.entity)).set("commits", Json::Int(c.commits)).set("of", Json::Int(x.co_base));
+                        if !c.symbols.is_empty() {
+                            let s: Vec<Json> = c.symbols.iter().map(|(n, k)| Json::str(&format!("{n} ({k})"))).collect();
+                            o = o.set("symbols", Json::Arr(s));
+                        }
+                        o
+                    })
+                    .collect(),
+            ),
+        );
+    envelope(store, "explain", &w, limit, total_commits, result)
+}
