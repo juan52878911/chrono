@@ -160,9 +160,31 @@ fn row_cells(row: &Json, prefix: &str, cols: &mut Vec<(String, String)>) {
             let name = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
             match v {
                 Json::Obj(_) if prefix.is_empty() => row_cells(v, &name, cols),
-                _ => cols.push((name, scalar_text(v))),
+                _ => cols.push((name.clone(), cell_text(&name, v))),
             }
         }
+    }
+}
+
+/// El texto de una celda. Un `source_id` (`jsonl:/ruta/absoluta/larga/x.jsonl`)
+/// se acorta a `tipo:nombre` (`jsonl:x.jsonl`): en una tabla se repite en cada
+/// fila y la ruta absoluta era la mayor parte de los bytes. El JSON completo
+/// sigue llevando el id entero; `--compact` es para leer, no para citar rutas.
+fn cell_text(name: &str, v: &Json) -> String {
+    match v {
+        Json::Str(s) if name == "source_id" || name.ends_with(".source_id") => short_source_id(s),
+        _ => scalar_text(v),
+    }
+}
+
+/// `tipo:/a/b/c.ext` → `tipo:c.ext`; sin `:` o sin `/`, igual.
+fn short_source_id(s: &str) -> String {
+    match s.split_once(':') {
+        Some((kind, rest)) if rest.contains('/') => {
+            let base = rest.trim_end_matches('/').rsplit('/').next().unwrap_or(rest);
+            format!("{kind}:{base}").replace(['\t', '\n', '\r'], " ")
+        }
+        _ => scalar_text(&Json::Str(s.to_string())),
     }
 }
 
@@ -206,7 +228,7 @@ fn compact_value(key: &str, v: &Json, out: &mut String) {
         }
         _ => {
             debug_assert!(v.is_scalar() || matches!(v, Json::Arr(_)));
-            out.push_str(&format!("{}: {}\n", if key.is_empty() { "value" } else { key }, scalar_text(v)));
+            out.push_str(&format!("{}: {}\n", if key.is_empty() { "value" } else { key }, cell_text(key, v)));
         }
     }
 }
@@ -255,6 +277,18 @@ mod tests {
         assert_eq!(c, "for: a.rs\ncoupled (2):\nb\tsupport\tconfidence\nb.rs\t7\t0.8\nc x.rs\t3\t0.333\ntruncated: 2 of max 2 (raise --limit)\n");
         assert!(!c.contains("generated_at") && !c.contains("schema_version"));
         assert_eq!(c, env.compact());
+    }
+
+    #[test]
+    fn compact_acorta_source_id() {
+        let r = Json::obj().set(
+            "related",
+            Json::Arr(vec![Json::obj().set("id", Json::str("a")).set("source_id", Json::str("jsonl:/private/tmp/x/y/logs.jsonl"))]),
+        );
+        let c = Json::obj().set("result", r.set("anchor", Json::obj().set("source_id", Json::str("git:/Users/j/CRM_Aura")))).compact();
+        assert!(c.contains("jsonl:logs.jsonl"), "{c}");
+        assert!(c.contains("anchor.source_id: git:CRM_Aura"), "{c}");
+        assert!(!c.contains("/private/tmp"), "{c}");
     }
 
     #[test]

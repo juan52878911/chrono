@@ -60,10 +60,11 @@ Log-native (multi-source):
   top <dim>            Most frequent values of a dimension (level|kind|actor|entity|attr:<k>);
                        --source, --grep and --level narrow the events counted.
   patterns             Most frequent log templates (Drain-light clustering);
-                       --source <kind|id> and --grep <text> narrow them.
+                       --source <kind|id>, --grep <text> and --level narrow them.
   trace <id>           Follow an event's links chain (reverts, same ticket/PR, vcs.commit ↔ commit).
   events               Unified chronological stream across sources (--source/--kind/--level/--grep).
-  correlate <id>       Events from OTHER sources within ±Δt of an event (--delta 1h).
+  correlate <id>       Events from OTHER sources within ±Δt of an event (--delta 1h;
+                       --kind commit,ci.* keeps only those kinds).
 
 Process × outcome (Nod sessions + git):
   session_patterns     Per task and per session: tokens, cost, agent vs human
@@ -125,10 +126,11 @@ Log-native (multi-fuente):
   top <dim>            Valores más frecuentes de una dimensión (level|kind|actor|entity|attr:<c>);
                        --source, --grep y --level acotan los eventos que cuenta.
   patterns             Plantillas de log más frecuentes (clustering Drain-light);
-                       --source <tipo|id> y --grep <texto> las acotan.
+                       --source <tipo|id>, --grep <texto> y --level las acotan.
   trace <id>           Sigue la cadena de links de un evento (reverts, mismo ticket/PR, vcs.commit ↔ commit).
   events               Stream cronológico unificado de todas las fuentes (--source/--kind/--level/--grep).
-  correlate <id>       Eventos de OTRAS fuentes en ±Δt de un evento (--delta 1h).
+  correlate <id>       Eventos de OTRAS fuentes en ±Δt de un evento (--delta 1h;
+                       --kind commit,ci.* se queda solo con esos tipos).
 
 Proceso × resultado (sesiones de Nod + git):
   session_patterns     Por tarea y por sesión: tokens, costo, tiempo del agente
@@ -342,7 +344,7 @@ fn main() {
                 .get(1)
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|e| fatal(e)));
-            if let Err(e) = index::init(&start, f.symbols, f.as_kind.as_deref()) {
+            if let Err(e) = index::init(&start, f.symbols, f.as_kind.as_deref(), f.db.as_deref().map(Path::new)) {
                 fatal(e);
             }
             return;
@@ -445,7 +447,14 @@ fn main() {
             );
             query::top(&store, &window, &dim, f.source.as_deref(), f.grep.as_deref(), f.level.as_deref(), f.limit.as_deref())
         }
-        "patterns" => query::patterns(&store, &window, f.source.as_deref(), f.grep.as_deref(), f.limit.as_deref()),
+        "patterns" => query::patterns(
+            &store,
+            &window,
+            f.source.as_deref(),
+            f.grep.as_deref(),
+            f.level.as_deref(),
+            f.limit.as_deref(),
+        ),
         "events" => query::events(
             &store,
             &window,
@@ -459,7 +468,7 @@ fn main() {
         "bench" => query::bench(&store, &db),
         "correlate" => {
             let id = require_pos(&f, "correlate needs an <id>", "correlate necesita un <id>");
-            query::correlate(&store, &id, f.delta.as_deref(), f.limit.as_deref())
+            query::correlate(&store, &id, f.delta.as_deref(), f.kind.as_deref(), f.limit.as_deref())
         }
         "trace" => {
             let id = require_pos(&f, "trace needs an <id>", "trace necesita un <id>");

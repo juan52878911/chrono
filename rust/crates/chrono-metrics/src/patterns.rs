@@ -65,6 +65,58 @@ pub fn patterns_filtered(
     Ok(out)
 }
 
+/// Como [`patterns_filtered`], acotado además a un NIVEL (`ERROR`, `failure`…).
+///
+/// Los `rollups` no guardan el nivel, así que esto agrupa en el momento sobre
+/// `events` en vez de leer los agregados. Es O(eventos de ese nivel), que en la
+/// práctica son pocos: lo que se busca con `--level` son los errores, y son la
+/// minoría (en 24 h de logs reales, 114 de 17 505). El nivel se compara sin
+/// distinguir mayúsculas, porque cada fuente lo escribe a su manera.
+pub fn patterns_by_level(
+    conn: &Connection,
+    since_epoch: i64,
+    source: Option<&str>,
+    grep: Option<&str>,
+    level: &str,
+    limit: usize,
+) -> Result<Vec<Pattern>> {
+    use std::collections::HashMap;
+    let source_like: Option<String> = source
+        .filter(|s| !s.is_empty())
+        .map(|s| if s.contains(':') { format!("{s}%") } else { format!("{s}:%") });
+    let mut stmt = conn.prepare(
+        "SELECT e.id, e.title
+         FROM events e JOIN sources s ON s.ref = e.source_ref
+         WHERE (?1 = 0 OR e.at_epoch >= ?1)
+           AND e.level = ?2 COLLATE NOCASE
+           AND (?3 IS NULL OR s.id LIKE ?3)
+         ORDER BY e.rowid",
+    )?;
+    let rows = stmt.query_map(params![since_epoch, level, source_like], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    // plantilla -> (cuenta, último id): el mismo `example_id` que los rollups
+    // (el último visto, en orden de inserción).
+    let mut agg: HashMap<String, (i64, String)> = HashMap::new();
+    for row in rows {
+        let (id, title) = row?;
+        let template = chrono_core::templatize(&title);
+        if let Some(g) = grep.filter(|g| !g.is_empty()) {
+            if !template.contains(g) {
+                continue;
+            }
+        }
+        let e = agg.entry(template).or_insert((0, String::new()));
+        e.0 += 1;
+        e.1 = id;
+    }
+    let mut out: Vec<Pattern> =
+        agg.into_iter().map(|(template, (count, example_id))| Pattern { template, count, example_id }).collect();
+    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.template.cmp(&b.template)));
+    out.truncate(limit);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -181,5 +233,29 @@ mod tests {
         assert_eq!(only(Some("jsonl:/log"), None), vec![("request took <NUM> ms".to_string(), 3)]);
         assert_eq!(only(None, Some("EADDRINUSE")), vec![("listen EADDRINUSE :::<NUM>".to_string(), 2)]);
         assert_eq!(only(None, None).len(), patterns(store.conn(), 0, 10).unwrap().len());
+    }
+
+    #[test]
+    fn patterns_by_level_solo_cuenta_ese_nivel() {
+        let db = TempDb::new();
+        let mut store = Store::open(db.path()).unwrap();
+        let lv = |id: &str, at: i64, level: &str, title: &str| Event { level: level.to_string(), ..ev(id, at, title) };
+        {
+            let mut w = store.writer().unwrap();
+            w.add_event(&lv("a", 100, "INFO", "request took 12 ms")).unwrap();
+            w.add_event(&lv("b", 101, "INFO", "request took 40 ms")).unwrap();
+            w.add_event(&lv("c", 102, "ERROR", "permission denied for schema x")).unwrap();
+            w.add_event(&lv("d", 103, "error", "permission denied for schema x")).unwrap();
+            w.add_event(&lv("e", 104, "ERROR", "timeout after 30 s")).unwrap();
+            w.commit().unwrap();
+        }
+        let pats = patterns_by_level(store.conn(), 0, None, None, "ERROR", 10).unwrap();
+        assert_eq!(pats.len(), 2, "solo los ERROR, sin distinguir mayúsculas");
+        assert_eq!(pats[0].template, "permission denied for schema x");
+        assert_eq!(pats[0].count, 2);
+        assert_eq!(pats[0].example_id, "d", "el último visto, como en los rollups");
+        assert_eq!(pats[1].template, "timeout after <NUM> s");
+        let solo_timeout = patterns_by_level(store.conn(), 0, None, Some("timeout"), "error", 10).unwrap();
+        assert_eq!(solo_timeout.len(), 1);
     }
 }

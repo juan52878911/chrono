@@ -471,10 +471,21 @@ pub fn events(
 }
 
 /// `patterns`: plantillas de log más frecuentes (Drain-light, desde rollups).
-pub fn patterns(store: &Store, w: &Window, source: Option<&str>, grep: Option<&str>, limit: Option<&str>) -> Result<Json> {
+pub fn patterns(
+    store: &Store,
+    w: &Window,
+    source: Option<&str>,
+    grep: Option<&str>,
+    level: Option<&str>,
+    limit: Option<&str>,
+) -> Result<Json> {
     const DEFAULT_LIMIT: usize = 25;
     let limit = parse_limit(limit, DEFAULT_LIMIT)?;
-    let rows = chrono_metrics::patterns_filtered(store.conn(), w.since_epoch, source, grep, limit)?;
+    let rows = match level.filter(|l| !l.is_empty()) {
+        // Con nivel no sirven los rollups (no lo guardan): agrupa sobre los eventos.
+        Some(l) => chrono_metrics::patterns_by_level(store.conn(), w.since_epoch, source, grep, l, limit)?,
+        None => chrono_metrics::patterns_filtered(store.conn(), w.since_epoch, source, grep, limit)?,
+    };
     let items: Vec<Json> = rows
         .iter()
         .map(|p| {
@@ -605,7 +616,7 @@ fn event_ref_json(e: &chrono_metrics::EventRef) -> Json {
 
 /// `correlate <id>`: eventos de OTRAS fuentes en ±Δt del evento ancla.
 /// `--delta` (duración, por defecto 1h), `--limit`.
-pub fn correlate(store: &Store, id: &str, delta: Option<&str>, limit: Option<&str>) -> Result<Json> {
+pub fn correlate(store: &Store, id: &str, delta: Option<&str>, kind: Option<&str>, limit: Option<&str>) -> Result<Json> {
     const DEFAULT_DELTA: i64 = 3_600_000; // 1h en ms
     const DEFAULT_LIMIT: usize = 25;
     let w = no_window();
@@ -619,7 +630,9 @@ pub fn correlate(store: &Store, id: &str, delta: Option<&str>, limit: Option<&st
         })?,
     };
     let limit = parse_limit(limit, DEFAULT_LIMIT)?;
-    let corr = chrono_metrics::correlate(store.conn(), id, delta_ms, limit)?;
+    // `--kind commit,ci.*`: solo esos tipos (ver `correlate_kinds`).
+    let kinds: Vec<String> = kind.unwrap_or("").split(',').map(str::to_string).collect();
+    let corr = chrono_metrics::correlate_kinds(store.conn(), id, delta_ms, &kinds, limit)?;
     let related: Vec<Json> = corr.related.iter().map(event_ref_json).collect();
     let n = related.len();
     let result = Json::obj()

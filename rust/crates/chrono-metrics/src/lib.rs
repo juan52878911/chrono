@@ -26,12 +26,12 @@ mod trace;
 
 pub use bugs::{bugs, BugArea, BugCategory, Bugs};
 pub use churn::{churn, ChurnRow};
-pub use correlate::{correlate, Correlation, EventRef};
+pub use correlate::{Correlation, EventRef, correlate, correlate_kinds};
 pub use coupling::{coupling, Coupled};
 pub use events::{events, EventFilter, EventRow};
 pub use hotspots::{hotspots, hotspots_of_type, Hotspot};
 pub use owners::{owners, Owner};
-pub use patterns::{patterns, patterns_filtered, Pattern};
+pub use patterns::{patterns, patterns_by_level, patterns_filtered, Pattern};
 pub use phases::{phases, Phase};
 pub use search::{search, SearchHit};
 pub use session_patterns::{

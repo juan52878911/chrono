@@ -42,6 +42,23 @@ pub fn correlate(
     delta_ms: i64,
     limit: usize,
 ) -> Result<Correlation> {
+    correlate_kinds(conn, event_id, delta_ms, &[], limit)
+}
+
+/// Como [`correlate`], quedándose solo con los eventos de ciertos `kind`.
+///
+/// Sin esto, el ancla de un log de error se correlaciona sobre todo con sus
+/// logs hermanos de otra fuente (son la mayoría), y los commits o despliegues
+/// que de verdad explican el error quedan fuera del `limit`. Cada elemento de
+/// `kinds` es un kind exacto (`commit`) o un prefijo terminado en `*`
+/// (`ci.*`). Vacío = todos, como `correlate`.
+pub fn correlate_kinds(
+    conn: &Connection,
+    event_id: &str,
+    delta_ms: i64,
+    kinds: &[String],
+    limit: usize,
+) -> Result<Correlation> {
     if delta_ms <= 0 {
         return Err("correlate: delta_ms must be > 0".into());
     }
@@ -82,17 +99,40 @@ pub fn correlate(
     // ya excluye por sí solo al propio ancla (comparte source_ref consigo
     // misma), además de a cualquier evento de su misma fuente. El `s.id` (JOIN)
     // es solo para la salida.
-    let mut stmt = conn.prepare(
+    // Filtro de kinds: un `?` por kind, a partir del 6. Exacto o prefijo (`x*`).
+    let mut kind_params: Vec<String> = Vec::new();
+    let mut kind_sql: Vec<String> = Vec::new();
+    for k in kinds.iter().map(|k| k.trim()).filter(|k| !k.is_empty()) {
+        let n = 6 + kind_params.len();
+        match k.strip_suffix('*') {
+            Some(prefix) => {
+                kind_sql.push(format!("e.kind LIKE ?{n}"));
+                kind_params.push(format!("{prefix}%"));
+            }
+            None => {
+                kind_sql.push(format!("e.kind = ?{n}"));
+                kind_params.push(k.to_string());
+            }
+        }
+    }
+    let kind_filter = if kind_sql.is_empty() { String::new() } else { format!("AND ({})", kind_sql.join(" OR ")) };
+    let mut stmt = conn.prepare(&format!(
         "SELECT e.id, s.id, e.kind, e.at, e.at_epoch, e.level, e.title, (e.at_epoch - ?1) AS delta
          FROM events e JOIN sources s ON s.ref = e.source_ref
          WHERE e.source_ref != ?2
            AND e.at_epoch >= ?3
            AND e.at_epoch <= ?4
+           {kind_filter}
          ORDER BY ABS(e.at_epoch - ?1) ASC, e.at_epoch ASC, e.id ASC
-         LIMIT ?5",
-    )?;
+         LIMIT ?5"
+    ))?;
+    let limit_i64 = limit as i64;
+    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&anchor.at_epoch, &anchor_ref, &lo, &hi, &limit_i64];
+    for p in &kind_params {
+        bound.push(p);
+    }
     let rows = stmt.query_map(
-        params![anchor.at_epoch, anchor_ref, lo, hi, limit as i64],
+        rusqlite::params_from_iter(bound),
         |r| {
             Ok(EventRef {
                 id: r.get(0)?,
@@ -243,5 +283,36 @@ mod tests {
         assert!(correlate(conn, "anchor1", 0, 10).is_err());
         assert!(correlate(conn, "anchor1", -1, 10).is_err());
         assert!(correlate(conn, "no-existe", 60, 10).is_err());
+    }
+
+    #[test]
+    fn correlate_kinds_filtra_por_tipo_exacto_y_prefijo() {
+        let db = TempDb::new("kinds");
+        let mut store = Store::open(db.path()).unwrap();
+        let mk = |id: &str, src: &str, kind: &str, at: i64| Event { kind: kind.to_string(), ..mk_event(id, src, at) };
+        {
+            let mut w = store.writer().unwrap();
+            for e in [
+                mk("err", "jsonl:/log", "log", 1000),
+                mk("vecino", "jsonl:/otro", "log", 1001),
+                mk("c1", "git:/repo", "commit", 990),
+                mk("run1", "cmd:runs", "ci.run", 995),
+                mk("dep1", "cmd:deploys", "ci.deploy", 1010),
+            ] {
+                w.add_event(&e).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        let conn = store.conn();
+        let ids = |kinds: &[&str]| -> Vec<String> {
+            let k: Vec<String> = kinds.iter().map(|s| s.to_string()).collect();
+            let mut v: Vec<String> = correlate_kinds(conn, "err", 60, &k, 10).unwrap().related.into_iter().map(|r| r.id).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(ids(&[]), vec!["c1", "dep1", "run1", "vecino"], "sin filtro: todas las otras fuentes");
+        assert_eq!(ids(&["commit"]), vec!["c1"]);
+        assert_eq!(ids(&["ci.*"]), vec!["dep1", "run1"]);
+        assert_eq!(ids(&["commit", "ci.deploy"]), vec!["c1", "dep1"]);
     }
 }

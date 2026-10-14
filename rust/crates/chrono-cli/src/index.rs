@@ -137,15 +137,28 @@ fn resolve_source<'a>(
 /// `chrono init [repo]`: índice completo desde cero en `<root>/.chrono/index.db`.
 /// Con `symbols=true` (`--symbols`, solo git), además de la ingesta de commits
 /// extrae los símbolos (funciones) tocados por cada hunk (S1).
-pub fn init(start: &Path, symbols: bool, as_kind: Option<&str>) -> Result<()> {
+pub fn init(start: &Path, symbols: bool, as_kind: Option<&str>, db_override: Option<&Path>) -> Result<()> {
     let registry = build_registry();
     let (src, ingest_path, root) = resolve_source(&registry, start, as_kind)?;
 
-    let dir = root.join(".chrono");
-    std::fs::create_dir_all(&dir)?;
-    // Todo .chrono/ se ignora en git salvo la config (esa sí conviene versionarla).
-    let _ = std::fs::write(dir.join(".gitignore"), "*\n!config.json\n");
-    let db = dir.join("index.db");
+    // `--db` manda: el índice va ahí y el repo no se toca (antes se ignoraba y
+    // `init` escribía `.chrono/` dentro del repo aunque se pidiera otra ruta).
+    // La config se sigue leyendo de `<root>/.chrono/config.json` si existe.
+    let db = match db_override {
+        Some(p) => {
+            if let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)?;
+            }
+            p.to_path_buf()
+        }
+        None => {
+            let dir = root.join(".chrono");
+            std::fs::create_dir_all(&dir)?;
+            // Todo .chrono/ se ignora en git salvo la config (esa sí conviene versionarla).
+            let _ = std::fs::write(dir.join(".gitignore"), "*\n!config.json\n");
+            dir.join("index.db")
+        }
+    };
 
     let mut store = open_or_recreate(&db)?;
     store.reset()?;
@@ -180,8 +193,8 @@ pub fn init(start: &Path, symbols: bool, as_kind: Option<&str>) -> Result<()> {
 
     let unit = if src.kind() == "git" { ("commits", "commits") } else { ("events", "eventos") };
     eprintln!("{}", t(
-        format!("chrono: index ready at .chrono/index.db ({n} {}).", unit.0),
-        format!("chrono: índice listo en .chrono/index.db ({n} {}).", unit.1),
+        format!("chrono: index ready at {} ({n} {}).", db.display(), unit.0),
+        format!("chrono: índice listo en {} ({n} {}).", db.display(), unit.1),
     ));
     eprintln!("{}", t(
         "Now, inside the repo: chrono hotspots · chrono bugs · chrono sync",
