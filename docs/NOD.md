@@ -144,3 +144,17 @@ orientativo.
 7. **Orden con `ts` iguales.** Varios eventos comparten `ts` (p. ej. `turn.end` y `usage`); chrono ordena por
    (`ts`, `instance`, `run`, `seq`), que dentro de un proceso es el orden de emisión, pero entre procesos el
    contrato no fija un orden total.
+
+## Comandos en el título (`include_command`, opcional)
+
+Por defecto el título de un evento no lleva texto libre: un `tool.call` sale como `tool.call Bash`. Con
+`"include_command": "true"` en las `source_options` del fichero de Nod (el valor va como texto), y solo para
+sesiones grabadas con privacidad `completo`, el título lleva además la primera línea del comando, recortada a
+160 caracteres: `tool.call Bash: bash .claude/hooks/build/slice-ops.sh gate wiring_verified pass`. Sirve para
+que `correlate` y `events --grep` distingan qué hizo la sesión alrededor de un evento de otra fuente (un
+rechazo, un fallo de test). Es determinista: el mismo fichero da los mismos títulos.
+
+```json
+{"source_options": {"events.jsonl": {"adapter": "nod", "include_command": "true"}}}
+```
+

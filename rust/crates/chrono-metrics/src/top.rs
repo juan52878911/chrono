@@ -43,12 +43,19 @@ fn valid_attr_key(key: &str) -> bool {
 /// (`EXPLAIN QUERY PLAN`: `SCAN events USING COVERING INDEX idx_events_level`;
 /// para actor, `SCAN actors` + `SEARCH events USING COVERING INDEX
 /// idx_events_actor`). El SQL es el de siempre; el plan lo fija el índice.
+/// Filtros comunes a todas las dimensiones (?3 fuente, ?4 título, ?5 nivel), con la misma semántica que
+/// `events`: fuente por tipo (`tipo:%`) o por prefijo de id; título por subcadena; nivel exacto.
+const EVENT_FILTERS: &str = "AND (?3 IS NULL OR events.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?3))
+               AND (?4 IS NULL OR events.title LIKE ?4)
+               AND (?5 IS NULL OR events.level = ?5)";
+
 fn top_sql(from_clause: &str, value_expr: &str) -> String {
     format!(
         "SELECT value, COUNT(*) AS count FROM (
              SELECT {value_expr} AS value
              FROM {from_clause}
              WHERE (?1 = 0 OR events.at_epoch >= ?1)
+               {EVENT_FILTERS}
          )
          WHERE value IS NOT NULL AND value != ''
          GROUP BY value
@@ -73,6 +80,25 @@ fn top_sql(from_clause: &str, value_expr: &str) -> String {
 /// con o sin tiempo (`at_epoch <= 0` incluidos cuando `since_epoch == 0`), a
 /// diferencia de `timeline`, que solo cuenta los de `at_epoch > 0`.
 pub fn top(conn: &Connection, dim: &str, since_epoch: i64, limit: usize) -> Result<Vec<TopValue>> {
+    top_filtered(conn, dim, since_epoch, &TopFilter::default(), limit)
+}
+
+/// Acota `top` a una fuente, a los eventos cuyo título contiene un texto y/o a un nivel. En un índice
+/// que mezcla git, Nod y logs, sin esto la dimensión `entity` la dominan las herramientas de Nod.
+#[derive(Default)]
+pub struct TopFilter<'a> {
+    pub source: Option<&'a str>,
+    pub grep: Option<&'a str>,
+    pub level: Option<&'a str>,
+}
+
+pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilter, limit: usize) -> Result<Vec<TopValue>> {
+    let source_like: Option<String> = f
+        .source
+        .filter(|s| !s.is_empty())
+        .map(|s| if s.contains(':') { format!("{s}%") } else { format!("{s}:%") });
+    let grep_like: Option<String> = f.grep.filter(|g| !g.is_empty()).map(|g| format!("%{g}%"));
+    let level: Option<&str> = f.level.filter(|l| !l.is_empty());
     if let Some(key) = dim.strip_prefix("attr:") {
         if !valid_attr_key(key) {
             return Err(format!("top: invalid attr key: {key:?}").into());
@@ -83,13 +109,16 @@ pub fn top(conn: &Connection, dim: &str, since_epoch: i64, limit: usize) -> Resu
                  SELECT json_extract(events.attrs, ?1) AS value
                  FROM events
                  WHERE (?2 = 0 OR events.at_epoch >= ?2)
+                   AND (?4 IS NULL OR events.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?4))
+                   AND (?5 IS NULL OR events.title LIKE ?5)
+                   AND (?6 IS NULL OR events.level = ?6)
              )
              WHERE value IS NOT NULL AND value != ''
              GROUP BY value
              ORDER BY count DESC, value ASC
              LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![path, since_epoch, limit as i64], |r| {
+        let rows = stmt.query_map(params![path, since_epoch, limit as i64, source_like, grep_like, level], |r| {
             Ok(TopValue { value: r.get(0)?, count: r.get(1)? })
         })?;
         return collect(rows);
@@ -112,7 +141,7 @@ pub fn top(conn: &Connection, dim: &str, since_epoch: i64, limit: usize) -> Resu
 
     let sql = top_sql(from_clause, value_expr);
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![since_epoch, limit as i64], |r| {
+    let rows = stmt.query_map(params![since_epoch, limit as i64, source_like, grep_like, level], |r| {
         Ok(TopValue { value: r.get(0)?, count: r.get(1)? })
     })?;
     collect(rows)
@@ -309,6 +338,39 @@ mod tests {
         assert!(top(conn, "attr:mal clave", 0, 10).is_err());
         assert!(top(conn, "attr:mal;clave", 0, 10).is_err());
     }
+    /// `top_filtered` acota por fuente (tipo o prefijo de id), por texto del título y por nivel; sin filtros
+    /// da lo mismo que `top`.
+    #[test]
+    fn top_filtered_acota_por_fuente_titulo_y_nivel() {
+        let db = TempDb::new("filtros");
+        let mut store = Store::open(db.path()).unwrap();
+        let mut a = mk_event("t1", "log", "FAIL", 1, actor("ci"), None, vec![touch("EP-002")]);
+        a.source_id = "template:/logs/tests.log".into();
+        a.title = "listen EADDRINUSE :::3000".into();
+        let mut b = mk_event("t2", "log", "FAIL", 2, actor("ci"), None, vec![touch("EP-003")]);
+        b.source_id = "template:/logs/tests.log".into();
+        b.title = "listen EADDRINUSE :::3000".into();
+        let mut c = mk_event("t3", "log", "INFO", 3, actor("ci"), None, vec![touch("EP-003")]);
+        c.source_id = "template:/logs/tests.log".into();
+        c.title = "suite: 40 tests, 0 fallan".into();
+        let mut d = mk_event("n1", "nod.tool.call", "INFO", 4, actor("agente"), None, vec![touch("tool/Bash")]);
+        d.source_id = "nod:/eventos.jsonl".into();
+        let mut w = store.writer().unwrap();
+        for e in [&a, &b, &c, &d] {
+            w.add_event(e).unwrap();
+        }
+        w.commit().unwrap();
+        let tv = |v: &str, n: i64| TopValue { value: v.to_string(), count: n };
+        let f = |source, grep, level| TopFilter { source, grep, level };
+        let conn = store.conn();
+        assert_eq!(top_filtered(conn, "entity", 0, &f(Some("template"), None, None), 10).unwrap(),
+                   vec![tv("EP-003", 2), tv("EP-002", 1)]);
+        assert_eq!(top_filtered(conn, "entity", 0, &f(Some("template"), Some("EADDRINUSE"), None), 10).unwrap(),
+                   vec![tv("EP-002", 1), tv("EP-003", 1)]);
+        assert_eq!(top_filtered(conn, "entity", 0, &f(Some("nod:/eventos"), None, None), 10).unwrap(), vec![tv("tool/Bash", 1)]);
+        assert_eq!(top_filtered(conn, "level", 0, &f(None, None, Some("FAIL")), 10).unwrap(), vec![tv("FAIL", 2)]);
+        assert_eq!(top_filtered(conn, "entity", 0, &TopFilter::default(), 10).unwrap(), top(conn, "entity", 0, 10).unwrap());
+    }
 }
 
 /// P3: `top level`/`top actor` deben resolverse por índice covering (sin SCAN
@@ -427,4 +489,5 @@ mod tests_p3 {
         let windowed = top(conn, "level", 1, 10).unwrap();
         assert!(!windowed.iter().any(|v| v.value == "TRACE"), "con since>0 excluye TRACE: {windowed:?}");
     }
+
 }

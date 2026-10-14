@@ -20,16 +20,38 @@ pub struct Pattern {
 /// `bucket_epoch` (0 = sin límite). Orden determinista: `count` DESC, luego
 /// `template` ASC. `limit` acota.
 pub fn patterns(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Vec<Pattern>> {
+    patterns_filtered(conn, since_epoch, None, None, limit)
+}
+
+/// Como [`patterns`], acotado a una fuente y/o a las plantillas que contienen un texto.
+///
+/// `source` sigue la semántica de `events --source`: un tipo (`"template"`, `"nod"`, `"git"`…) casa
+/// los `source_id` que empiezan por `tipo:`; un id con `:` casa por prefijo. Sin esto, en un índice
+/// que mezcla git, Nod y logs, los miles de eventos de una fuente tapan los patrones de las demás.
+/// `grep` filtra por subcadena de la plantilla. El orden sigue siendo total (cuenta, plantilla).
+pub fn patterns_filtered(
+    conn: &Connection,
+    since_epoch: i64,
+    source: Option<&str>,
+    grep: Option<&str>,
+    limit: usize,
+) -> Result<Vec<Pattern>> {
+    let source_like: Option<String> = source
+        .filter(|s| !s.is_empty())
+        .map(|s| if s.contains(':') { format!("{s}%") } else { format!("{s}:%") });
+    let grep_like: Option<String> = grep.filter(|g| !g.is_empty()).map(|g| format!("%{g}%"));
     let mut stmt = conn.prepare(
         "SELECT t.template, SUM(r.count) AS c, MAX(r.last_id) AS ex
          FROM rollups r
          JOIN templates t ON t.id = r.template_id
          WHERE (?1 = 0 OR r.bucket_epoch >= ?1)
+           AND (?3 IS NULL OR r.source_id LIKE ?3)
+           AND (?4 IS NULL OR t.template LIKE ?4)
          GROUP BY r.template_id
          ORDER BY c DESC, t.template ASC
          LIMIT ?2",
     )?;
-    let rows = stmt.query_map(params![since_epoch, limit as i64], |r| {
+    let rows = stmt.query_map(params![since_epoch, limit as i64, source_like, grep_like], |r| {
         Ok(Pattern {
             template: r.get::<_, String>(0)?,
             count: r.get::<_, i64>(1)?,
@@ -132,5 +154,32 @@ mod tests {
         assert_eq!(recent[0].template, "beta <NUM>");
         // limit acota.
         assert_eq!(patterns(store.conn(), 0, 1).unwrap().len(), 1);
+    }
+
+    /// `patterns_filtered` acota por fuente y por texto de la plantilla, sin cambiar el orden total.
+    #[test]
+    fn patterns_filtered_acota_por_fuente_y_texto() {
+        let db = TempDb::new();
+        let mut store = Store::open(db.path()).unwrap();
+        {
+            let mut w = store.writer().unwrap();
+            w.add_event(&ev("a", 100, "request took 12 ms")).unwrap();
+            w.add_event(&ev("b", 101, "request took 340 ms")).unwrap();
+            w.add_event(&ev("c", 102, "request took 5 ms")).unwrap();
+            for (i, id) in ["t1", "t2"].iter().enumerate() {
+                let mut e = ev(id, 103 + i as i64, &format!("listen EADDRINUSE :::{}", 3000 + i));
+                e.source_id = "template:/logs/tests.log".to_string();
+                w.add_event(&e).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        store.build_rollups(60).unwrap();
+        let only = |source, grep| -> Vec<(String, i64)> {
+            patterns_filtered(store.conn(), 0, source, grep, 10).unwrap().into_iter().map(|p| (p.template, p.count)).collect()
+        };
+        assert_eq!(only(Some("template"), None), vec![("listen EADDRINUSE :::<NUM>".to_string(), 2)]);
+        assert_eq!(only(Some("jsonl:/log"), None), vec![("request took <NUM> ms".to_string(), 3)]);
+        assert_eq!(only(None, Some("EADDRINUSE")), vec![("listen EADDRINUSE :::<NUM>".to_string(), 2)]);
+        assert_eq!(only(None, None).len(), patterns(store.conn(), 0, 10).unwrap().len());
     }
 }

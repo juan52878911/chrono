@@ -321,3 +321,28 @@ fn opencode_write_edit_y_links_de_tool_result_y_remote_session() {
     assert_eq!(evs[3].attrs["remote_session"], "https://claude.ai/code/session_X");
     assert_eq!(evs[5].attrs["remote_session"], "https://claude.ai/code/session_X");
 }
+
+/// `include_command` pone el comando en el título de `tool.call`, solo con la opción activa y privacidad
+/// `completo`; recortado a la primera línea y determinista.
+#[test]
+fn include_command_pone_el_comando_en_el_titulo() {
+    let env = |privacy: &str| {
+        format!(
+            r#"{{"nod":1,"source":{{"instance":"i","run":"r-{privacy}","host":"claude","profile":"p","privacy":"{privacy}"}},"events":[{{"seq":1,"ts":1791844310740,"type":"tool.call","session":"s","data":{{"tool_use_id":"c1","tool":"Bash","input":{{"command":"bash .claude/hooks/build/slice-ops.sh gate wiring_verified pass\nsegunda línea"}}}}}}]}}"#
+        )
+    };
+    let t = Temp::new(&format!("{}\n{}\n", env("completo"), env("trabajo")));
+    let mut opts = SourceConfig::default();
+    opts.options.insert("include_command".into(), "true".into());
+    let titles = |cfg: &SourceConfig| -> Vec<String> {
+        let mut cur = NodSource::new().open(&t.0, None, cfg).unwrap();
+        drain(&mut cur).into_iter().map(|e| e.title).collect()
+    };
+    let con = titles(&opts);
+    assert_eq!(con, vec![
+        "tool.call Bash: bash .claude/hooks/build/slice-ops.sh gate wiring_verified pass".to_string(),
+        "tool.call Bash".to_string(), // sin privacidad completo no se toca
+    ]);
+    assert_eq!(con, titles(&opts), "determinista");
+    assert!(titles(&SourceConfig::default()).iter().all(|t| t == "tool.call Bash"), "apagada por defecto");
+}

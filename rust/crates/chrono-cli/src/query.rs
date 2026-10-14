@@ -471,10 +471,10 @@ pub fn events(
 }
 
 /// `patterns`: plantillas de log más frecuentes (Drain-light, desde rollups).
-pub fn patterns(store: &Store, w: &Window, limit: Option<&str>) -> Result<Json> {
+pub fn patterns(store: &Store, w: &Window, source: Option<&str>, grep: Option<&str>, limit: Option<&str>) -> Result<Json> {
     const DEFAULT_LIMIT: usize = 25;
     let limit = parse_limit(limit, DEFAULT_LIMIT)?;
-    let rows = chrono_metrics::patterns(store.conn(), w.since_epoch, limit)?;
+    let rows = chrono_metrics::patterns_filtered(store.conn(), w.since_epoch, source, grep, limit)?;
     let items: Vec<Json> = rows
         .iter()
         .map(|p| {
@@ -570,10 +570,19 @@ pub fn timeline(
 }
 
 /// `top <dim>`: valores más frecuentes de una dimensión.
-pub fn top(store: &Store, w: &Window, dim: &str, limit: Option<&str>) -> Result<Json> {
+pub fn top(
+    store: &Store,
+    w: &Window,
+    dim: &str,
+    source: Option<&str>,
+    grep: Option<&str>,
+    level: Option<&str>,
+    limit: Option<&str>,
+) -> Result<Json> {
     const DEFAULT_LIMIT: usize = 25;
     let limit = parse_limit(limit, DEFAULT_LIMIT)?;
-    let rows = chrono_metrics::top(store.conn(), dim, w.since_epoch, limit)?;
+    let filter = chrono_metrics::TopFilter { source, grep, level };
+    let rows = chrono_metrics::top_filtered(store.conn(), dim, w.since_epoch, &filter, limit)?;
     let items: Vec<Json> = rows
         .iter()
         .map(|v| Json::obj().set("value", Json::str(&v.value)).set("count", Json::Int(v.count)))

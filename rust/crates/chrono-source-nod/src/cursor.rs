@@ -82,6 +82,8 @@ pub struct NodCursor {
     line_start: u64,
     pending: VecDeque<Event>,
     stats: Stats,
+    /// Opción `include_command` de la fuente: pone el comando en el título de `tool.call`.
+    include_command: bool,
 }
 
 impl NodCursor {
@@ -97,7 +99,14 @@ impl NodCursor {
             line_start: start_offset,
             pending: VecDeque::new(),
             stats: Stats::default(),
+            include_command: false,
         })
+    }
+
+    /// Activa la opción `include_command` (ver [`record::with_command`]).
+    pub fn with_include_command(mut self, on: bool) -> Self {
+        self.include_command = on;
+        self
     }
 
     /// Siguiente línea completa, o `None` al llegar al final (una línea final
@@ -133,8 +142,11 @@ impl NodCursor {
         };
         self.stats.envelopes += 1;
         for ev in events {
-            match ev.as_object().and_then(|o| record::to_event(&src, o, &self.source_id)) {
-                Some(e) => self.pending.push_back(e),
+            match ev.as_object().and_then(|o| record::to_event(&src, o, &self.source_id).map(|e| (o, e))) {
+                Some((o, e)) => {
+                    let e = if self.include_command { record::with_command(e, &src, o) } else { e };
+                    self.pending.push_back(e)
+                }
                 None => self.stats.unknown_events += 1,
             }
         }

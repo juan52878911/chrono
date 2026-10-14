@@ -182,6 +182,30 @@ fn title_for(ty: &str, data: &Map<String, Value>) -> String {
     }
 }
 
+/// Con la opción `include_command` de la fuente (`.chrono/config.json`, `source_options` del fichero de
+/// Nod), el título de un `tool.call` lleva el comando que ejecutó: `tool.call Bash: git log …`. Así
+/// `correlate` o `events --grep` distinguen un `slice-ops.sh gate` de un `wiring update` alrededor de un
+/// rechazo. Está apagada por defecto, porque el título no lleva texto libre del usuario, y solo actúa con
+/// privacidad `completo` (sin ella Nod no envía el `input`). Se recorta a la primera línea y 160
+/// caracteres: es determinista.
+pub fn with_command(mut ev: Event, src: &EnvelopeSource, raw: &Map<String, Value>) -> Event {
+    if src.privacy != "completo" || ev.kind != "nod.tool.call" {
+        return ev;
+    }
+    let cmd = raw
+        .get("data")
+        .and_then(|d| d.get("input"))
+        .and_then(|i| i.get("command"))
+        .and_then(Value::as_str)
+        .map(|c| c.lines().next().unwrap_or("").trim())
+        .filter(|c| !c.is_empty());
+    if let Some(c) = cmd {
+        let c: String = c.chars().take(160).collect();
+        ev.title = format!("{}: {c}", ev.title);
+    }
+    ev
+}
+
 /// Severidad derivada (no es nativa de Nod; sirve a `timeline --by level`):
 /// ERROR = tool falló (no negada); WARN = permiso negado, tool negada o turno
 /// abortado; INFO el resto.

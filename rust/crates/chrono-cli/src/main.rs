@@ -57,8 +57,10 @@ Symbols (git, needs 'init --symbols'):
 
 Log-native (multi-source):
   timeline             Event counts per time bucket (--bucket 1h, --by level|kind).
-  top <dim>            Most frequent values of a dimension (level|kind|actor|entity|attr:<k>).
-  patterns             Most frequent log templates (Drain-light clustering).
+  top <dim>            Most frequent values of a dimension (level|kind|actor|entity|attr:<k>);
+                       --source, --grep and --level narrow the events counted.
+  patterns             Most frequent log templates (Drain-light clustering);
+                       --source <kind|id> and --grep <text> narrow them.
   trace <id>           Follow an event's links chain (reverts, same ticket/PR, vcs.commit ↔ commit).
   events               Unified chronological stream across sources (--source/--kind/--level/--grep).
   correlate <id>       Events from OTHER sources within ±Δt of an event (--delta 1h).
@@ -120,8 +122,10 @@ Símbolos (git, requiere 'init --symbols'):
 
 Log-native (multi-fuente):
   timeline             Conteo de eventos por bucket temporal (--bucket 1h, --by level|kind).
-  top <dim>            Valores más frecuentes de una dimensión (level|kind|actor|entity|attr:<c>).
-  patterns             Plantillas de log más frecuentes (clustering Drain-light).
+  top <dim>            Valores más frecuentes de una dimensión (level|kind|actor|entity|attr:<c>);
+                       --source, --grep y --level acotan los eventos que cuenta.
+  patterns             Plantillas de log más frecuentes (clustering Drain-light);
+                       --source <tipo|id> y --grep <texto> las acotan.
   trace <id>           Sigue la cadena de links de un evento (reverts, mismo ticket/PR, vcs.commit ↔ commit).
   events               Stream cronológico unificado de todas las fuentes (--source/--kind/--level/--grep).
   correlate <id>       Eventos de OTRAS fuentes en ±Δt de un evento (--delta 1h).
@@ -439,9 +443,9 @@ fn main() {
                 "top needs a <dim> (level|kind|actor|entity|attr:<key>)",
                 "top necesita una <dim> (level|kind|actor|entity|attr:<clave>)",
             );
-            query::top(&store, &window, &dim, f.limit.as_deref())
+            query::top(&store, &window, &dim, f.source.as_deref(), f.grep.as_deref(), f.level.as_deref(), f.limit.as_deref())
         }
-        "patterns" => query::patterns(&store, &window, f.limit.as_deref()),
+        "patterns" => query::patterns(&store, &window, f.source.as_deref(), f.grep.as_deref(), f.limit.as_deref()),
         "events" => query::events(
             &store,
             &window,

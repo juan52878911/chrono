@@ -63,7 +63,7 @@ impl Source for NodSource {
         }
     }
 
-    fn open(&self, path: &Path, watermark: Option<Watermark>, _cfg: &SourceConfig) -> CoreResult<Box<dyn chrono_core::Cursor>> {
+    fn open(&self, path: &Path, watermark: Option<Watermark>, cfg: &SourceConfig) -> CoreResult<Box<dyn chrono_core::Cursor>> {
         let meta = fs::metadata(path).map_err(|e| CoreError::Other(format!("leyendo metadata de {}: {e}", path.display())))?;
         if !meta.is_file() {
             return Err(CoreError::Other(format!("{} no es un fichero regular", path.display())));
@@ -83,7 +83,8 @@ impl Source for NodSource {
                 off
             }
         };
-        Ok(Box::new(NodCursor::open(path, start)?))
+        let include_command = cfg.options.get("include_command").map(|v| v == "true").unwrap_or(false);
+        Ok(Box::new(NodCursor::open(path, start)?.with_include_command(include_command)))
     }
 }
 
