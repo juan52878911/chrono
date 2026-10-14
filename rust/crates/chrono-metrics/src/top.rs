@@ -50,12 +50,23 @@ const EVENT_FILTERS: &str = "AND (?3 IS NULL OR events.source_ref IN (SELECT ref
                AND (?5 IS NULL OR events.level = ?5)";
 
 fn top_sql(from_clause: &str, value_expr: &str) -> String {
+    top_sql_with(from_clause, value_expr, "")
+}
+
+/// La consulta de `top` con los filtros de [`EVENT_FILTERS`]. Va aparte de [`top_sql`] para que la consulta
+/// sin filtros sea exactamente la de siempre: con las condiciones presentes, aunque valgan NULL, SQLite deja
+/// de usar los índices covering (`idx_events_actor`…) y recorre `events` entero.
+fn top_sql_filtered(from_clause: &str, value_expr: &str) -> String {
+    top_sql_with(from_clause, value_expr, EVENT_FILTERS)
+}
+
+fn top_sql_with(from_clause: &str, value_expr: &str, filters: &str) -> String {
     format!(
         "SELECT value, COUNT(*) AS count FROM (
              SELECT {value_expr} AS value
              FROM {from_clause}
              WHERE (?1 = 0 OR events.at_epoch >= ?1)
-               {EVENT_FILTERS}
+               {filters}
          )
          WHERE value IS NOT NULL AND value != ''
          GROUP BY value
@@ -99,28 +110,38 @@ pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilte
         .map(|s| if s.contains(':') { format!("{s}%") } else { format!("{s}:%") });
     let grep_like: Option<String> = f.grep.filter(|g| !g.is_empty()).map(|g| format!("%{g}%"));
     let level: Option<&str> = f.level.filter(|l| !l.is_empty());
+    let filtered = source_like.is_some() || grep_like.is_some() || level.is_some();
     if let Some(key) = dim.strip_prefix("attr:") {
         if !valid_attr_key(key) {
             return Err(format!("top: invalid attr key: {key:?}").into());
         }
         let path = format!("$.{key}");
-        let mut stmt = conn.prepare(
+        let filters = if filtered {
+            "AND (?4 IS NULL OR events.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?4))
+                   AND (?5 IS NULL OR events.title LIKE ?5)
+                   AND (?6 IS NULL OR events.level = ?6)"
+        } else {
+            ""
+        };
+        let sql = format!(
             "SELECT value, COUNT(*) AS count FROM (
                  SELECT json_extract(events.attrs, ?1) AS value
                  FROM events
                  WHERE (?2 = 0 OR events.at_epoch >= ?2)
-                   AND (?4 IS NULL OR events.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?4))
-                   AND (?5 IS NULL OR events.title LIKE ?5)
-                   AND (?6 IS NULL OR events.level = ?6)
+                   {filters}
              )
              WHERE value IS NOT NULL AND value != ''
              GROUP BY value
              ORDER BY count DESC, value ASC
-             LIMIT ?3",
-        )?;
-        let rows = stmt.query_map(params![path, since_epoch, limit as i64, source_like, grep_like, level], |r| {
-            Ok(TopValue { value: r.get(0)?, count: r.get(1)? })
-        })?;
+             LIMIT ?3"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let map = |r: &rusqlite::Row| Ok(TopValue { value: r.get(0)?, count: r.get(1)? });
+        let rows = if filtered {
+            stmt.query_map(params![path, since_epoch, limit as i64, source_like, grep_like, level], map)?
+        } else {
+            stmt.query_map(params![path, since_epoch, limit as i64], map)?
+        };
         return collect(rows);
     }
 
@@ -139,12 +160,16 @@ pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilte
         other => return Err(format!("top: unsupported dimension: {other}").into()),
     };
 
-    let sql = top_sql(from_clause, value_expr);
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![since_epoch, limit as i64, source_like, grep_like, level], |r| {
-        Ok(TopValue { value: r.get(0)?, count: r.get(1)? })
-    })?;
-    collect(rows)
+    let map = |r: &rusqlite::Row| Ok(TopValue { value: r.get(0)?, count: r.get(1)? });
+    if filtered {
+        let mut stmt = conn.prepare(&top_sql_filtered(from_clause, value_expr))?;
+        let rows = stmt.query_map(params![since_epoch, limit as i64, source_like, grep_like, level], map)?;
+        collect(rows)
+    } else {
+        let mut stmt = conn.prepare(&top_sql(from_clause, value_expr))?;
+        let rows = stmt.query_map(params![since_epoch, limit as i64], map)?;
+        collect(rows)
+    }
 }
 
 #[cfg(test)]
