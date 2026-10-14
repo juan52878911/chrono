@@ -390,6 +390,14 @@ fn clean_body(body: &str) -> String {
 impl Classifier for RulesClassifier {
     fn classify(&self, ev: &Event) -> Vec<Label> {
         let mut labels = Vec::new();
+        // Las reglas son de COMMITS (conventional commits, fix_keywords). En un
+        // índice multi-fuente, una ejecución de CI lleva por título el mensaje
+        // del commit y una línea de log dice «error»/«failed»: etiquetarlas
+        // como fix duplicaba los fixes en `bugs` y metía «Backend tests» o «CI»
+        // entre los ficheros. Sin kind (índices antiguos) se trata como commit.
+        if !(ev.kind.is_empty() || ev.kind == "commit") {
+            return labels;
+        }
         let title = ev.title.trim();
 
         // --- kind: prefijo conventional-commit, si existe. ---
@@ -614,5 +622,16 @@ mod tests {
         let empty: Config = serde_json::from_str("{}").unwrap();
         assert!(empty.source_options.is_empty());
         assert_eq!(empty.bug_labels, Config::defaults().bug_labels);
+    }
+
+    #[test]
+    fn solo_clasifica_commits() {
+        let c = RulesClassifier::new(Config::defaults());
+        let mut ev = Event { title: "fix(ci): build roto".into(), kind: "ci.run".into(), ..Default::default() };
+        assert!(c.classify(&ev).is_empty(), "una ejecución de CI no es un fix");
+        ev.kind = "log".into();
+        assert!(c.classify(&ev).is_empty());
+        ev.kind = "commit".into();
+        assert!(c.classify(&ev).iter().any(|l| l.task == "is_fix" && l.label == "true"));
     }
 }
