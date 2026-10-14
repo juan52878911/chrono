@@ -33,6 +33,8 @@ Index:
   init [repo]          Zero-config: detect the repo, create .chrono/, ingest all.
                        --symbols also indexes per-hunk function history (git only).
   add <path>           Add another source (git repo or log file) to the index.
+                       add cmd:<name> runs a command from .chrono/config.json (commands)
+                       and indexes its JSON output; sync re-runs it and keeps only what is new.
                        --as <kind> forces the adapter (e.g. --as template, config-defined;
                        --as nod for a Nod event file that is still empty).
   sync [path]          Process only the delta since the last watermark (all sources).
@@ -103,6 +105,8 @@ Uso:
 Índice:
   init [repo]          Cero-config: detecta el repo, crea .chrono/ e ingiere todo.
   add <ruta>           Añade otra fuente (repo git o fichero de log) al índice.
+                       add cmd:<nombre> ejecuta un comando de .chrono/config.json (commands)
+                       e indexa su salida JSON; sync lo vuelve a ejecutar y se queda con lo nuevo.
                        --as <kind> fuerza el adaptador (p.ej. --as template, definido por config;
                        --as nod para un fichero de eventos de Nod aún vacío).
   sync [ruta]          Procesa solo el delta desde la última marca (todas las fuentes).
