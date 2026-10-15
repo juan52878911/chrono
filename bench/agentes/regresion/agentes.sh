@@ -7,7 +7,9 @@
 # Cada sesión corre en su propio directorio (no comparten índice) y deja <salida>/<brazo>-<n>.jsonl.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd); repo=$(cd "$here/../../.." && pwd)
-brazo=$1; n=$2; out=${3:-$here/resultados/$(date +%Y%m%d)}
+# Salida FUERA del repo por defecto: un lanzador que elige cuenta o perfil por carpeta (p. ej. ws)
+# aplicaría el del repo de chrono a las sesiones del bench.
+brazo=$1; n=$2; out=${3:-${TMPDIR:-/tmp}/chrono-bench/$(date +%Y%m%d)}
 motor=${MOTOR:-minimax}; bin=${CHRONO_BIN:-$(command -v chrono)}
 mkdir -p "$out"; dir="$out/run-$brazo-$n"; rm -rf "$dir"; mkdir -p "$dir/bin"
 gzip -dc "$here/corpus/logs-sandbox.jsonl.gz" > "$dir/logs-sandbox.jsonl"

@@ -23,7 +23,7 @@ MOTOR=minimax MINIMAX_API_KEY_CMD='security find-generic-password -s ws/MINIMAX_
   CHRONO_BIN=$PWD/rust/target/debug/chrono bench/agentes/regresion/agentes.sh skill 1
 # Cuenta de Claude de la máquina
 MOTOR=claude MODELO=claude-sonnet-5-5 bench/agentes/regresion/agentes.sh sin-chrono 1
-python3 -I bench/agentes/regresion/corregir.py bench/agentes/regresion/resultados/<fecha>
+python3 -I bench/agentes/regresion/corregir.py $TMPDIR/chrono-bench/<fecha>
 python3 -I bench/agentes/regresion/corregir.py <dir> --gate bench/agentes/regresion/umbrales.json
 ```
 
@@ -36,3 +36,6 @@ cifras y hechos del oro, y marca señales de cifra falsa (totales contados por t
 42/18/12, número de reinicios distinto). **Es heurístico**: calibrado contra 22 respuestas
 corregidas a mano, error absoluto medio 0,28 y máximo 0,75 puntos sobre 4. Sirve para detectar
 regresiones de ≥ 0,5; para comparar brazos cercanos, revisa a mano.
+
+Las sesiones corren por defecto en `$TMPDIR/chrono-bench/<fecha>`, fuera del repo: si tu lanzador de
+`claude` cambia de cuenta o de perfil según la carpeta, dentro del repo de chrono usaría el de ese proyecto.
