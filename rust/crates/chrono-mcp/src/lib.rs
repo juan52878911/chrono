@@ -180,5 +180,7 @@ fn respond_err(id: Option<Value>, code: i64, message: &str) -> String {
     .to_string()
 }
 
+pub mod contract;
+
 #[cfg(test)]
 mod tests;

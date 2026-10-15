@@ -1,0 +1,319 @@
+//! Contrato de respuesta para agentes: lo que acompaña a CADA salida de las
+//! consultas sobre eventos, para que el modelo sepa qué tiene delante sin
+//! recontar ni suponer.
+//!
+//! - Texto tabular por defecto (`format=json` devuelve el JSON de siempre, con
+//!   la misma cabecera en `meta`): 2–3 veces menos tokens que el JSON indentado.
+//! - Cabecera de una línea: `total` de eventos que casan con los filtros en la
+//!   ventana, `coverage` (desde/hasta qué fecha hay datos en las fuentes
+//!   consultadas) con aviso si la ventana pedida se sale de ella, `truncated`,
+//!   `index` (huella del índice) y `q` (la consulta canónica). `index`+`q`
+//!   identifican la respuesta: mismo par, mismos bytes.
+
+use rusqlite::Connection;
+use serde_json::{json, Map, Value};
+
+use crate::since::since_to_epoch;
+
+/// Herramientas que consultan eventos y llevan cabecera, con su lista principal
+/// y su tope por defecto (para `truncated`).
+pub fn main_list(tool: &str) -> Option<(&'static str, i64)> {
+    Some(match tool {
+        "top" => ("top", 25),
+        "patterns" => ("patterns", 25),
+        "events" => ("events", 100),
+        "timeline" => ("buckets", 500),
+        "stats" => ("groups", 25),
+        "precede" => ("episodes", 50),
+        "informe" => ("", 0),
+        _ => return None,
+    })
+}
+
+/// Huella corta del estado del índice: cambia si entra o sale cualquier evento
+/// o se mueve el watermark de una fuente.
+pub fn index_hash(conn: &Connection) -> String {
+    let state: String = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM events) || ':' || (SELECT COALESCE(MAX(rowid), 0) FROM events) || ':' ||
+                    (SELECT COALESCE(group_concat(id || '=' || COALESCE(watermark, ''), ','), '') FROM (SELECT id, watermark FROM sources ORDER BY id))",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or_default();
+    let h = state.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    format!("{:08x}", h >> 32)
+}
+
+/// La consulta canónica: herramienta + argumentos ordenados, sin `format`.
+pub fn canonical(tool: &str, args: &Value) -> String {
+    let mut m: Vec<(String, String)> = args
+        .as_object()
+        .map(|o| {
+            o.iter()
+                .filter(|(k, v)| k.as_str() != "format" && !v.is_null() && v.as_str() != Some(""))
+                .map(|(k, v)| (k.clone(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    m.sort();
+    let parts: Vec<String> = m.into_iter().map(|(k, v)| format!("{k}={v}")).collect();
+    if parts.is_empty() {
+        tool.to_string()
+    } else {
+        format!("{tool} {}", parts.join(" "))
+    }
+}
+
+/// `(total que casa, primera y última fecha de las fuentes consultadas)`.
+pub fn coverage(conn: &Connection, args: &Value, since_epoch: i64) -> (i64, Option<(i64, String, i64, String)>) {
+    let scope = crate::tools::scope_from(args);
+    let (filters, extra) = scope.sql_public(2);
+    let sql = format!("SELECT COUNT(*) FROM events e WHERE e.at_epoch > 0 AND (?1 = 0 OR e.at_epoch >= ?1) {filters}");
+    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&since_epoch];
+    for p in &extra {
+        bound.push(p);
+    }
+    let total: i64 = conn.query_row(&sql, rusqlite::params_from_iter(bound), |r| r.get(0)).unwrap_or(0);
+    // Cobertura: solo por fuente (lo que hay), sin los demás filtros (lo que se busca).
+    let src = chrono_metrics::EventScope { source: scope.source, ..Default::default() };
+    let (sf, sx) = src.sql_public(1);
+    let cov_sql = format!(
+        "SELECT MIN(e.at_epoch), MAX(e.at_epoch) FROM events e WHERE e.at_epoch > 0 {sf}"
+    );
+    let bound2: Vec<&dyn rusqlite::ToSql> = sx.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+    let cov = conn
+        .query_row(&cov_sql, rusqlite::params_from_iter(bound2), |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)))
+        .ok()
+        .and_then(|(a, b)| Some((a?, b?)))
+        .map(|(a, b)| (a, iso(a), b, iso(b)));
+    (total, cov)
+}
+
+pub fn iso(ms: i64) -> String {
+    // Mismo formato que el resto de chrono (UTC, milisegundos, Z).
+    let secs = ms.div_euclid(1000);
+    let millis = ms.rem_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let sod = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{millis:03}Z", sod / 3600, (sod % 3600) / 60, sod % 60)
+}
+
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// Cabecera (texto y objeto `meta`) de una respuesta.
+pub fn header(conn: &Connection, tool: &str, args: &Value, result: &Value) -> (String, Value) {
+    let since = args.get("since").and_then(Value::as_str).unwrap_or("");
+    let until = args.get("until").and_then(Value::as_str).unwrap_or("");
+    let since_epoch = since_to_epoch(since);
+    let (total, cov) = coverage(conn, args, since_epoch);
+    let (list, default_limit) = main_list(tool).unwrap_or(("", 0));
+    let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(default_limit);
+    let returned = result.get(list).and_then(Value::as_array).map(|a| a.len() as i64);
+    let truncated = matches!(returned, Some(n) if limit > 0 && n >= limit);
+    let mut warn = Vec::new();
+    if let Some((first, _, last, _)) = &cov {
+        let tol = 60 * 60 * 1000; // una hora de holgura: los datos no empiezan en punto
+        if since_epoch > 0 && since_epoch + tol < *first {
+            warn.push(format!(
+                "no hay datos indexados antes de {} (la ventana pedida empieza antes): o no hubo eventos o no se indexaron; no lo cuentes como cero sin comprobarlo",
+                iso(*first)
+            ));
+        }
+        let ue = since_to_epoch(until);
+        if ue > 0 && ue > *last + tol {
+            warn.push(format!(
+                "no hay datos indexados después de {} (la ventana pedida acaba más tarde): o no hubo eventos o no se indexaron",
+                iso(*last)
+            ));
+        }
+    } else {
+        warn.push("no hay datos en las fuentes consultadas".to_string());
+    }
+    // Con infer_level, la cifra mezcla dos cosas: se dicen por separado para que
+    // nadie dé como «total por nivel» lo que incluye líneas sin nivel de la fuente.
+    let mut total_s = total.to_string();
+    if args.get("infer_level").and_then(Value::as_bool) == Some(true) && args.get("level").is_some() {
+        let mut plain = args.clone();
+        if let Some(o) = plain.as_object_mut() {
+            o.remove("infer_level");
+        }
+        let (labeled, _) = coverage(conn, &plain, since_epoch);
+        total_s = format!("{total}({labeled}_con_nivel_de_la_fuente+{}_deducidos_del_texto)", total - labeled);
+        warn.push(format!(
+            "infer_level: {} de estas {total} líneas NO traen nivel en la fuente (se deduce del texto). Las cifras «por nivel» se dan con el nivel de la fuente ({labeled}); las deducidas, aparte",
+            total - labeled
+        ));
+    }
+    let idx = index_hash(conn);
+    let q = canonical(tool, args);
+    let cov_s = cov.as_ref().map(|(_, a, _, b)| format!("{a}..{b}")).unwrap_or_else(|| "-".into());
+    let mut text = format!(
+        "[chrono {tool}] total={total_s} coverage={cov_s} truncated={} index={idx} q=\"{q}\"",
+        if truncated { "yes" } else { "no" }
+    );
+    for w in &warn {
+        text.push_str(&format!("\n⚠ {w}"));
+    }
+    let meta = json!({"total": total, "coverage": cov_s, "truncated": truncated, "index": idx, "q": q, "warnings": warn});
+    (text, meta)
+}
+
+/// Ajustes por herramienta sobre el resultado antes de pintarlo.
+pub fn enrich(tool: &str, result: &mut Value, total: i64) {
+    match tool {
+        "top" => {
+            if let Some(arr) = result.get_mut("top").and_then(Value::as_array_mut) {
+                let shown: i64 = arr.iter().filter_map(|v| v.get("count").and_then(Value::as_i64)).sum();
+                if total > shown && result.get("dim").and_then(Value::as_str) != Some("entity") {
+                    if let Some(a) = result.get_mut("top").and_then(Value::as_array_mut) {
+                        a.push(json!({"value": "(resto)", "count": total - shown}));
+                    }
+                }
+            }
+        }
+        "timeline" => {
+            if let Some(arr) = result.get_mut("buckets").and_then(Value::as_array_mut) {
+                for b in arr.iter_mut() {
+                    if let Some(e) = b.get("bucket_epoch").and_then(Value::as_i64) {
+                        let o = b.as_object_mut().unwrap();
+                        o.insert("at".into(), json!(iso(e)));
+                        o.remove("bucket_epoch");
+                    }
+                }
+                let mut peaks: Vec<&Value> = arr.iter().collect();
+                peaks.sort_by(|a, b| b["count"].as_i64().cmp(&a["count"].as_i64()).then(a["at"].as_str().cmp(&b["at"].as_str())));
+                let peaks: Vec<Value> = peaks.into_iter().take(3).map(|p| json!({"at": p["at"], "key": p["key"], "count": p["count"]})).collect();
+                if let Some(o) = result.as_object_mut() {
+                    o.insert("peaks".into(), Value::Array(peaks));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+const ORDER: &[&str] = &[
+    "value", "count", "level", "template", "start", "at", "key", "anchors", "origins", "before_episodes", "secs_before",
+    "entity", "source", "alias", "kind", "events", "first", "last", "group", "min", "p50", "p95", "max", "sum", "title", "id",
+    "example_id", "first_id",
+];
+
+fn cell(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.replace(['\t', '\n'], " "),
+        Value::Null => "-".into(),
+        Value::Array(a) if a.iter().all(|x| !x.is_object() && !x.is_array()) => a.iter().map(cell).collect::<Vec<_>>().join(","),
+        Value::Array(a) if a.iter().all(|x| x.get("value").is_some() && x.get("count").is_some()) => {
+            a.iter().map(|x| format!("{}={}", cell(&x["value"]), cell(&x["count"]))).collect::<Vec<_>>().join(" ")
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Lista de objetos que no son pares `{value,count}`: va como subtabla.
+fn is_nested(v: &Value) -> bool {
+    v.as_array().is_some_and(|a| a.iter().any(|x| x.is_object() && !(x.get("value").is_some() && x.get("count").is_some())))
+}
+
+fn columns(rows: &[Value]) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for r in rows {
+        if let Some(o) = r.as_object() {
+            for k in o.keys() {
+                if !keys.contains(k) {
+                    keys.push(k.clone());
+                }
+            }
+        }
+    }
+    keys.sort_by_key(|k| (ORDER.iter().position(|o| o == k).unwrap_or(ORDER.len()), k.clone()));
+    keys
+}
+
+/// Pinta un resultado como texto: escalares `clave: valor`, listas de objetos
+/// como tablas separadas por tabuladores, y listas anidadas como subtablas.
+pub fn render(v: &Value) -> String {
+    let mut out = String::new();
+    render_into(v, "", &mut out);
+    out.trim_end().to_string()
+}
+
+fn render_into(v: &Value, indent: &str, out: &mut String) {
+    let Some(o) = v.as_object() else {
+        out.push_str(&format!("{indent}{}\n", cell(v)));
+        return;
+    };
+    let mut scalars: Vec<(&String, &Value)> = Vec::new();
+    let mut tables: Vec<(&String, &Vec<Value>)> = Vec::new();
+    let mut objects: Vec<(&String, &Map<String, Value>)> = Vec::new();
+    for (k, val) in o {
+        match val {
+            Value::Array(a) if !a.is_empty() && a.iter().all(Value::is_object) => tables.push((k, a)),
+            Value::Object(m) => objects.push((k, m)),
+            _ => scalars.push((k, val)),
+        }
+    }
+    for (k, val) in scalars {
+        out.push_str(&format!("{indent}{k}: {}\n", cell(val)));
+    }
+    for (k, m) in objects {
+        out.push_str(&format!("{indent}{k}:\n"));
+        render_into(&Value::Object(m.clone()), &format!("{indent}  "), out);
+    }
+    for (k, rows) in tables {
+        let cols = columns(rows);
+        let (nested, flat): (Vec<String>, Vec<String>) =
+            cols.into_iter().partition(|c| rows.iter().any(|r| r.get(c).is_some_and(is_nested)));
+        out.push_str(&format!("{indent}{k} ({}):\n{indent}{}\n", rows.len(), flat.join("\t")));
+        for r in rows {
+            let line: Vec<String> = flat.iter().map(|c| r.get(c).map(cell).unwrap_or_else(|| "-".into())).collect();
+            out.push_str(&format!("{indent}{}\n", line.join("\t")));
+            for c in &nested {
+                if let Some(a) = r.get(c).and_then(Value::as_array).filter(|a| !a.is_empty()) {
+                    let sub = json!({ c.clone(): a });
+                    render_into(&sub, &format!("{indent}    "), out);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consulta_canonica_ordenada_y_sin_format() {
+        let a = json!({"level": "FATAL", "dim": "entity", "format": "json", "since": ""});
+        assert_eq!(canonical("top", &a), "top dim=entity level=FATAL");
+        assert_eq!(canonical("sources", &json!({})), "sources");
+    }
+
+    #[test]
+    fn pinta_tablas_y_subtablas() {
+        let v = json!({"episodes_total": 1, "episodes": [{"start": "t1", "anchors": 2, "preceding": [{"level": "ERROR", "count": 1, "template": "boom"}]}]});
+        let t = render(&v);
+        assert!(t.contains("episodes_total: 1"), "{t}");
+        assert!(t.contains("start\tanchors"), "{t}");
+        assert!(t.contains("    preceding (1):"), "{t}");
+        assert!(t.contains("count\tlevel\ttemplate") || t.contains("level\tcount"), "{t}");
+    }
+
+    #[test]
+    fn iso_utc() {
+        assert_eq!(iso(1_792_015_200_000), "2026-10-14T22:00:00.000Z");
+    }
+}

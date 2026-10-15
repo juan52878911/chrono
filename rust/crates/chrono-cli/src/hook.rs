@@ -215,6 +215,59 @@ fn stream_selector(logql: &str) -> Option<String> {
     None
 }
 
+/// El selector que se INDEXA: sin las condiciones sobre etiquetas que solo
+/// filtran (por defecto `level`), para que `{service="x", level="ERROR"}` y
+/// `{service="x"}` sean la misma fuente y no se vuelva a pedir lo mismo.
+fn index_selector(sel: &str, drop: &[String]) -> String {
+    let inner = sel.trim().trim_start_matches('{').trim_end_matches('}');
+    let mut parts: Vec<String> = Vec::new();
+    let (mut cur, mut quote, mut prev) = (String::new(), false, ' ');
+    for ch in inner.chars() {
+        if ch == '"' && prev != '\\' {
+            quote = !quote;
+        }
+        if ch == ',' && !quote {
+            parts.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(ch);
+        }
+        prev = ch;
+    }
+    parts.push(cur);
+    let kept: Vec<String> = parts
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .filter(|p| {
+            let name: String = p.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+            !drop.iter().any(|d| d == &name)
+        })
+        .collect();
+    if kept.is_empty() {
+        sel.to_string() // no se puede quitar todo: Loki exige al menos un matcher
+    } else {
+        format!("{{{}}}", kept.join(", "))
+    }
+}
+
+/// ¿[start, end] está dentro de la unión de las ventanas ya cubiertas?
+fn covered(windows: &mut Vec<(i64, i64)>, start: i64, end: i64) -> bool {
+    windows.sort();
+    let mut reach = start;
+    for (a, b) in windows.iter() {
+        if *a > reach {
+            break;
+        }
+        if *b > reach {
+            reach = *b;
+        }
+        if reach >= end {
+            return true;
+        }
+    }
+    reach >= end
+}
+
 fn is_metric(logql: &str) -> bool {
     !logql.trim_start().starts_with('{')
 }
@@ -345,9 +398,17 @@ fn adapter_loki(rule: &Value, input: &Value, resp: Option<&Value>, root: &Path) 
     let end = to_ns(input.get("endRfc3339").or_else(|| input.get("end")).and_then(Value::as_str), "now")?;
     // 1. Indexado en segundo plano de la ventana completa del selector (también
     //    para consultas de métricas: lo siguiente que pregunte ya estará en chrono).
-    if rule.get("auto_index").and_then(Value::as_bool).unwrap_or(true) {
+    // Sin ventana explícita la consulta es «la última hora» y caduca enseguida:
+    // no vale la pena indexarla.
+    let has_window = ["startRfc3339", "start"].iter().any(|k| input.get(*k).and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty() && !s.starts_with("now")));
+    if has_window && rule.get("auto_index").and_then(Value::as_bool).unwrap_or(true) {
         if let Some(sel) = stream_selector(logql) {
-            spawn_index(rule, &sel, start, end, root);
+            let drop: Vec<String> = rule
+                .get("index_drop_labels")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_else(|| vec!["level".to_string()]);
+            spawn_index(rule, &index_selector(&sel, &drop), start, end, root);
         }
     }
     // 2. Sustituir solo si la salida venía truncada (las métricas ya son exactas).
@@ -408,8 +469,12 @@ fn loki_index(job: &Value) -> R<()> {
     let res = (|| -> R<()> {
         let cover_p = dir.join("loki.cover.json");
         let mut cover: Vec<Value> = std::fs::read_to_string(&cover_p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        let covered = cover.iter().any(|c| c["selector"] == selector && c["start"].as_i64() <= Some(start) && c["end"].as_i64() >= Some(end));
-        if covered {
+        let mut wins: Vec<(i64, i64)> = cover
+            .iter()
+            .filter(|c| c["selector"] == selector)
+            .filter_map(|c| Some((c["start"].as_i64()?, c["end"].as_i64()?)))
+            .collect();
+        if covered(&mut wins, start, end) {
             return Ok(());
         }
         let deadline = Instant::now() + Duration::from_secs(num(rule, "index_timeout_secs", 300) as u64);
@@ -729,6 +794,17 @@ mod tests {
         assert!(tool_matches("mcp__*__query_loki*", "mcp__grafana-aura__query_loki_logs"));
         assert!(tool_matches("mcp__a__x | mcp__b__*", "mcp__b__y"));
         assert!(!tool_matches("mcp__grafana__query_loki_logs", "mcp__grafana__query_loki_stats"));
+    }
+
+    #[test]
+    fn selector_indexado_sin_level_y_cobertura_por_union() {
+        let drop = vec!["level".to_string()];
+        assert_eq!(index_selector(r#"{service="x", level=~"ERROR|FATAL"}"#, &drop), r#"{service="x"}"#);
+        assert_eq!(index_selector(r#"{level="ERROR"}"#, &drop), r#"{level="ERROR"}"#);
+        assert_eq!(index_selector(r#"{service=~"a,b", container="c"}"#, &drop), r#"{service=~"a,b", container="c"}"#);
+        let mut w = vec![(10, 20), (0, 12)];
+        assert!(covered(&mut w, 2, 18));
+        assert!(!covered(&mut w, 2, 25));
     }
 
     #[test]

@@ -172,6 +172,11 @@ impl EventScope<'_> {
         self.until_epoch <= 0 && [self.level, self.kind, self.entity, self.attr].iter().all(|v| v.map_or(true, str::is_empty))
     }
 
+    /// Como `sql`, para otros crates (la cabecera del MCP cuenta con los mismos filtros).
+    pub fn sql_public(&self, first: usize) -> (String, Vec<String>) {
+        self.sql_on("e", first)
+    }
+
     /// `(cláusulas SQL sobre el alias `e`, parámetros)`, numerados desde `first`.
     pub(crate) fn sql(&self, first: usize) -> (String, Vec<String>) {
         self.sql_on("e", first)

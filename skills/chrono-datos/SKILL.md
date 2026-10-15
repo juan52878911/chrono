@@ -62,8 +62,12 @@ Patrones de trabajo:
   `events` del mismo servicio desde ese instante para leer la traza hasta la última línea
   (`AttributeError: …`) y la petición que falló (`DELETE /api/… 500`).
 - **Líneas sin nivel**: si `sources` muestra `unlabeled_inferred` (líneas sin nivel cuyo texto dice
-  `ERROR:`/`FATAL:`), un filtro `level` NO las ve. Si la pregunta es «qué errores hubo», repite con
-  infer_level=true y di cuántas se suman así; nunca niegues un error solo porque `level` no lo encuentra.
+  `ERROR:`/`FATAL:`), un filtro `level` NO las ve.
+  - Las CIFRAS por nivel (cuántos FATAL, top de errores) se dan SIEMPRE sin infer_level: son las de la
+    fuente y las que coinciden con Grafana/Loki. Si quieres, añade aparte «+N líneas sin nivel cuyo
+    texto dice FATAL», pero nunca las sumes al total.
+  - infer_level=true sirve para ENCONTRAR (¿hubo un error antes de X?, `events`, `precede` ya lo usa):
+    nunca niegues un error solo porque `level` no lo encuentra.
 - **Reinicios/caídas**: primero `precede` con el mensaje de apagado y el contenedor; si un episodio trae
   dos `origins` (p. ej. un preflight y el principal), sepáralos con `attr=container:<nombre>`. A mano:
   `timeline` con grep del mensaje de apagado exacto (en Postgres,

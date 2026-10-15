@@ -45,7 +45,8 @@ fn with_scope(own: Value) -> Value {
         "source": str_prop("Fuente: tipo (git, jsonl, cmd…) o id/alias (cmd:loki) (opcional)"),
         "kind": str_prop("Tipo de evento: commit, log, ci.run… o prefijo con * (ci.*) (opcional)"),
         "grep": str_prop("Subcadena del mensaje/título (opcional)"),
-        "infer_level": json!({"type": "boolean", "description": "Contar también las líneas SIN nivel cuyo texto lo dice (FATAL:, ERROR:…). sources dice cuántas hay (opcional, por defecto false)"}),
+        "infer_level": json!({"type": "boolean", "description": "Incluir las líneas SIN nivel de la fuente cuyo texto lo dice (FATAL:, ERROR:…). Para ENCONTRAR, no para contar: las cifras por nivel se dan sin esto (por defecto false)"}),
+        "format": str_prop("text (por defecto: tabla compacta con cabecera total/coverage/truncated/index/q) | json"),
         "attr": str_prop("Atributo clave:valor, p. ej. container:crm_aura_sandbox_postgres (valor con * = prefijo; varios con coma) (opcional)")
     });
     if let (Some(p), Some(o)) = (props.as_object_mut(), own.as_object()) {
@@ -431,6 +432,18 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
         }
         other => return Err(format!("herramienta desconocida: {other}").into()),
     };
+    if crate::contract::main_list(name).is_some() {
+        let mut result = result;
+        let (head, meta) = crate::contract::header(conn, name, args, &result);
+        crate::contract::enrich(name, &mut result, meta["total"].as_i64().unwrap_or(0));
+        if args.get("format").and_then(Value::as_str) == Some("json") {
+            if let Some(o) = result.as_object_mut() {
+                o.insert("meta".into(), meta);
+            }
+            return Ok(text_content(serde_json::to_string(&result)?));
+        }
+        return Ok(text_content(format!("{head}\n{}", crate::contract::render(&result))));
+    }
     result_content(&result)
 }
 
@@ -448,7 +461,7 @@ fn arg_i64(args: &Value, key: &str, default: i64) -> i64 {
 
 /// Los filtros comunes de `args` (ver [`with_scope`]). `since` va aparte: cada
 /// consulta lo recibe como `since_epoch`.
-fn scope_from(args: &Value) -> chrono_metrics::EventScope<'_> {
+pub(crate) fn scope_from(args: &Value) -> chrono_metrics::EventScope<'_> {
     let s = |k: &str| args.get(k).and_then(Value::as_str).filter(|v| !v.trim().is_empty());
     chrono_metrics::EventScope {
         source: s("source"),
