@@ -94,9 +94,14 @@ fn logs(conn: &rusqlite::Connection, args: &Value, since_epoch: i64) -> Result<V
             let rank = |t: &str, l: &str| common.iter().position(|c| c.template == t && c.level == l).unwrap_or(usize::MAX);
             let mut pre: Vec<&chrono_metrics::Precursor> = e.preceding.iter().collect();
             pre.sort_by_key(|p| (rank(&p.template, &p.level), p.last_before_secs));
-            let antes: Vec<String> = pre
+            // Dos precursores de niveles distintos: el apagado (FATAL) y el error que lo
+            // acompaña dicen más juntos que dos variantes del mismo apagado.
+            let mut pick: Vec<&chrono_metrics::Precursor> = pre.iter().take(1).copied().collect();
+            if let Some(other) = pre.iter().find(|p| pick.first().is_some_and(|f| f.level != p.level)) {
+                pick.push(other);
+            }
+            let antes: Vec<String> = pick
                 .iter()
-                .take(2)
                 .map(|p| format!("{}s {}: {}", p.last_before_secs, p.entity, crate::contract::short(&p.template).chars().take(70).collect::<String>()))
                 .collect();
             json!({"start": e.start_at, "anchors": e.anchors, "origins": e.origins,
