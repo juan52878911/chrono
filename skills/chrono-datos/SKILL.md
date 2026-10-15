@@ -80,6 +80,25 @@ Patrones de trabajo:
   eventos traen `container`, sepáralos con `top dim=attr:container grep=<mensaje>`.
 - Cita los números tal cual vienen; si chrono no tiene un dato, dilo en vez de estimarlo.
 
+## 3. Pasada por el código (en una auditoría o «busca errores»)
+
+Los logs solo enseñan lo que ya falló. Antes de entregar, dedica una pasada corta al código
+(medido: sin ella se escapó un fallback que mezclaría tenants y que una sesión sin chrono sí vio):
+
+- **Confirma cada causa en el código** de la rama que se despliega (`origin/dev` o la que diga
+  `sources`), no en un worktree atrasado: fichero:línea de lo que produce el mensaje.
+- **Sigue cada WARNING repetido hasta su origen** y mira qué hace el código cuando falla: valores
+  por defecto silenciosos (URL sin contraseña, «primer tenant», almacenamiento local), `except` que
+  solo registran, cabeceras opcionales que deciden el tenant o los permisos. Eso es un riesgo aunque
+  hoy no rompa nada.
+- **Busca el mismo patrón en los demás servicios** (`grep -n` del nombre de la variable o del
+  fallback): si a uno le falta `REDIS_URL`, revisa todos.
+- **Configuración que no se ve en logs**: reglas de alerta vacías, servicios sin healthcheck,
+  ventana de retención de logs más corta que la pedida.
+
+Delega la pasada en un subagente si son muchos ficheros, y sepáralo en la respuesta: «fallos que
+ya ocurren» (con cifras de chrono) y «riesgos en el código» (con fichero:línea).
+
 ## Cuándo NO
 
 - Datos pequeños (< ~20 KB): leer es más barato que indexar.
