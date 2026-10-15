@@ -50,6 +50,7 @@ En el CLI son `--since`, `--until`, `--level`… y siempre `--compact`.
 | Los mensajes más repetidos | `patterns` level=FATAL,ERROR,CRITICAL limit=3 | `chrono patterns --level FATAL,ERROR,CRITICAL --limit 3` |
 | Qué escupe un servicio | `patterns` entity=product_service | `chrono patterns --entity product_service` |
 | Desde cuándo / picos / incidentes | `timeline` grep="<mensaje>" bucket_secs=600 | `chrono timeline --grep "<mensaje>" --bucket 10m` |
+| Cuántas veces pasó X, cuándo y qué lo precede | `precede` grep="<mensaje de X>" attr=container:<nombre> | `chrono precede --grep "<mensaje>" --attr container:<nombre>` |
 | Qué pasó justo antes de X | `events` entity=postgres until=<ts> limit=30 | `chrono events --entity postgres --until <ts>` |
 | Una traza o excepción completa | `events` entity=<svc> since=<ts> limit=80 | `chrono events --entity <svc> --since <ts> --limit 80` |
 | Latencias, tamaños, duraciones | `stats` attr=duration_s by=entity | `chrono stats duration_s --by entity` |
@@ -60,7 +61,12 @@ Patrones de trabajo:
 - **Causa de una excepción**: `patterns` o `events` con level=ERROR para ubicarla, y después
   `events` del mismo servicio desde ese instante para leer la traza hasta la última línea
   (`AttributeError: …`) y la petición que falló (`DELETE /api/… 500`).
-- **Reinicios/caídas**: `timeline` con grep del mensaje de apagado exacto (en Postgres,
+- **Líneas sin nivel**: si `sources` muestra `unlabeled_inferred` (líneas sin nivel cuyo texto dice
+  `ERROR:`/`FATAL:`), un filtro `level` NO las ve. Si la pregunta es «qué errores hubo», repite con
+  infer_level=true y di cuántas se suman así; nunca niegues un error solo porque `level` no lo encuentra.
+- **Reinicios/caídas**: primero `precede` con el mensaje de apagado y el contenedor; si un episodio trae
+  dos `origins` (p. ej. un preflight y el principal), sepáralos con `attr=container:<nombre>`. A mano:
+  `timeline` con grep del mensaje de apagado exacto (en Postgres,
   `received fast shutdown request`; de arranque, `database system is ready to accept connections`),
   entity del servicio y bucket_secs=60: cada bucket es un reinicio con su hora. Para lo que lo
   precede, `timeline` con level=ERROR,FATAL en la misma ventana, o `events` con until=<hora>.

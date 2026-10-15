@@ -39,8 +39,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/scripts/claude/intermediario.py\" post",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/claude/hook.sh\" post",
             "timeout": 90
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/claude/hook.sh\" after-read",
+            "timeout": 120
           }
         ]
       }
@@ -51,7 +61,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/scripts/claude/intermediario.py\" read",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/claude/hook.sh\" read",
             "timeout": 120
           }
         ]

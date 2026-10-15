@@ -8,6 +8,7 @@
 //! español con `--lang es` / `CHRONO_LANG=es` / locale del SO.
 
 mod glob;
+mod hook;
 mod i18n;
 mod command;
 mod index;
@@ -437,6 +438,11 @@ fn main() {
                 fatal(e);
             }
             return;
+        }
+        "hook" => {
+            // Hooks de Claude Code (intermediario): ver `hook.rs`.
+            let mode = f.pos.get(1).cloned().unwrap_or_default();
+            std::process::exit(hook::run(&mode));
         }
         "mcp" => {
             // Servidor MCP por stdio: usa --db si se pasó, o autodescubre.

@@ -11,8 +11,12 @@ El plugin trae dos hooks que no hacen NADA hasta que exista `.chrono/intermediar
   límites, la SUSTITUYE por cifras exactas (niveles, servicios, contenedores, mensajes más
   repetidos por nivel) + una muestra corta, y deja todas las filas en el índice de chrono para
   seguir preguntando. Lo que no pasa los límites llega intacto.
-- **PreToolUse (Read)**: leer ENTERO un fichero de datos grande (`.log`, `.jsonl`, `.csv`…) se
-  cambia por su resumen exacto. Leer un trozo (`offset`/`limit`) nunca se intercepta.
+- **Read**: leer ENTERO un fichero de datos muy grande (≥ `read.deny_bytes`, 5 MB) se cambia por su
+  resumen exacto; uno mediano (entre `read.min_bytes` y `deny_bytes`) se lee normal, se indexa y se le
+  dice al modelo que las cifras salen de chrono. Leer un trozo (`offset`/`limit`) nunca se intercepta.
+- Con la regla `loki`, cada consulta indexa además EN SEGUNDO PLANO la ventana completa de su selector
+  (`auto_index`, por defecto sí): lo siguiente que se pregunte ya está en chrono. La salida solo se
+  sustituye si venía truncada.
 
 Tu trabajo aquí es decidir dónde merece la pena y escribir esa configuración. **Menos es más**:
 interceptar donde no hace falta añade latencia y le quita al modelo texto que sí quería leer.
@@ -46,7 +50,10 @@ Mira también si el proyecto tiene ficheros de datos grandes (`find . -size +200
 | `max_lines` (loki) | 50000 | Tope de líneas que se vuelven a pedir |
 | `timeout_secs` | 45 | Si el adaptador tarda más, se queda con lo que tenga y lo dice |
 | `sample_lines` | 40 (loki) / 15 (records) | Líneas literales que se devuelven además del resumen |
-| `read.min_bytes` | 200000 | Ficheros más pequeños se leen normal |
+| `read.min_bytes` | 200000 | Ficheros más pequeños se leen sin más |
+| `read.deny_bytes` | 5000000 | Desde aquí, leer entero se sustituye por el resumen |
+| `auto_index` (loki) | true | Indexar en segundo plano la ventana del selector |
+| `index_max_lines` (loki) | 200000 | Tope del indexado de fondo |
 | `read.extensions` | `.log .jsonl .ndjson .csv .tsv` | Solo esos tipos |
 
 ## 4. Escribir `.chrono/intermediario.json`
@@ -66,7 +73,7 @@ Mira también si el proyecto tiene ficheros de datos grandes (`find . -size +200
 }
 ```
 
-- `tool` es una expresión regular sobre el nombre completo (`mcp__grafana__query_loki_logs`).
+- `tool` es el nombre completo (`mcp__grafana__query_loki_logs`), con comodines `*`/`?` y alternativas con `|`.
 - Credenciales: **nunca** el token literal en el fichero. Usa `token_cmd` (llavero, `pass`,
   `op read`…) o las variables `LOKI_URL`/`LOKI_TOKEN_CMD` del entorno.
 - En `records`, `time_field`/`message_field` dicen qué campo es la fecha y cuál el mensaje, y
@@ -76,11 +83,11 @@ Mira también si el proyecto tiene ficheros de datos grandes (`find . -size +200
 ## 5. Comprobar y explicar
 
 - Prueba en seco una regla: `echo '{"cwd":"'$PWD'","tool_name":"<tool>","tool_input":{…}}' |
-  python3 -I "${CLAUDE_PLUGIN_ROOT}/scripts/claude/intermediario.py" post`, y revisa que la salida
+  chrono hook post`, y revisa que la salida
   tenga sentido.
 - Explica al usuario, en una tabla corta, qué herramientas quedan interceptadas, con qué límites y
   por qué el resto no.
 - Desactivar: `"enabled": false`, borrar el fichero, o `CHRONO_INTERMEDIARIO=0`.
   Diagnóstico: `CHRONO_INTERMEDIARIO_LOG=/tmp/intermediario.log`.
 
-> El intermediario necesita `python3` en el PATH y chrono ≥ 0.2.3 (lo instala el plugin).
+> El intermediario es parte del binario (`chrono hook`, ≥ 0.2.3, lo instala el plugin) y usa `curl` para Loki.
