@@ -41,7 +41,7 @@ logs=$("$bin" sources --compact --db "$db" 2>/dev/null | awk -F'\t' 'NR>2 && $2!
   printf "%s%s (%s eventos, %s → %s; %s)", (n++ ? "; " : ""), $1, $3, $4, $5, $6 }')
 [ -n "$logs" ] || exit 0
 
-aviso="chrono tiene indexados logs para esta pregunta: $logs. Para contar, rankear, ver patrones, cuándo pasó algo o qué lo precede, usa las tools MCP de chrono (sources, top, patterns, precede, timeline, events; si están diferidas, cárgalas con ToolSearch \"chrono\") con filtros level=FATAL,ERROR, entity=<servicio>, since/until: dan cifras exactas sobre todo lo indexado. Las tools de Loki/Grafana cortan en 100 líneas por consulta: úsalas solo para el detalle que chrono no tenga. Skill: chrono:chrono-datos."
+aviso="chrono tiene indexados logs para esta pregunta: $logs. EMPIEZA por la tool MCP informe de chrono (una llamada: cifras exactas por nivel y servicio, mensajes más repetidos, picos, episodios y qué los precede, y las consultas siguientes ya escritas); si está diferida, cárgala con ToolSearch \"chrono\". Para profundizar: precede, top, patterns, events con filtros level, entity, attr, since/until. Las tools de Loki/Grafana cortan en 100 líneas por consulta: úsalas solo para el detalle que chrono no tenga. Skill: chrono:chrono-datos."
 
 if [ "$evento" = "PostToolUse" ]; then
   : > "$marca"

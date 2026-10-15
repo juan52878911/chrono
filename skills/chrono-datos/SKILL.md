@@ -45,6 +45,8 @@ En el CLI son `--since`, `--until`, `--level`… y siempre `--compact`.
 
 | Quiero saber | MCP | CLI |
 |---|---|---|
+| **Todo el panorama de una vez (empieza aquí)** | `informe` (since/until/entity/source) | `chrono informe` |
+| Por qué un fichero de código está así | `informe` tipo=codigo target=fichero[:A-B] | `chrono informe codigo fichero[:A-B]` |
 | Cuántas líneas por nivel | `top` dim=level | `chrono top level` |
 | En qué servicios caen los errores | `top` dim=entity, level=FATAL (una llamada por nivel para el reparto) | `chrono top entity --level FATAL` |
 | Los mensajes más repetidos | `patterns` level=FATAL,ERROR,CRITICAL limit=3 | `chrono patterns --level FATAL,ERROR,CRITICAL --limit 3` |
