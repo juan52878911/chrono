@@ -10,7 +10,7 @@ set -eu
 # Versión mínima que entiende lo que piden las skills y el MCP (filtros
 # level/entity/until en top/patterns/events, tool `sources`). Un binario más
 # viejo se ignora y se instala la release encima de ~/.local/bin.
-CHRONO_MIN="0.2.5"
+CHRONO_MIN="0.2.6"
 
 es_rust() { # `chrono 0.2.2` (o `0.2.2-dev`) ≥ CHRONO_MIN; el Go v0.1 no cumple
   v=$("$1" --version 2>/dev/null | awk '{print $2}' | sed 's/-.*//')

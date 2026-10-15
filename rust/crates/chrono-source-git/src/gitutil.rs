@@ -24,6 +24,11 @@ pub fn head_sha(repo: &Path) -> Result<String> {
     run(repo, &["rev-parse", "HEAD"])
 }
 
+/// Sha del commit al que apunta `rev` (rama, tag, `origin/dev`…).
+pub fn rev_sha(repo: &Path, rev: &str) -> Result<String> {
+    run(repo, &["rev-parse", "--verify", &format!("{rev}^{{commit}}")])
+}
+
 /// `true` si el repo es un clon shallow (métricas serían falsas).
 pub fn is_shallow(repo: &Path) -> Result<bool> {
     let out = run(repo, &["rev-parse", "--is-shallow-repository"])?;

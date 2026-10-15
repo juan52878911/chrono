@@ -3,6 +3,13 @@ name: chrono-ci
 description: "Observabilidad del PIPELINE de CI/CD con chrono sobre GitHub Actions (u otro sistema vía comandos): por qué falla un workflow o un despliegue, qué workflow falla más, qué jobs/pasos se vuelven lentos, qué commit rompió un despliegue y cuál lo arregló. Usar ante un CI/despliegue en rojo o al revisar la salud del pipeline, en vez de leer logs de Actions enteros. NO es para los logs de los servicios en ejecución (Loki/Grafana, errores, excepciones o reinicios de una app o base de datos): eso es chrono-datos."
 ---
 
+> **Un fallo suelto vs. patrones.** Para «¿por qué falló ESTE run?» lo más directo y barato es
+> `gh run view <id> --log-failed | tail -40` (medido: 3 llamadas, ~3,7k tokens). chrono gana cuando
+> la pregunta cruza runs: qué workflow o paso falla más, desde cuándo, qué commit lo rompió y cuál lo
+> arregló, qué precede a los despliegues fallidos (`precede`), o «¿falló igual antes?» (`events
+> source=cmd:gh-fallos grep=…`). Si el índice tiene `cmd:gh-fallos`, un `events source=cmd:gh-fallos
+> grep=<run_id>` da el paso y las líneas del error sin abrir el log entero.
+
 # CI/CD con chrono
 
 > **Requisito**: el binario `chrono` (port Rust ≥ 0.2). Si `chrono version` falla o no

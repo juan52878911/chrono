@@ -69,6 +69,13 @@ fn handle(mode: &str, ev: &Value) -> R<Option<String>> {
     if mode == "prompt" {
         return prompt_hint(ev);
     }
+    if mode == "prefetch" {
+        prefetch(ev)?;
+        return Ok(None);
+    }
+    if mode == "after-edit" {
+        return Ok(edit_hint(ev)?.map(|ctx| json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": ctx}}).to_string()));
+    }
     let cwd = ev.get("cwd").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let Some(root) = find_root(&cwd) else { return Ok(None) };
     let cfg: Value = serde_json::from_str(&std::fs::read_to_string(root.join(".chrono/intermediario.json")).map_err(|e| e.to_string())?)
@@ -269,6 +276,66 @@ fn index_selector(sel: &str, drop: &[String]) -> String {
     }
 }
 
+/// Servicios de infraestructura que no se indexan en segundo plano cuando el
+/// selector es AMPLIO (`service=~…` o sin `service`): en el sandbox eran el 85 %
+/// de lo indexado (pgbouncer 72 270 de 85 078 líneas) y tapaban los de la app.
+/// Un selector que pide un servicio concreto (`service="pgbouncer"`) se respeta.
+const DEFAULT_INDEX_EXCLUDE: &[&str] = &["pgbouncer", "cadvisor", "alloy", "loki", "tempo", "prometheus", "grafana", "node_exporter", "redis_exporter"];
+
+fn exclude_noise(sel: &str, rule: &Value) -> String {
+    let excl: Vec<String> = rule
+        .get("index_exclude_services")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_else(|| DEFAULT_INDEX_EXCLUDE.iter().map(|s| s.to_string()).collect());
+    let exact = sel.contains("service=\"") || sel.contains("service = \"");
+    // Lo que el propio selector nombra no se excluye.
+    let excl: Vec<String> = excl.into_iter().filter(|e| !sel.contains(e.as_str())).collect();
+    if exact || excl.is_empty() || !sel.trim_end().ends_with('}') {
+        return sel.to_string();
+    }
+    let body = sel.trim_end().trim_end_matches('}');
+    format!("{body}, service!~\"{}\"}}", excl.join("|"))
+}
+
+/// Ventanas ya cubiertas de un selector, desde `.chrono/mcp/loki.cover.json`.
+fn covered_windows(root: &Path, selector: &str) -> Vec<(i64, i64)> {
+    let cover: Vec<Value> = std::fs::read_to_string(root.join(".chrono/mcp/loki.cover.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    cover.iter().filter(|c| c["selector"] == selector).filter_map(|c| Some((c["start"].as_i64()?, c["end"].as_i64()?))).collect()
+}
+
+/// `chrono hook prefetch` (lo lanza el hook de inicio de sesión en segundo plano):
+/// para cada regla `loki` con `prefetch: {"selector": "{…}", "window": "24h"}`,
+/// indexa la ventana reciente que falte, para que la primera pregunta de logs ya
+/// encuentre los datos.
+fn prefetch(ev: &Value) -> R<()> {
+    let cwd = ev.get("cwd").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let Some(root) = find_root(&cwd) else { return Ok(()) };
+    let cfg: Value = serde_json::from_str(&std::fs::read_to_string(root.join(".chrono/intermediario.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    for rule in cfg.get("rules").and_then(Value::as_array).cloned().unwrap_or_default() {
+        let Some(pf) = rule.get("prefetch") else { continue };
+        let Some(sel) = pf.get("selector").and_then(Value::as_str) else { continue };
+        let window = pf.get("window").and_then(Value::as_str).unwrap_or("24h");
+        let end = to_ns(Some("now"), "now")?;
+        let mut start = to_ns(Some(&format!("now-{window}")), "now-24h")?;
+        let sel = exclude_noise(&index_selector(sel, &["level".to_string()]), &rule);
+        // Solo lo que falta: si lo cubierto llega sin huecos desde `start`, seguir desde ahí.
+        let mut wins = covered_windows(&root, &sel);
+        wins.sort();
+        for (a, b) in wins {
+            if a <= start && b > start {
+                start = b;
+            }
+        }
+        if end - start < 60_000_000_000 {
+            continue; // menos de un minuto nuevo
+        }
+        let job = json!({"rule": rule, "selector": sel, "start": start, "end": end, "root": root});
+        loki_index(&job)?;
+    }
+    Ok(())
+}
+
 /// ¿[start, end] está dentro de la unión de las ventanas ya cubiertas?
 fn covered(windows: &mut Vec<(i64, i64)>, start: i64, end: i64) -> bool {
     windows.sort();
@@ -427,7 +494,7 @@ fn adapter_loki(rule: &Value, input: &Value, resp: Option<&Value>, root: &Path) 
                 .and_then(Value::as_array)
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
                 .unwrap_or_else(|| vec!["level".to_string()]);
-            spawn_index(rule, &index_selector(&sel, &drop), start, end, root);
+            spawn_index(rule, &exclude_noise(&index_selector(&sel, &drop), rule), start, end, root);
         }
     }
     // 2. Sustituir solo si la salida venía truncada (las métricas ya son exactas).
@@ -880,14 +947,60 @@ fn asked_hours(prompt: &str) -> f64 {
     best
 }
 
+/// ¿La pregunta va de logs/errores de verdad? Palabras completas (no «catálogo»
+/// por «log»), ignorando rutas, nombres de fichero, bloques de código pegados y
+/// notificaciones del sistema; y hace falta además una intención de averiguar algo
+/// («cuántos», «por qué falla», «analiza»…) salvo con palabras inequívocas
+/// («logs», «Loki», «traceback»). Medido sobre los prompts reales de 60 días.
+fn asks_about_logs(prompt: &str) -> bool {
+    let p = prompt.trim_start();
+    if p.starts_with('<') || p.contains("[SYSTEM NOTIFICATION") || p.contains("<task-notification") || p.starts_with("This session is being continued") {
+        return false;
+    }
+    // Fuera bloques de código pegados.
+    let mut clean = String::new();
+    let mut fenced = false;
+    for line in p.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if !fenced {
+            clean.push_str(line);
+            clean.push('\n');
+        }
+    }
+    let words: Vec<String> = clean
+        .split_whitespace()
+        // rutas y ficheros (src/x.py, aura.asccilabs.com/grafana, BUG-069…)
+        .filter(|w| !w.contains('/') && !w.contains('\\') && !w.contains('`'))
+        .filter(|w| {
+            let t = w.trim_matches(|c: char| !c.is_alphanumeric());
+            !(t.contains('.') && t.rsplit('.').next().is_some_and(|e| (1..=5).contains(&e.len()) && e.chars().all(char::is_alphanumeric)))
+        })
+        .flat_map(|w| w.split(|c: char| !c.is_alphanumeric()).map(str::to_lowercase).collect::<Vec<_>>())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let has = |stems: &[&str]| words.iter().any(|w| stems.iter().any(|s| if s.ends_with('*') { w.starts_with(&s[..s.len() - 1]) } else { w == s }));
+    let strong = has(&["log", "logs", "loki", "grafana", "traceback", "stacktrace", "5xx", "4xx", "prometheus", "tempo"]);
+    let topic = strong
+        || has(&["error", "errores", "fatal", "warning", "warnings", "critical", "excepción", "excepciones", "exception", "exceptions", "traza", "trazas", "reinicio", "reinicios", "reinició", "reinicia", "restart", "restarts", "caída", "caídas", "caido", "caído", "crash", "crashes", "incidente", "incidentes", "incident", "latencia", "latencias", "timeout", "timeouts", "500", "502", "503", "504"]);
+    if !topic {
+        return false;
+    }
+    let low = words.join(" ");
+    let intent = ["cuánt", "cuant", "por qué", "porque", "por que", "analiza", "revisa", "mira ", "investiga", "diagnostic", "diagnóstic", "causa", "desde cuándo", "desde cuando", "cuándo", "cuando ", "dónde", "donde ", "qué pasó", "que paso", "qué pasa", "qué falla", "que falla", "falla", "fallan", "fallando", "muestra", "busca", "encuentra", "hay ", "resumen", "informe", "audit", "monitor", "precede", "antes de", "qué hubo", "que hubo", "cada "]
+        .iter()
+        .any(|k| low.contains(k));
+    strong || intent
+}
+
 /// UserPromptSubmit: si la pregunta va de logs/errores y el índice tiene logs, se
 /// lo dice al modelo con su cobertura; si la pregunta pide una ventana mayor que
 /// la indexada, lo avisa para que no tome una cifra parcial por total.
 fn prompt_hint(ev: &Value) -> R<Option<String>> {
     let prompt = ev.get("prompt").and_then(Value::as_str).unwrap_or("");
-    let low = prompt.to_lowercase();
-    let keys = ["log", "error", "fatal", "warn", "critic", "excep", "traza", "trace", "reinici", "restart", "caíd", "caid", "crash", "incident", "loki", "grafana", "latenc", "timeout", "5xx", " 500"];
-    if !keys.iter().any(|k| low.contains(k)) {
+    if !asks_about_logs(prompt) {
         return Ok(None);
     }
     let cwd = ev.get("cwd").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -919,6 +1032,71 @@ fn prompt_hint(ev: &Value) -> R<Option<String>> {
     }
     log(&format!("prompt: aviso ({} c, pide {asked:.0} h, cubre {span:.0} h)", hint.len()));
     Ok(Some(hint))
+}
+
+// ── Aviso de acoplamiento al editar ───────────────────────────────────────────
+
+/// PostToolUse de Edit/Write: si el fichero editado suele cambiar junto con
+/// otros (historia del índice: ≥ 2 commits en común y confianza ≥ 0,25), se lo
+/// dice al modelo UNA vez por fichero y sesión. Ataca el fallo típico de tocar
+/// un hotspot: cambiar la mitad (medido: 4 de 4 sesiones de Haiku dejaron fuera
+/// el fichero que el acoplamiento ponía primero). Desactivar: CHRONO_EDIT_HINT=0.
+fn edit_hint(ev: &Value) -> R<Option<String>> {
+    if std::env::var("CHRONO_EDIT_HINT").as_deref() == Ok("0") {
+        return Ok(None);
+    }
+    let Some(file) = ev.pointer("/tool_input/file_path").and_then(Value::as_str) else { return Ok(None) };
+    let file = PathBuf::from(file);
+    let mut d = file.parent().map(Path::to_path_buf).unwrap_or_default();
+    let db = loop {
+        if d.join(".chrono/index.db").is_file() {
+            break d.join(".chrono/index.db");
+        }
+        if !d.pop() {
+            return Ok(None);
+        }
+    };
+    let root = db.parent().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_default();
+    // Ruta relativa al repo git del índice (la clave de las entidades de git).
+    let repo = chrono_q(&db, &["sources"])
+        .lines()
+        .skip(2)
+        .filter_map(|l| l.split('\t').next())
+        .find_map(|s| s.strip_prefix("git:").map(PathBuf::from))
+        .unwrap_or_else(|| root.clone());
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    // Si el índice se construyó en otra ruta (copiado o movido), la carpeta que contiene `.chrono`.
+    let Some(rel) = [repo, root.clone()].iter().find_map(|base| canon(&file).strip_prefix(canon(base)).ok().map(|r| r.to_string_lossy().to_string())) else {
+        return Ok(None);
+    };
+    let session = ev.get("session_id").and_then(Value::as_str).unwrap_or("");
+    let mark_dir = root.join(".chrono/avisos");
+    let mark = mark_dir.join(format!("edit-{:016x}", chrono_core_hash(&format!("{session}{rel}"))));
+    if mark.exists() {
+        return Ok(None);
+    }
+    let out = chrono_q(&db, &["coupling", &rel]);
+    let mut rows: Vec<(String, i64, f64)> = out
+        .lines()
+        .skip(3)
+        .filter_map(|l| {
+            let c: Vec<&str> = l.split('\t').collect();
+            Some((c.first()?.to_string(), c.get(1)?.parse().ok()?, c.get(2)?.parse().ok()?))
+        })
+        .filter(|(f, n, conf)| *n >= 2 && *conf >= 0.25 && f != &rel)
+        .collect();
+    rows.truncate(5);
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let _ = std::fs::create_dir_all(&mark_dir);
+    let _ = std::fs::write(&mark, b"");
+    let list: Vec<String> = rows.iter().map(|(f, n, c)| format!("{f} ({n} commits juntos, {:.0} %)", c * 100.0)).collect();
+    log(&format!("after-edit {rel} → {} acoplados", rows.len()));
+    Ok(Some(format!(
+        "[chrono] Historia del repo: {rel} suele cambiar junto con {}. Antes de terminar, revisa si este cambio también necesita tocarlos (p. ej. quien llama, quien consume la respuesta o el otro lado de la API); si no hace falta, ignora este aviso.",
+        list.join("; ")
+    )))
 }
 
 // ── Verificador de cifras (Stop) ──────────────────────────────────────────────
@@ -1144,6 +1322,24 @@ mod tests {
         let ans = "FATAL 51 (postgres 51), ERROR 11; total graves 62 (51 + 11).\nA las 19:08:17 y el 2026-10-14T22:00:00Z; \
                    versión 2.30.0, HTTP 500 Internal, puerto :5432, [128].\nInventado: 79 líneas y 42 veces; 37%.";
         assert_eq!(unverified(ans, &allowed), vec![42, 79], "62 = 51 + 11 en la misma línea es una suma de cifras de chrono");
+    }
+
+    #[test]
+    fn aviso_de_logs_solo_cuando_toca() {
+        for si in ["analiza los errores de las últimas 24 h", "¿cuántos FATAL hubo en postgres?", "mira los logs de ai_agents_service", "por qué falla el login con 500", "qué precede a cada reinicio de postgres"] {
+            assert!(asks_about_logs(si), "debería avisar: {si}");
+        }
+        for no in ["el error se haya solucionado, sube el PR", "revisa el catálogo de productos", "BUG-069 (rama fix/login) está listo", "abre src/api/logs_router.py y añade un campo", "<task-notification> … grafana … failed", "implementa la papelera de prospectos", "hola, qué tal"] {
+            assert!(!asks_about_logs(no), "no debería avisar: {no}");
+        }
+    }
+
+    #[test]
+    fn selector_amplio_sin_ruido_y_concreto_intacto() {
+        let r = json!({});
+        assert_eq!(exclude_noise(r#"{service=~".+"}"#, &r), r#"{service=~".+", service!~"pgbouncer|cadvisor|alloy|loki|tempo|prometheus|grafana|node_exporter|redis_exporter"}"#);
+        assert_eq!(exclude_noise(r#"{service="pgbouncer"}"#, &r), r#"{service="pgbouncer"}"#);
+        assert!(!exclude_noise(r#"{service=~"api_gateway|pgbouncer"}"#, &r).contains("pgbouncer|"), "lo que nombra el selector no se excluye");
     }
 
     #[test]

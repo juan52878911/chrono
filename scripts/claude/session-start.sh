@@ -15,17 +15,32 @@ bin=$("$dir/ensure-chrono.sh" 2>/dev/null) || exit 0
   echo "chrono se instaló en $bin (plugin chrono). Si \`chrono\` no está en el PATH del shell, usa esa ruta."
 }
 
-raiz=$(git -C "${CLAUDE_PROJECT_DIR:-$PWD}" rev-parse --show-toplevel 2>/dev/null) || exit 0
+# Raíz del repo COMÚN: en un worktree, `--show-toplevel` daría el worktree y cada uno
+# tendría su propio índice (sin los logs ni la historia del principal). `--git-common-dir`
+# apunta al `.git` del repo principal; su padre es la raíz que comparten todos.
+dir_sesion=${CLAUDE_PROJECT_DIR:-$PWD}
+comun=$(git -C "$dir_sesion" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+case $comun in */.git) raiz=${comun%/.git} ;; *) raiz=$(git -C "$dir_sesion" rev-parse --show-toplevel 2>/dev/null) || exit 0 ;; esac
 mkdir -p "$raiz/.chrono" 2>/dev/null || exit 0
 lock="$raiz/.chrono/.auto.lock"
 mkdir "$lock" 2>/dev/null || exit 0      # ya hay uno indexando
 (
   trap 'rmdir "$lock" 2>/dev/null' EXIT
   cd "$raiz" || exit 0
+  # `"git_fetch": true` en .chrono/config.json: traer las ramas remotas antes de
+  # sincronizar (para indexar p. ej. origin/dev con `source_options.<repo>.rev`).
+  if grep -q '"git_fetch"[[:space:]]*:[[:space:]]*true' .chrono/config.json 2>/dev/null; then
+    GIT_TERMINAL_PROMPT=0 git fetch --quiet --no-tags origin >/dev/null 2>&1
+  fi
   if [ -f .chrono/index.db ]; then
     "$bin" sync >/dev/null 2>&1
   else
     "$bin" init >/dev/null 2>&1
+  fi
+  # Precarga de logs (regla `prefetch` del intermediario): la primera pregunta de
+  # logs ya encuentra los datos indexados.
+  if [ -f .chrono/intermediario.json ]; then
+    printf '{"cwd":"%s"}' "$raiz" | "$bin" hook prefetch >/dev/null 2>&1
   fi
 ) </dev/null >/dev/null 2>&1 &
 exit 0

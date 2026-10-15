@@ -74,7 +74,7 @@ impl Source for GitSource {
         &self,
         path: &Path,
         watermark: Option<Watermark>,
-        _cfg: &SourceConfig,
+        cfg: &SourceConfig,
     ) -> CoreResult<Box<dyn chrono_core::Cursor>> {
         let shallow = is_shallow(path)
             .map_err(|e| CoreError::Other(format!("comprobando shallow: {e}")))?;
@@ -85,7 +85,15 @@ impl Source for GitSource {
             ));
         }
 
-        let head = head_sha(path).map_err(|e| CoreError::Other(format!("leyendo HEAD: {e}")))?;
+        // `rev` (source_options del repo, p. ej. "origin/dev"): indexar esa rama y
+        // no el HEAD del checkout, que en un repo con worktrees puede ser
+        // cualquier rama vieja. Por defecto, HEAD.
+        let rev = cfg.options.get("rev").map(String::as_str).filter(|r| !r.trim().is_empty()).unwrap_or("HEAD");
+        let head = if rev == "HEAD" {
+            head_sha(path).map_err(|e| CoreError::Other(format!("leyendo HEAD: {e}")))?
+        } else {
+            gitutil::rev_sha(path, rev).map_err(|e| CoreError::Other(format!("resolviendo rev {rev:?}: {e}")))?
+        };
 
         let range = match watermark {
             None => None,
@@ -97,8 +105,13 @@ impl Source for GitSource {
                 if !commit_exists(path, sha) {
                     return Err(CoreError::Diverged(sha.to_string()));
                 }
-                Some(format!("{sha}..HEAD"))
+                Some(format!("{sha}..{head}"))
             }
+        };
+        // Ingesta completa de una rama que no es HEAD: su historia (`git log <sha>`).
+        let range = match (range, rev) {
+            (None, r) if r != "HEAD" => Some(head.clone()),
+            (r, _) => r,
         };
 
         let cur = GitCursor::spawn(path, head, range)?;
@@ -275,6 +288,37 @@ mod tests {
         std::fs::create_dir_all(&not_git).unwrap();
         assert_eq!(src.detect(&not_git), 0);
         let _ = std::fs::remove_dir_all(&not_git);
+    }
+
+    #[test]
+    fn rev_indexa_esa_rama_y_no_el_head() {
+        let repo = TempRepo::new();
+        commit(repo.path(), "a.txt", "1\n", "primero");
+        run(repo.path(), &["checkout", "-q", "-b", "dev"]);
+        commit(repo.path(), "b.txt", "2\n", "solo en dev");
+        commit(repo.path(), "c.txt", "3\n", "también solo en dev");
+        run(repo.path(), &["checkout", "-q", "-"]);
+        let src = GitSource::new();
+        let mut cfg = SourceConfig::default();
+        cfg.options.insert("rev".into(), "dev".into());
+        let mut cur = src.open(repo.path(), None, &cfg).unwrap();
+        let mut titles = Vec::new();
+        while let Some(ev) = cur.next().unwrap() {
+            titles.push(ev.title.clone());
+        }
+        assert_eq!(titles.len(), 3, "los commits de dev aunque el checkout siga en la rama inicial: {titles:?}");
+        // Incremental desde la marca: solo lo nuevo de dev.
+        let wm = cur.watermark();
+        commit(repo.path(), "d.txt", "4\n", "en la rama inicial, no cuenta");
+        run(repo.path(), &["checkout", "-q", "dev"]);
+        commit(repo.path(), "e.txt", "5\n", "nuevo en dev");
+        run(repo.path(), &["checkout", "-q", "-"]);
+        let mut cur = src.open(repo.path(), Some(wm), &cfg).unwrap();
+        let mut nuevos = Vec::new();
+        while let Some(ev) = cur.next().unwrap() {
+            nuevos.push(ev.title.clone());
+        }
+        assert_eq!(nuevos, vec!["nuevo en dev".to_string()]);
     }
 
     #[test]

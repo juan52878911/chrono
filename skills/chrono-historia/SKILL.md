@@ -1,6 +1,6 @@
 ---
 name: chrono-historia
-description: "Preguntas sobre la HISTORIA de un repo git con chrono en vez de leer git log/show crudo: qué es peligroso tocar, qué cambia junto con un fichero, quién conoce una zona (bus factor), dónde se concentran los bugs y de qué tipo, estado de ramas, qué entró con un ticket. Usar antes de un cambio arriesgado, una revisión o un refactor, aunque no se nombre chrono."
+description: "Historia de un repo git con chrono en vez de git log/show/blame crudos. Usar SIEMPRE antes de lanzar `git log`, `git log -L`, `git show <sha>` o `git blame` sobre un fichero o función para saber por qué está así o qué lo cambió: `chrono explain fichero[:DESDE-HASTA]` da los commits que escribieron esas líneas, si eran arreglos, tickets/PRs, autores y qué cambia con ese trozo, en ~500 tokens frente a ~10 000 (medido). `git show` sigue siendo para ver el parche literal de un commit concreto. También: qué es peligroso tocar (hotspots), qué cambia junto con un fichero, quién conoce una zona, dónde se concentran los bugs, estado de ramas, qué entró con un ticket. Aunque no se nombre chrono."
 ---
 
 # Historia de un repo con chrono

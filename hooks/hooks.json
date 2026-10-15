@@ -53,6 +53,16 @@
             "timeout": 120
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/claude/hook.sh\" after-edit",
+            "timeout": 20
+          }
+        ]
       }
     ],
     "PreToolUse": [
