@@ -39,6 +39,9 @@ const INDEX_REL: &str = ".chrono/index.db";
 pub struct State {
     store: std::cell::OnceCell<Store>,
     db: Option<PathBuf>,
+    /// Buscar el índice (si falta) en cada llamada. Los tests lo apagan para no
+    /// encontrar el índice real del repo donde corren.
+    discover: bool,
 }
 
 impl State {
@@ -49,11 +52,11 @@ impl State {
         if let Some(s) = store {
             let _ = cell.set(s);
         }
-        State { store: cell, db: None }
+        State { store: cell, db: None, discover: false }
     }
 
     pub fn store(&self) -> Option<&Store> {
-        if self.store.get().is_none() {
+        if self.store.get().is_none() && self.discover {
             let s = open_or_discover(self.db.clone())?;
             let _ = self.store.set(s);
         }
@@ -65,7 +68,7 @@ impl State {
 /// de E/S. Nunca falla por falta de índice: `db` ausente o inválido deja
 /// `State` sin store y el servidor sigue sirviendo `tools/list` etc.
 pub fn serve(db: Option<PathBuf>) -> Result<()> {
-    let state = State { store: std::cell::OnceCell::new(), db };
+    let state = State { store: std::cell::OnceCell::new(), db, discover: true };
 
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
