@@ -47,7 +47,7 @@ def metrics(path):
     return m
 
 def nums(line):
-    return {int(x.replace(".", "").replace(",", "")) for x in re.findall(r"(?<![\w:.\-])\d{1,3}(?:[.,]\d{3})*(?![\w:.\-%])", line)}
+    return {int(x.replace(".", "").replace(",", "")) for x in re.findall(r"(?<![\w:.\-])\d{1,3}(?:[.,]\d{3})*(?![\w.\-%]|:\d)", line)}
 
 def grade(text):
     t = re.sub(r"[*`]", "", text)
