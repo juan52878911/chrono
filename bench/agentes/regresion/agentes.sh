@@ -27,13 +27,15 @@ if [ "$motor" = minimax ]; then
   export ANTHROPIC_AUTH_TOKEN="${MINIMAX_API_KEY:-$(sh -c "${MINIMAX_API_KEY_CMD:?falta MINIMAX_API_KEY o MINIMAX_API_KEY_CMD}")}"
   modelo=${MODELO:-MiniMax-M3}; export ANTHROPIC_MODEL="$modelo" ANTHROPIC_SMALL_FAST_MODEL="$modelo"
   export CLAUDE_CONFIG_DIR="$dir/cc"; mkdir -p "$CLAUDE_CONFIG_DIR"; unset ANTHROPIC_API_KEY
-  sources=""
+  # Con un endpoint compatible el modelo va solo por ANTHROPIC_MODEL: `--model` con un nombre
+  # que Claude Code no conoce deja la sesión sin credenciales («Not logged in»).
+  sources=""; modelflag=""
 else
-  modelo=${MODELO:-claude-sonnet-5-5}; sources="--setting-sources project"
+  modelo=${MODELO:-claude-sonnet-5-5}; sources="--setting-sources project"; modelflag="--model $modelo"
 fi
 cd "$dir"
 # shellcheck disable=SC2086
-claude -p "$(cat "$here/pregunta.txt")" --model "$modelo" $sources $plug --strict-mcp-config --mcp-config "$dir/mcp.json" \
+claude -p "$(cat "$here/pregunta.txt")" $modelflag $sources $plug --strict-mcp-config --mcp-config "$dir/mcp.json" \
   --allowedTools Read Grep Glob mcp__chrono Skill "Bash(jq:*)" "Bash(grep:*)" "Bash(wc:*)" "Bash(head:*)" "Bash(tail:*)" \
      "Bash(sort:*)" "Bash(uniq:*)" "Bash(cut:*)" "Bash(awk:*)" "Bash(chrono:*)" "Bash(ls:*)" \
   --disallowedTools Write Edit WebFetch WebSearch Task NotebookEdit Agent \
