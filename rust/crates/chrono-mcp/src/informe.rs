@@ -61,12 +61,26 @@ fn logs(conn: &rusqlite::Connection, args: &Value, since_epoch: i64) -> Result<V
         let cont = chrono_metrics::top_filtered(conn, "attr:container", since_epoch, &base(Some(lv)), 8)?;
         let scope = EventScope { level: Some(lv), ..sc.clone() };
         let pats = chrono_metrics::patterns_scoped(conn, since_epoch, &scope, 5)?;
+        // Las mismas plantillas contando también las líneas SIN nivel cuyo texto dice
+        // este nivel: si hay más, el recuento con nivel se queda corto y hay que decirlo.
+        let with_inferred: std::collections::HashMap<String, i64> =
+            chrono_metrics::patterns_scoped(conn, since_epoch, &EventScope { infer_level: true, ..scope.clone() }, 200)?
+                .into_iter()
+                .map(|p| (p.template, p.count))
+                .collect();
         if *lv != "WARNING" {
             graves.extend(pats.iter().take(2).map(|p| p.template.clone()));
         }
         por_nivel.push(json!({
             "level": lv, "count": total, "servicios": pairs(svc), "contenedores": pairs(cont),
-            "mensajes": pats.iter().map(|p| json!({"count": p.count, "template": p.template, "example_id": p.example_id})).collect::<Vec<_>>(),
+            "mensajes": pats.iter().map(|p| {
+                let extra = with_inferred.get(&p.template).copied().unwrap_or(p.count) - p.count;
+                let mut m = json!({"count": p.count, "template": p.template, "example_id": p.example_id});
+                if extra > 0 {
+                    m["sin_nivel"] = json!(format!("+{extra} sin nivel en la fuente (mismo mensaje)"));
+                }
+                m
+            }).collect::<Vec<_>>(),
         }));
     }
     // Picos de lo grave (10 min).

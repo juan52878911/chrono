@@ -17,8 +17,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/claude/log-hint.sh\" UserPromptSubmit",
-            "timeout": 10
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/claude/hook.sh\" prompt",
+            "timeout": 15
           }
         ]
       }

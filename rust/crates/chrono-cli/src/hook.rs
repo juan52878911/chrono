@@ -66,6 +66,9 @@ fn handle(mode: &str, ev: &Value) -> R<Option<String>> {
     if mode == "stop" {
         return verify_numbers(ev);
     }
+    if mode == "prompt" {
+        return prompt_hint(ev);
+    }
     let cwd = ev.get("cwd").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let Some(root) = find_root(&cwd) else { return Ok(None) };
     let cfg: Value = serde_json::from_str(&std::fs::read_to_string(root.join(".chrono/intermediario.json")).map_err(|e| e.to_string())?)
@@ -95,7 +98,20 @@ fn handle(mode: &str, ev: &Value) -> R<Option<String>> {
                     Some("records") => adapter_records(&rule, tool, ev.get("tool_response"), &root)?,
                     _ => None,
                 };
-                out = text.map(|t| json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedMCPToolOutput": t}}));
+                // Si el índice creció desde lo último que se le dijo a esta sesión (el
+                // indexado de fondo terminó), se le dice: si no, sigue con líneas crudas
+                // teniendo los datos completos en chrono.
+                let note = if rule.get("adapter").and_then(Value::as_str) == Some("loki") {
+                    growth_note(&root, rule.get("name").and_then(Value::as_str).unwrap_or("loki"), ev.get("session_id").and_then(Value::as_str).unwrap_or(""))
+                } else {
+                    None
+                };
+                out = match (text, note) {
+                    (Some(t), Some(n)) => Some(json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedMCPToolOutput": format!("{t}\n{n}")}})),
+                    (Some(t), None) => Some(json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedMCPToolOutput": t}})),
+                    (None, Some(n)) => Some(json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": n}})),
+                    (None, None) => None,
+                };
                 break;
             }
             out
@@ -800,6 +816,111 @@ fn after_read(cfg: &Value, input: &Value, root: &Path, session: &str) -> R<Optio
     )))
 }
 
+// ── Avisos de cobertura ───────────────────────────────────────────────────────
+
+/// `(eventos, primero, último)` de la fuente `<name>.jsonl` del intermediario.
+fn mcp_source(db: &Path, name: &str) -> Option<(i64, String, String)> {
+    let out = chrono_q(db, &["sources"]);
+    out.lines().map(|l| l.split('\t').collect::<Vec<_>>()).find(|c| c.first().is_some_and(|s| s.ends_with(&format!("/{name}.jsonl")))).and_then(|c| {
+        Some((c.get(2)?.parse().ok()?, c.get(3)?.to_string(), c.get(4)?.to_string()))
+    })
+}
+
+fn span_hours(first: &str, last: &str) -> f64 {
+    match (to_ns(Some(first), "now"), to_ns(Some(last), "now")) {
+        (Ok(a), Ok(b)) if b > a => (b - a) as f64 / 3.6e12,
+        _ => 0.0,
+    }
+}
+
+/// Una línea si el índice de Loki tiene más eventos que la última vez que se le
+/// dijo a esta sesión; recuerda lo dicho en `.chrono/mcp/visto-<sesión>`.
+fn growth_note(root: &Path, name: &str, session: &str) -> Option<String> {
+    let db = root.join(".chrono/index.db");
+    let (n, first, last) = mcp_source(&db, name)?;
+    let mark = root.join(".chrono/mcp").join(format!("visto-{:016x}", chrono_core_hash(session)));
+    let before: i64 = std::fs::read_to_string(&mark).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    if n <= before {
+        return None;
+    }
+    let _ = std::fs::write(&mark, n.to_string());
+    Some(format!(
+        "[chrono] El índice ya tiene {n} eventos de Loki indexados ({first} → {last}, ~{:.0} h){}. Para cifras por nivel/servicio, mensajes más repetidos, episodios y qué los precede usa la tool informe de chrono (y precede/events para profundizar) en vez de recontar líneas de Loki.",
+        span_hours(&first, &last),
+        if before > 0 { format!(", {} más que la última vez", n - before) } else { String::new() }
+    ))
+}
+
+/// Ventana que pide la pregunta, en horas («24 h», «7 días», «última semana»…), o 0.
+fn asked_hours(prompt: &str) -> f64 {
+    let p = prompt.to_lowercase();
+    let words: Vec<&str> = p.split(|c: char| c.is_whitespace() || ",.;:()".contains(c)).filter(|w| !w.is_empty()).collect();
+    let unit = |w: &str| -> Option<f64> {
+        Some(match w {
+            "h" | "hora" | "horas" | "hrs" => 1.0,
+            "d" | "día" | "días" | "dia" | "dias" => 24.0,
+            "semana" | "semanas" => 168.0,
+            "mes" | "meses" => 720.0,
+            _ => return None,
+        })
+    };
+    let mut best: f64 = 0.0;
+    for (i, w) in words.iter().enumerate() {
+        // «24h», «7d»
+        let digits: String = w.chars().take_while(char::is_ascii_digit).collect();
+        if !digits.is_empty() {
+            let n: f64 = digits.parse().unwrap_or(0.0);
+            if let Some(u) = unit(&w[digits.len()..]).or_else(|| words.get(i + 1).and_then(|n| unit(n))) {
+                best = best.max(n * u);
+            }
+        } else if (*w == "semana" || *w == "mes") && i > 0 && ["última", "ultima", "la", "una", "esta"].contains(&words[i - 1]) {
+            best = best.max(unit(w).unwrap_or(0.0));
+        }
+    }
+    best
+}
+
+/// UserPromptSubmit: si la pregunta va de logs/errores y el índice tiene logs, se
+/// lo dice al modelo con su cobertura; si la pregunta pide una ventana mayor que
+/// la indexada, lo avisa para que no tome una cifra parcial por total.
+fn prompt_hint(ev: &Value) -> R<Option<String>> {
+    let prompt = ev.get("prompt").and_then(Value::as_str).unwrap_or("");
+    let low = prompt.to_lowercase();
+    let keys = ["log", "error", "fatal", "warn", "critic", "excep", "traza", "trace", "reinici", "restart", "caíd", "caid", "crash", "incident", "loki", "grafana", "latenc", "timeout", "5xx", " 500"];
+    if !keys.iter().any(|k| low.contains(k)) {
+        return Ok(None);
+    }
+    let cwd = ev.get("cwd").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let mut d = cwd.clone();
+    let db = loop {
+        if d.join(".chrono/index.db").is_file() {
+            break d.join(".chrono/index.db");
+        }
+        if !d.pop() {
+            return Ok(None);
+        }
+    };
+    let rows: Vec<Vec<String>> = chrono_q(&db, &["sources"]).lines().skip(2).map(|l| l.split('\t').map(str::to_string).collect()).collect();
+    let logs: Vec<&Vec<String>> = rows.iter().filter(|c| c.len() >= 6 && c[1] != "git" && !c[5].is_empty()).collect();
+    if logs.is_empty() {
+        return Ok(None);
+    }
+    let desc: Vec<String> = logs.iter().map(|c| format!("{} ({} eventos, {} → {}; {})", c[0].rsplit('/').next().unwrap_or(&c[0]), c[2], c[3], c[4], c[5])).collect();
+    let span = logs.iter().map(|c| span_hours(&c[3], &c[4])).fold(0.0, f64::max);
+    let asked = asked_hours(prompt);
+    let mut hint = format!(
+        "chrono tiene indexados logs que pueden servir: {}. EMPIEZA por la tool MCP informe de chrono (cifras exactas por nivel y servicio, mensajes más repetidos, episodios y qué los precede); si está diferida, cárgala con ToolSearch \"chrono\". Las tools de Loki/Grafana cortan en 100 líneas: úsalas solo para el detalle que chrono no tenga.",
+        desc.join("; ")
+    );
+    if asked > 0.0 && span < asked * 0.8 {
+        hint.push_str(&format!(
+            " OJO: la pregunta pide ~{asked:.0} h y lo indexado cubre solo ~{span:.0} h. Lo que no está indexado NO es cero: para el resto consulta Loki con la ventana completa (start/end explícitos; el intermediario la indexará en segundo plano y te avisará) y no presentes cifras parciales como totales."
+        ));
+    }
+    log(&format!("prompt: aviso ({} c, pide {asked:.0} h, cubre {span:.0} h)", hint.len()));
+    Ok(Some(hint))
+}
+
 // ── Verificador de cifras (Stop) ──────────────────────────────────────────────
 
 /// Al terminar, los conteos de la respuesta final que no salen de ninguna salida
@@ -1023,6 +1144,14 @@ mod tests {
         let ans = "FATAL 51 (postgres 51), ERROR 11; total graves 62 (51 + 11).\nA las 19:08:17 y el 2026-10-14T22:00:00Z; \
                    versión 2.30.0, HTTP 500 Internal, puerto :5432, [128].\nInventado: 79 líneas y 42 veces; 37%.";
         assert_eq!(unverified(ans, &allowed), vec![42, 79], "62 = 51 + 11 en la misma línea es una suma de cifras de chrono");
+    }
+
+    #[test]
+    fn ventana_pedida_en_la_pregunta() {
+        assert_eq!(asked_hours("errores de las últimas 24 h y de 7 días"), 168.0);
+        assert_eq!(asked_hours("logs de la última semana"), 168.0);
+        assert_eq!(asked_hours("qué pasó en 2h"), 2.0);
+        assert_eq!(asked_hours("errores de hoy"), 0.0);
     }
 
     #[test]
