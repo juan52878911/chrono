@@ -211,9 +211,24 @@ const ORDER: &[&str] = &[
     "example_id", "first_id",
 ];
 
+/// Quita el prefijo de fecha/proceso de una plantilla (`<TS> <TS> UTC [<NUM>] `):
+/// no distingue nada y es lo que más ocupa en las tablas.
+pub(crate) fn short(s: &str) -> &str {
+    let mut t = s;
+    loop {
+        let before = t;
+        for p in ["<TS> ", "UTC ", "[<NUM>] "] {
+            t = t.strip_prefix(p).unwrap_or(t);
+        }
+        if t == before {
+            return t;
+        }
+    }
+}
+
 fn cell(v: &Value) -> String {
     match v {
-        Value::String(s) => s.replace(['\t', '\n'], " "),
+        Value::String(s) => short(s).replace(['\t', '\n'], " "),
         Value::Null => "-".into(),
         Value::Array(a) if a.iter().all(|x| !x.is_object() && !x.is_array()) => a.iter().map(cell).collect::<Vec<_>>().join(","),
         Value::Array(a) if a.iter().all(|x| x.get("value").is_some() && x.get("count").is_some()) => {
@@ -256,36 +271,35 @@ fn render_into(v: &Value, indent: &str, out: &mut String) {
         out.push_str(&format!("{indent}{}\n", cell(v)));
         return;
     };
-    let mut scalars: Vec<(&String, &Value)> = Vec::new();
-    let mut tables: Vec<(&String, &Vec<Value>)> = Vec::new();
-    let mut objects: Vec<(&String, &Map<String, Value>)> = Vec::new();
+    // En el orden en que la herramienta construye el resultado (lo importante, primero).
     for (k, val) in o {
         match val {
-            Value::Array(a) if !a.is_empty() && a.iter().all(Value::is_object) => tables.push((k, a)),
-            Value::Object(m) => objects.push((k, m)),
-            _ => scalars.push((k, val)),
+            Value::Array(a) if !a.is_empty() && a.iter().all(Value::is_object) => render_table(k, a, indent, out),
+            Value::Array(a) if a.iter().any(|x| x.as_str().is_some_and(|s| s.len() > 40)) => {
+                out.push_str(&format!("{indent}{k}:\n"));
+                for x in a {
+                    out.push_str(&format!("{indent}  - {}\n", cell(x)));
+                }
+            }
+            Value::Object(m) => {
+                out.push_str(&format!("{indent}{k}:\n"));
+                render_into(&Value::Object(m.clone()), &format!("{indent}  "), out);
+            }
+            _ => out.push_str(&format!("{indent}{k}: {}\n", cell(val))),
         }
     }
-    for (k, val) in scalars {
-        out.push_str(&format!("{indent}{k}: {}\n", cell(val)));
-    }
-    for (k, m) in objects {
-        out.push_str(&format!("{indent}{k}:\n"));
-        render_into(&Value::Object(m.clone()), &format!("{indent}  "), out);
-    }
-    for (k, rows) in tables {
-        let cols = columns(rows);
-        let (nested, flat): (Vec<String>, Vec<String>) =
-            cols.into_iter().partition(|c| rows.iter().any(|r| r.get(c).is_some_and(is_nested)));
-        out.push_str(&format!("{indent}{k} ({}):\n{indent}{}\n", rows.len(), flat.join("\t")));
-        for r in rows {
-            let line: Vec<String> = flat.iter().map(|c| r.get(c).map(cell).unwrap_or_else(|| "-".into())).collect();
-            out.push_str(&format!("{indent}{}\n", line.join("\t")));
-            for c in &nested {
-                if let Some(a) = r.get(c).and_then(Value::as_array).filter(|a| !a.is_empty()) {
-                    let sub = json!({ c.clone(): a });
-                    render_into(&sub, &format!("{indent}    "), out);
-                }
+}
+
+fn render_table(k: &str, rows: &[Value], indent: &str, out: &mut String) {
+    let cols = columns(rows);
+    let (nested, flat): (Vec<String>, Vec<String>) = cols.into_iter().partition(|c| rows.iter().any(|r| r.get(c).is_some_and(is_nested)));
+    out.push_str(&format!("{indent}{k} ({}):\n{indent}{}\n", rows.len(), flat.join("\t")));
+    for r in rows {
+        let line: Vec<String> = flat.iter().map(|c| r.get(c).map(cell).unwrap_or_else(|| "-".into())).collect();
+        out.push_str(&format!("{indent}{}\n", line.join("\t")));
+        for c in &nested {
+            if let Some(a) = r.get(c).and_then(Value::as_array).filter(|a| !a.is_empty()) {
+                render_table(c, a, &format!("{indent}    "), out);
             }
         }
     }

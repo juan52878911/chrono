@@ -181,6 +181,8 @@ fn respond_err(id: Option<Value>, code: i64, message: &str) -> String {
 }
 
 pub mod contract;
+pub use tools::run_tool_text;
+mod informe;
 
 #[cfg(test)]
 mod tests;

@@ -64,6 +64,10 @@ pub struct PrecedeOpts<'a> {
     pub entity: Option<&'a str>,
     pub max_episodes: usize,
     pub per_episode: usize,
+    /// Episodios por ORIGEN (contenedor/servicio) en vez de mezclar orígenes que
+    /// coinciden en el tiempo: el apagado de un preflight y el del servicio
+    /// principal son episodios distintos, y lo del uno precede al otro.
+    pub by_origin: bool,
 }
 
 impl Default for PrecedeOpts<'_> {
@@ -77,6 +81,7 @@ impl Default for PrecedeOpts<'_> {
             entity: None,
             max_episodes: 50,
             per_episode: 8,
+            by_origin: false,
         }
     }
 }
@@ -116,10 +121,13 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<(Vec<Episode>, Vec<
         .query_map(rusqlite::params_from_iter(bound), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<std::result::Result<_, _>>()?;
 
-    // 2. Episodios por hueco.
+    // 2. Episodios por hueco (por origen si se pide; si no, todos juntos).
     let mut episodes: Vec<Episode> = Vec::new();
+    let mut open: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for (id, at, epoch, entity) in anchors {
-        match episodes.last_mut() {
+        let slot = if o.by_origin { open.get(&entity).copied() } else { episodes.len().checked_sub(1) };
+        let last = slot.and_then(|i| episodes.get_mut(i));
+        match last {
             Some(ep) if epoch - ep.end_epoch <= o.gap_ms => {
                 ep.end_epoch = epoch;
                 ep.anchors += 1;
@@ -127,18 +135,22 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<(Vec<Episode>, Vec<
                     ep.origins.push(entity);
                 }
             }
-            _ => episodes.push(Episode {
-                start_at: at,
-                start_epoch: epoch,
-                end_epoch: epoch,
-                anchors: 1,
-                origins: vec![entity.clone()],
-                entity,
-                first_id: id,
-                preceding: Vec::new(),
-            }),
+            _ => {
+                open.insert(entity.clone(), episodes.len());
+                episodes.push(Episode {
+                    start_at: at,
+                    start_epoch: epoch,
+                    end_epoch: epoch,
+                    anchors: 1,
+                    origins: vec![entity.clone()],
+                    entity,
+                    first_id: id,
+                    preceding: Vec::new(),
+                });
+            }
         }
     }
+    episodes.sort_by(|a, b| a.start_epoch.cmp(&b.start_epoch).then(a.entity.cmp(&b.entity)));
     episodes.truncate(o.max_episodes);
 
     // 3. Lo que precede a cada uno: niveles pedidos (con el deducido), ventana previa.
@@ -165,6 +177,11 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<(Vec<Episode>, Vec<
         // (nivel, plantilla, entidad) -> (cuenta, último epoch, ejemplo)
         let mut agg: HashMap<(String, String, String), (i64, i64, String)> = HashMap::new();
         for (id, epoch, title, level, entity) in rows {
+            // Lo del MISMO origen en el último segundo es el propio arranque del
+            // episodio, no algo que lo preceda.
+            if entity == ep.entity && to - epoch < 1000 {
+                continue;
+            }
             let key = (level.to_ascii_uppercase(), chrono_core::templatize(&title), entity);
             let e = agg.entry(key).or_insert((0, 0, String::new()));
             e.0 += 1;

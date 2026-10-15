@@ -231,7 +231,17 @@ pub fn tool_defs() -> Vec<Value> {
                 "window_secs": json!({"type": "integer", "description": "Ventana previa a cada episodio que se examina (por defecto 120)"}),
                 "before_levels": str_prop("Niveles de los precursores (por defecto FATAL,CRITICAL,ERROR,WARNING)"),
                 "before_entity": str_prop("Solo precursores de esta(s) entidad(es) (opcional)"),
+                "by_origin": json!({"type": "boolean", "description": "Un episodio por contenedor/servicio de origen en vez de mezclarlos (recomendado si hay preflight/sidecars) (por defecto false)"}),
                 "limit": json!({"type": "integer", "description": "Máximo de episodios (por defecto 50)"})
+            })),
+            &[],
+        ),
+        tool(
+            "informe",
+            "EMPIEZA AQUÍ. Informe completo y exacto en UNA llamada. tipo=logs (por defecto): cobertura, líneas por nivel, en qué servicios/contenedores cae cada nivel, mensajes más repetidos por nivel, picos, episodios de FATAL/CRITICAL con lo que los precede, y las consultas siguientes sugeridas. tipo=codigo con target=fichero[:A-B]: por qué está así (explain), dueños, qué cambia con él y si es hotspot.",
+            with_scope(json!({
+                "tipo": str_prop("logs (por defecto) | codigo"),
+                "target": str_prop("Para tipo=codigo: fichero o fichero:DESDE-HASTA")
             })),
             &[],
         ),
@@ -266,6 +276,17 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
         Some(s) => s,
         None => return Ok(text_content(no_index_text())),
     };
+    run_tool(store, name, args)
+}
+
+/// Texto de la respuesta de una herramienta (lo mismo que ve el modelo por MCP):
+/// lo usa el CLI (`chrono informe`) para no tener dos implementaciones.
+pub fn run_tool_text(store: &chrono_store::Store, name: &str, args: &Value) -> Result<String> {
+    let v = run_tool(store, name, args)?;
+    Ok(v["content"][0]["text"].as_str().unwrap_or("").to_string())
+}
+
+fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Value> {
     let conn = store.conn();
     let since = args.get("since").and_then(Value::as_str).unwrap_or("");
     let since_epoch = since_to_epoch(since);
@@ -337,6 +358,7 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
             json!({"dim": dim, "top": items})
         }
         "sources" => sources(conn)?,
+        "informe" => crate::informe::informe(store, args, since_epoch)?,
         "precede" => {
             let anchor = scope_from(args);
             if anchor.is_empty() {
@@ -350,6 +372,7 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
                 levels: args.get("before_levels").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or("FATAL,CRITICAL,ERROR,WARNING"),
                 entity: args.get("before_entity").and_then(Value::as_str).filter(|s| !s.is_empty()),
                 max_episodes: arg_i64(args, "limit", 50).max(1) as usize,
+                by_origin: args.get("by_origin").and_then(Value::as_bool).unwrap_or(false),
                 ..Default::default()
             };
             let (eps, common) = chrono_metrics::precede(conn, &o)?;
@@ -491,7 +514,7 @@ fn sources(conn: &Connection) -> Result<Value> {
     Ok(json!({"sources": items}))
 }
 
-fn hotspots(conn: &Connection, since_epoch: i64) -> Result<Value> {
+pub(crate) fn hotspots(conn: &Connection, since_epoch: i64) -> Result<Value> {
     let rows = chrono_metrics::hotspots(conn, since_epoch, HOTSPOTS_LIMIT, false)?;
     let items: Vec<Value> = rows
         .iter()
@@ -502,7 +525,7 @@ fn hotspots(conn: &Connection, since_epoch: i64) -> Result<Value> {
     Ok(json!({"hotspots": items}))
 }
 
-fn coupling(conn: &Connection, entity: &str, since_epoch: i64) -> Result<Value> {
+pub(crate) fn coupling(conn: &Connection, entity: &str, since_epoch: i64) -> Result<Value> {
     let (rows, _total) = chrono_metrics::coupling(conn, entity, COUPLING_MIN_SUPPORT, since_epoch, COUPLING_LIMIT, false)?;
     let items: Vec<Value> = rows
         .iter()
@@ -511,7 +534,7 @@ fn coupling(conn: &Connection, entity: &str, since_epoch: i64) -> Result<Value> 
     Ok(json!({"for": entity, "coupled": items}))
 }
 
-fn owners(conn: &Connection, prefix: &str, since_epoch: i64) -> Result<Value> {
+pub(crate) fn owners(conn: &Connection, prefix: &str, since_epoch: i64) -> Result<Value> {
     let (rows, bus_factor) = chrono_metrics::owners(conn, prefix, since_epoch, false)?;
     let items: Vec<Value> = rows
         .iter()
@@ -592,7 +615,7 @@ fn phases(conn: &Connection) -> Result<Value> {
 
 /// `explain`: mismo contenido y orden que `chrono explain` (las reglas viven en
 /// `chrono_metrics::explain`; aquí solo se ejecuta el blame y se serializa).
-fn explain(store: &chrono_store::Store, target: &str, limit: usize) -> Result<Value> {
+pub(crate) fn explain(store: &chrono_store::Store, target: &str, limit: usize) -> Result<Value> {
     let repo = match store.meta("repo_path")?.filter(|s| !s.is_empty()) {
         Some(rp) => rp,
         None => store.list_sources()?.into_iter().find(|s| s.kind == "git").map(|s| s.path).ok_or("no git source in the index")?,

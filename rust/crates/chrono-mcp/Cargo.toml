@@ -12,7 +12,7 @@ chrono-store = { path = "../chrono-store" }
 chrono-metrics = { path = "../chrono-metrics" }
 chrono-source-git = { path = "../chrono-source-git" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 # La consulta de `prs` lee la tabla `issues` directamente (no hay
 # `chrono-metrics::prs`); misma versión que `chrono-store`/`chrono-metrics`.
 rusqlite = { version = "0.32", features = ["bundled"] }

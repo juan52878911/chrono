@@ -75,6 +75,10 @@ Log-native (multi-source). timeline, stats, top, patterns and events share the s
                        e.g. patterns --level FATAL,ERROR,CRITICAL --limit 3.
   trace <id>           Follow an event's links chain (reverts, same ticket/PR, vcs.commit ↔ commit).
   events               Unified chronological stream across sources.
+  informe [logs|codigo <file[:A-B]>]
+                       START HERE: the whole picture in one call. logs: coverage, per level counts, services
+                       and containers per level, top messages per level, peaks, FATAL/CRITICAL episodes and
+                       what precedes them, and the next queries. codigo: explain + owners + coupling + hotspot.
   precede              Episodes of what the filters match (e.g. --grep 'fast shutdown') and what
                        precedes each one (errors/warnings in --window 2m, levels inferred from the
                        text), plus the precursors common to several episodes. --gap 2m splits
@@ -155,6 +159,10 @@ Log-native (multi-fuente). timeline, stats, top, patterns y events comparten fil
                        p.ej. patterns --level FATAL,ERROR,CRITICAL --limit 3.
   trace <id>           Sigue la cadena de links de un evento (reverts, mismo ticket/PR, vcs.commit ↔ commit).
   events               Stream cronológico unificado de todas las fuentes.
+  informe [logs|codigo <fichero[:A-B]>]
+                       EMPIEZA AQUÍ: el panorama en una llamada. logs: cobertura, cifras por nivel, servicios y
+                       contenedores por nivel, mensajes más repetidos por nivel, picos, episodios FATAL/CRITICAL
+                       y lo que los precede, y las consultas siguientes. codigo: explain + dueños + acople + hotspot.
   precede              Episodios de lo que casan los filtros (p.ej. --grep 'fast shutdown') y qué
                        precede a cada uno (errores/avisos en --window 2m, con el nivel deducido del
                        texto), más los precursores comunes a varios episodios. --gap 2m separa
@@ -597,6 +605,31 @@ fn main() {
         "explain" => {
             let target = require_pos(&f, "explain needs a <file>[:FROM-TO]", "explain necesita un <fichero>[:DESDE-HASTA]");
             query::explain(&store, &target, f.limit.as_deref())
+        }
+        "informe" => {
+            // La misma implementación que la tool MCP (texto con cabecera).
+            let mut a = serde_json::Map::new();
+            let put = |a: &mut serde_json::Map<String, serde_json::Value>, k: &str, v: &Option<String>| {
+                if let Some(v) = v {
+                    a.insert(k.into(), serde_json::Value::String(v.clone()));
+                }
+            };
+            a.insert("tipo".into(), f.pos.get(1).cloned().unwrap_or_else(|| "logs".into()).into());
+            put(&mut a, "target", &f.pos.get(2).cloned());
+            put(&mut a, "since", &f.since);
+            put(&mut a, "until", &f.until);
+            put(&mut a, "source", &f.source);
+            put(&mut a, "entity", &f.entity);
+            put(&mut a, "attr", &f.attr);
+            put(&mut a, "grep", &f.grep);
+            put(&mut a, "kind", &f.kind);
+            match chrono_mcp::run_tool_text(&store, "informe", &serde_json::Value::Object(a)) {
+                Ok(t) => {
+                    println!("{t}");
+                    return;
+                }
+                Err(e) => fatal(e),
+            }
         }
         "precede" => query::precede(
             &store,
