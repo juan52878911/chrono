@@ -1,6 +1,6 @@
 {
   "name": "chrono",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Historia de git, logs y CI/CD indexados en local y consultados de forma determinista: qué es peligroso tocar, por qué un trozo de código está así (explain), causas agrupadas de fallos de CI y de logs masivos, sin leer miles de líneas. Skills + servidor MCP de chrono.",
   "author": {
     "name": "Juan Bedoya",

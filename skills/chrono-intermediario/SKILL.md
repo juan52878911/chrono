@@ -18,10 +18,13 @@ El plugin trae dos hooks que no hacen NADA hasta que exista `.chrono/intermediar
   (`auto_index`, por defecto sí): lo siguiente que se pregunte ya está en chrono. La salida solo se
   sustituye si venía truncada.
 
-- **Stop (verificador de cifras)**: si la sesión usó chrono y la respuesta final da conteos que no
+- **Stop (verificador de cifras, APAGADO por defecto)**: con `"verify": true` en este fichero o
+  `CHRONO_VERIFY=1`, si la sesión usó chrono y la respuesta final da conteos que no
   salen de ninguna salida de chrono (ni de un agregado pequeño de otra consulta), pide UNA vez que se
   comprueben o se marquen como estimación. Ignora fechas, horas, versiones, IPs, duraciones, puertos y
-  códigos HTTP; acepta sumas de dos cifras que aparecen en la misma línea. Desactivar: `CHRONO_VERIFY=0`.
+  códigos HTTP; acepta sumas de dos cifras que aparecen en la misma línea. Está apagado porque, medido con
+  Opus, al bloquear el modelo contesta al aviso y ese mensaje queda como respuesta final, y los falsos
+  positivos (códigos HTTP, sumas de varias cifras) lo disparan: 3 de 6 sesiones se estropearon.
 
 Tu trabajo aquí es decidir dónde merece la pena y escribir esa configuración. **Menos es más**:
 interceptar donde no hace falta añade latencia y le quita al modelo texto que sí quería leer.

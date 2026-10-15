@@ -807,7 +807,21 @@ fn after_read(cfg: &Value, input: &Value, root: &Path, session: &str) -> R<Optio
 /// como estimación (`decision: block` con el motivo; la segunda vez,
 /// `stop_hook_active`, ya no bloquea). Solo actúa si la sesión usó chrono.
 fn verify_numbers(ev: &Value) -> R<Option<String>> {
-    if std::env::var("CHRONO_VERIFY").as_deref() == Ok("0") || ev.get("stop_hook_active").and_then(Value::as_bool) == Some(true) {
+    // Opt-in (medido con Opus: al bloquear, el modelo responde al aviso y ESE mensaje queda como respuesta
+    // final, tapando la buena; y los falsos positivos —un código HTTP, una suma de 4 cifras— lo disparan).
+    // Se activa con CHRONO_VERIFY=1 o "verify": true en .chrono/intermediario.json.
+    let cwd = ev.get("cwd").and_then(Value::as_str).map(PathBuf::from).unwrap_or_default();
+    let by_config = find_root(&cwd)
+        .and_then(|r| std::fs::read_to_string(r.join(".chrono/intermediario.json")).ok())
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|c| c.get("verify").and_then(Value::as_bool))
+        .unwrap_or(false);
+    let on = match std::env::var("CHRONO_VERIFY").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => by_config,
+    };
+    if !on || ev.get("stop_hook_active").and_then(Value::as_bool) == Some(true) {
         return Ok(None);
     }
     let Some(path) = ev.get("transcript_path").and_then(Value::as_str) else { return Ok(None) };
@@ -822,7 +836,7 @@ fn verify_numbers(ev: &Value) -> R<Option<String>> {
     }
     let list: Vec<String> = bad.iter().take(12).map(|n| n.to_string()).collect();
     let reason = format!(
-        "[chrono · verificador] Antes de terminar: estas cifras de tu respuesta no salen de ninguna salida de chrono de esta sesión: {}. Si son conteos, compruébalas con chrono (informe, top, patterns) o di explícitamente que son estimaciones o cálculos tuyos; si no son conteos (ids, puertos, tamaños), ignora este aviso y termina sin cambiar nada.",
+        "[chrono · verificador] Estas cifras de tu respuesta no salen de ninguna salida de chrono de esta sesión: {}. Si alguna es un conteo sin comprobar, compruébala con chrono (informe, top, patterns) y VUELVE A ESCRIBIR LA RESPUESTA COMPLETA corregida. Si todas están bien (sumas, códigos, ids), vuelve a escribir la respuesta completa tal cual, sin comentar este aviso.",
         list.join(", ")
     );
     log(&format!("stop: {} cifras sin respaldo ({})", bad.len(), list.join(",")));
