@@ -63,6 +63,9 @@ fn handle(mode: &str, ev: &Value) -> R<Option<String>> {
         loki_index(ev)?;
         return Ok(None);
     }
+    if mode == "stop" {
+        return verify_numbers(ev);
+    }
     let cwd = ev.get("cwd").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let Some(root) = find_root(&cwd) else { return Ok(None) };
     let cfg: Value = serde_json::from_str(&std::fs::read_to_string(root.join(".chrono/intermediario.json")).map_err(|e| e.to_string())?)
@@ -784,9 +787,216 @@ fn after_read(cfg: &Value, input: &Value, root: &Path) -> R<Option<String>> {
     )))
 }
 
+// ── Verificador de cifras (Stop) ──────────────────────────────────────────────
+
+/// Al terminar, los conteos de la respuesta final que no salen de ninguna salida
+/// de chrono de la sesión. Si hay, pide UNA vez que se comprueben o se marquen
+/// como estimación (`decision: block` con el motivo; la segunda vez,
+/// `stop_hook_active`, ya no bloquea). Solo actúa si la sesión usó chrono.
+fn verify_numbers(ev: &Value) -> R<Option<String>> {
+    if std::env::var("CHRONO_VERIFY").as_deref() == Ok("0") || ev.get("stop_hook_active").and_then(Value::as_bool) == Some(true) {
+        return Ok(None);
+    }
+    let Some(path) = ev.get("transcript_path").and_then(Value::as_str) else { return Ok(None) };
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let (allowed, answer) = transcript_numbers(&text);
+    if allowed.is_empty() || answer.is_empty() {
+        return Ok(None);
+    }
+    let bad = unverified(&answer, &allowed);
+    if bad.is_empty() {
+        return Ok(None);
+    }
+    let list: Vec<String> = bad.iter().take(12).map(|n| n.to_string()).collect();
+    let reason = format!(
+        "[chrono · verificador] Antes de terminar: estas cifras de tu respuesta no salen de ninguna salida de chrono de esta sesión: {}. Si son conteos, compruébalas con chrono (informe, top, patterns) o di explícitamente que son estimaciones o cálculos tuyos; si no son conteos (ids, puertos, tamaños), ignora este aviso y termina sin cambiar nada.",
+        list.join(", ")
+    );
+    log(&format!("stop: {} cifras sin respaldo ({})", bad.len(), list.join(",")));
+    Ok(Some(json!({"decision": "block", "reason": reason}).to_string()))
+}
+
+/// `(números con respaldo, texto de la respuesta final)` de un transcript. Con
+/// respaldo: las salidas de chrono (MCP, CLI, intermediario) y las salidas
+/// PEQUEÑAS de consultas MCP (agregados como `count_over_time`). De un
+/// transcript (JSONL de Claude Code o `--output-format stream-json`).
+fn transcript_numbers(text: &str) -> (std::collections::BTreeSet<i64>, String) {
+    let mut used_chrono = false;
+    let mut chrono_ids: std::collections::HashSet<String> = Default::default();
+    let mut aggregate_ids: std::collections::HashSet<String> = Default::default();
+    let mut allowed = std::collections::BTreeSet::new();
+    let mut answer = String::new();
+    for line in text.lines() {
+        let Ok(e) = serde_json::from_str::<Value>(line) else { continue };
+        let role = e.get("type").and_then(Value::as_str).unwrap_or("");
+        let content = e.pointer("/message/content").cloned().unwrap_or(Value::Null);
+        let Some(blocks) = content.as_array() else {
+            if role == "user" && content.is_string() {
+                answer.clear(); // una pregunta nueva: la respuesta que cuenta es la de después
+            }
+            continue;
+        };
+        for b in blocks {
+            match b.get("type").and_then(Value::as_str) {
+                Some("tool_use") => {
+                    let name = b.get("name").and_then(Value::as_str).unwrap_or("");
+                    let cmd = b.pointer("/input/command").and_then(Value::as_str).unwrap_or("");
+                    let id = b.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                    if name.contains("chrono") || (name == "Bash" && cmd.trim_start().starts_with("chrono")) {
+                        chrono_ids.insert(id);
+                    } else if name.starts_with("mcp__") && ["query", "stats", "count", "metric"].iter().any(|k| name.contains(k)) {
+                        // Consultas que pueden devolver agregados exactos (count_over_time, stats…).
+                        aggregate_ids.insert(id);
+                    }
+                }
+                Some("tool_result") => {
+                    let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
+                    let body = response_text(b.get("content"));
+                    // Una salida pequeña de una consulta es un agregado (exacto); una grande son
+                    // líneas crudas con miles de números que lo «validarían» todo.
+                    if chrono_ids.contains(id) || body.contains("[chrono") {
+                        used_chrono = true;
+                    }
+                    if chrono_ids.contains(id) || body.contains("[chrono") || (aggregate_ids.contains(id) && body.len() < 8_000) {
+                        allowed.extend(numbers(&body));
+                    }
+                }
+                Some("text") if role == "assistant" => {
+                    answer = b.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+                }
+                Some("text") if role == "user" => answer.clear(),
+                _ => {}
+            }
+        }
+    }
+    // Sin chrono en la sesión no hay nada contra lo que verificar.
+    if !used_chrono {
+        allowed.clear();
+    }
+    (allowed, answer)
+}
+
+/// Enteros sueltos de un texto (con separador de miles `.`/`,` o sin él).
+fn numbers(s: &str) -> Vec<i64> {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_digit() && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_')) {
+            let start = i;
+            let mut j = i;
+            while j < b.len() && (b[j].is_ascii_digit() || ((b[j] == b'.' || b[j] == b',') && j + 3 < b.len() && b[j + 1..j + 4].iter().all(u8::is_ascii_digit) && b.get(j + 4).map_or(true, |c| !c.is_ascii_digit()))) {
+                j += 1;
+            }
+            let tok: String = s[start..j].chars().filter(char::is_ascii_digit).collect();
+            if let Ok(n) = tok.parse::<i64>() {
+                out.push(n);
+            }
+            i = j.max(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Conteos de la respuesta sin respaldo. No cuentan como conteo: fechas, horas,
+/// versiones e IPs, porcentajes, puertos (`:5432`), `[pid]`, códigos HTTP junto a
+/// su texto (`500 Internal`), números < 10, y lo que es suma o resta de dos
+/// cifras de chrono (un total que el modelo sumó).
+fn unverified(answer: &str, allowed: &std::collections::BTreeSet<i64>) -> Vec<i64> {
+    let mut bad = std::collections::BTreeSet::new();
+    for line in answer.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let counts: Vec<i64> = words
+            .iter()
+            .enumerate()
+            .filter(|(k, w)| !is_not_a_count(w, words.get(k + 1).copied()) && !has_non_count_context(k.checked_sub(1).map(|i| words[i]), w, words.get(k + 1).copied()))
+            .flat_map(|(_, w)| numbers(w))
+            .collect();
+        // Sumandos válidos: cifras de chrono que aparecen en esta misma línea.
+        let here: Vec<i64> = counts.iter().copied().filter(|n| allowed.contains(n)).collect();
+        for n in counts {
+            // < 10: demasiado comunes; ≥ 10⁹: épocas e identificadores, no conteos.
+            if !(10..1_000_000_000).contains(&n) || allowed.contains(&n) {
+                continue;
+            }
+            let is_sum = here.iter().enumerate().any(|(i, a)| here.iter().skip(i + 1).any(|b| a + b == n));
+            if !is_sum {
+                bad.insert(n);
+            }
+        }
+    }
+    bad.into_iter().collect()
+}
+
+/// Unidades y prefijos que dicen que el número es una duración, un tamaño, una
+/// posición o un código, no un conteo de eventos.
+fn has_non_count_context(prev: Option<&str>, word: &str, next: Option<&str>) -> bool {
+    let clean = |s: &str| s.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+    const UNITS: &[&str] = &["s", "seg", "segs", "segundo", "segundos", "ms", "min", "mins", "minuto", "minutos", "h", "hora", "horas", "d", "día", "días", "kb", "mb", "gb", "kib", "mib", "b", "bytes", "tokens", "px", "chars", "caracteres"];
+    const PREFIX: &[&str] = &["línea", "linea", "line", "l", "puerto", "port", "pid", "http", "código", "codigo", "status", "versión", "version", "v", "id", "#", "gap_secs", "window_secs", "bucket_secs", "limit"];
+    // Unidad pegada: 52s, 120ms, 24h, 13KB.
+    let w = word.trim_matches(|c: char| !c.is_alphanumeric());
+    let tail: String = w.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ',').to_lowercase();
+    if !tail.is_empty() && w.starts_with(|c: char| c.is_ascii_digit()) && UNITS.contains(&tail.as_str()) {
+        return true;
+    }
+    if next.is_some_and(|n| UNITS.contains(&clean(n).as_str())) {
+        return true;
+    }
+    prev.is_some_and(|p| PREFIX.contains(&clean(p).as_str()))
+}
+
+fn is_not_a_count(word: &str, next: Option<&str>) -> bool {
+    let w = word.trim_matches(|c: char| "()[]{},;.:|*`\"'¿?¡!".contains(c));
+    if !w.bytes().any(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    let bytes = w.as_bytes();
+    let digit_at = |i: usize| bytes.get(i).is_some_and(u8::is_ascii_digit);
+    // [128]: pid de una línea de log.
+    if word.trim_matches(|c: char| ",;|*`".contains(c)).starts_with('[') && word.contains(']') {
+        return true;
+    }
+    // Horas (19:08, 19:08:17.966) y puertos (:5432, host:8080).
+    if let Some(p) = w.find(':') {
+        if (p > 0 && digit_at(p - 1) && digit_at(p + 1)) || (p + 1 < bytes.len() && digit_at(p + 1) && w[p + 1..].bytes().all(|c| c.is_ascii_digit())) {
+            return true;
+        }
+    }
+    // Fechas 2026-10-14…
+    if bytes.len() >= 10 && bytes[..4].iter().all(u8::is_ascii_digit) && bytes[4] == b'-' && digit_at(5) && bytes[7] == b'-' {
+        return true;
+    }
+    // Versiones e IPs (2.30.0, 172.18.0.4).
+    if w.matches('.').count() >= 2 && w.split('.').all(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit())) {
+        return true;
+    }
+    // Porcentajes.
+    if w.ends_with('%') || next.is_some_and(|n| n.starts_with('%')) {
+        return true;
+    }
+    // Códigos HTTP junto a su texto.
+    if let Ok(code) = w.parse::<i64>() {
+        if (100..600).contains(&code) && next.is_some_and(|n| ["OK", "Internal", "Not", "Bad", "Created", "Accepted", "Server", "Error", "Unauthorized", "Forbidden"].iter().any(|x| n.starts_with(x))) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verificador_marca_solo_conteos_sin_respaldo() {
+        let allowed: std::collections::BTreeSet<i64> = [51, 11, 25, 28, 12, 8, 9, 6573].into_iter().collect();
+        let ans = "FATAL 51 (postgres 51), ERROR 11; total graves 62 (51 + 11).\nA las 19:08:17 y el 2026-10-14T22:00:00Z; \
+                   versión 2.30.0, HTTP 500 Internal, puerto :5432, [128].\nInventado: 79 líneas y 42 veces; 37%.";
+        assert_eq!(unverified(ans, &allowed), vec![42, 79], "62 = 51 + 11 en la misma línea es una suma de cifras de chrono");
+    }
 
     #[test]
     fn casa_herramientas_con_comodines() {

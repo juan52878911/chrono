@@ -11,7 +11,7 @@
 //!   identifican la respuesta: mismo par, mismos bytes.
 
 use rusqlite::Connection;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use crate::since::since_to_epoch;
 
