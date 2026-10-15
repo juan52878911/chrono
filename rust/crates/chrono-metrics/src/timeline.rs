@@ -120,6 +120,9 @@ pub fn timeline(
 /// - `grep`: subcadena del título (sin distinguir mayúsculas en ASCII).
 /// - `entity`: una o varias entidades exactas separadas por coma (el servicio
 ///   en logs, el fichero en git).
+/// - `attr`: `clave:valor` sobre los atributos del evento (p. ej.
+///   `container:crm_aura_sandbox_postgres`); varios separados por coma se
+///   exigen todos. El valor admite `*` al final como prefijo.
 /// - `until_epoch`: fin de la ventana en ms (exclusivo; 0 = sin fin).
 #[derive(Debug, Clone, Default)]
 pub struct EventScope<'a> {
@@ -128,6 +131,7 @@ pub struct EventScope<'a> {
     pub level: Option<&'a str>,
     pub kind: Option<&'a str>,
     pub entity: Option<&'a str>,
+    pub attr: Option<&'a str>,
     pub until_epoch: i64,
 }
 
@@ -146,13 +150,13 @@ fn comma_list(raw: &str, upper: bool) -> String {
 impl EventScope<'_> {
     pub fn is_empty(&self) -> bool {
         self.until_epoch <= 0
-            && [self.source, self.grep, self.level, self.kind, self.entity].iter().all(|v| v.map_or(true, str::is_empty))
+            && [self.source, self.grep, self.level, self.kind, self.entity, self.attr].iter().all(|v| v.map_or(true, str::is_empty))
     }
 
     /// Solo filtra por fuente y/o texto: lo único que saben responder los
     /// rollups de `patterns`.
     pub fn only_source_grep(&self) -> bool {
-        self.until_epoch <= 0 && [self.level, self.kind, self.entity].iter().all(|v| v.map_or(true, str::is_empty))
+        self.until_epoch <= 0 && [self.level, self.kind, self.entity, self.attr].iter().all(|v| v.map_or(true, str::is_empty))
     }
 
     /// `(cláusulas SQL sobre el alias `e`, parámetros)`, numerados desde `first`.
@@ -191,6 +195,21 @@ impl EventScope<'_> {
                          WHERE tq.event_id = $t.id AND instr(?N, ',' || enq.key || ',') > 0)",
                 comma_list(en, false),
             );
+        }
+        for cond in self.attr.unwrap_or("").split(',').map(str::trim).filter(|c| !c.is_empty()) {
+            let (k, v) = cond.split_once(':').or_else(|| cond.split_once('=')).unwrap_or((cond, ""));
+            // La clave va en el path JSON: solo caracteres seguros (como en `top attr:`).
+            let k = k.trim();
+            if k.is_empty() || !k.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+                continue;
+            }
+            let path = format!("$.{k}");
+            match v.trim().strip_suffix('*') {
+                Some(prefix) => {
+                    push(&format!("json_extract($t.attrs, '{path}') LIKE ?N"), format!("{prefix}%"));
+                }
+                None => push(&format!("json_extract($t.attrs, '{path}') = ?N"), v.trim().to_string()),
+            }
         }
         if self.until_epoch > 0 {
             // Texto contra columna INTEGER: SQLite le aplica la afinidad numérica.

@@ -33,19 +33,31 @@ const SERVER_NAME: &str = "chrono";
 const INDEX_REL: &str = ".chrono/index.db";
 
 /// Estado del servidor a lo largo de la sesión: el índice (si lo hay).
-/// Se resuelve una vez al arrancar; `tools/call` lo consulta en cada llamada.
+/// Si al arrancar no existe, se vuelve a buscar en cada llamada hasta que
+/// aparezca: el intermediario o el hook de inicio pueden crearlo a mitad de
+/// sesión, y el servidor no debe quedarse ciego hasta reiniciarse.
 pub struct State {
-    store: Option<Store>,
+    store: std::cell::OnceCell<Store>,
+    db: Option<PathBuf>,
 }
 
 impl State {
     /// Para tests: arranca ya con (o sin) un `Store` construido a mano.
+    #[cfg(test)]
     fn with_store(store: Option<Store>) -> State {
-        State { store }
+        let cell = std::cell::OnceCell::new();
+        if let Some(s) = store {
+            let _ = cell.set(s);
+        }
+        State { store: cell, db: None }
     }
 
     pub fn store(&self) -> Option<&Store> {
-        self.store.as_ref()
+        if self.store.get().is_none() {
+            let s = open_or_discover(self.db.clone())?;
+            let _ = self.store.set(s);
+        }
+        self.store.get()
     }
 }
 
@@ -53,7 +65,7 @@ impl State {
 /// de E/S. Nunca falla por falta de índice: `db` ausente o inválido deja
 /// `State` sin store y el servidor sigue sirviendo `tools/list` etc.
 pub fn serve(db: Option<PathBuf>) -> Result<()> {
-    let state = State::with_store(open_or_discover(db));
+    let state = State { store: std::cell::OnceCell::new(), db };
 
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();

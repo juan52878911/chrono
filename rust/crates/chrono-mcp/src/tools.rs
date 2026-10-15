@@ -44,7 +44,8 @@ fn with_scope(own: Value) -> Value {
         "entity": str_prop("Entidad o entidades exactas separadas por coma: el servicio en logs (postgres,product_service), el fichero en git (opcional)"),
         "source": str_prop("Fuente: tipo (git, jsonl, cmd…) o id/alias (cmd:loki) (opcional)"),
         "kind": str_prop("Tipo de evento: commit, log, ci.run… o prefijo con * (ci.*) (opcional)"),
-        "grep": str_prop("Subcadena del mensaje/título (opcional)")
+        "grep": str_prop("Subcadena del mensaje/título (opcional)"),
+        "attr": str_prop("Atributo clave:valor, p. ej. container:crm_aura_sandbox_postgres (valor con * = prefijo; varios con coma) (opcional)")
     });
     if let (Some(p), Some(o)) = (props.as_object_mut(), own.as_object()) {
         for (k, v) in o {
@@ -313,6 +314,7 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
                 level: sc.level,
                 kind: sc.kind,
                 entity: sc.entity,
+                attr: sc.attr,
                 until_epoch: sc.until_epoch,
             };
             let rows = chrono_metrics::top_filtered(conn, dim, since_epoch, &filter, limit)?;
@@ -363,6 +365,7 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
                 level: sc.level,
                 grep: sc.grep,
                 entity: sc.entity,
+                attr: sc.attr,
             };
             events(conn, &filter, limit)?
         }
@@ -404,6 +407,7 @@ fn scope_from(args: &Value) -> chrono_metrics::EventScope<'_> {
         level: s("level"),
         kind: s("kind"),
         entity: s("entity"),
+        attr: s("attr"),
         until_epoch: s("until").map_or(0, since_to_epoch),
     }
 }

@@ -93,6 +93,7 @@ pub struct TopFilter<'a> {
     pub level: Option<&'a str>,
     pub kind: Option<&'a str>,
     pub entity: Option<&'a str>,
+    pub attr: Option<&'a str>,
     pub until_epoch: i64,
 }
 
@@ -103,6 +104,7 @@ pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilte
         level: f.level,
         kind: f.kind,
         entity: f.entity,
+        attr: f.attr,
         until_epoch: f.until_epoch,
     };
     let map = |r: &rusqlite::Row| Ok(TopValue { value: r.get(0)?, count: r.get(1)? });

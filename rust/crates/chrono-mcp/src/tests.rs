@@ -292,7 +292,7 @@ fn consultas_de_eventos_exponen_los_filtros_comunes() {
     let tools = resp["result"]["tools"].as_array().unwrap();
     for name in ["top", "patterns", "timeline", "events", "stats"] {
         let t = tools.iter().find(|t| t["name"] == name).unwrap();
-        for prop in ["since", "until", "level", "entity", "source", "kind", "grep"] {
+        for prop in ["since", "until", "level", "entity", "source", "kind", "grep", "attr"] {
             assert!(t["inputSchema"]["properties"].get(prop).is_some(), "{name} no expone '{prop}'");
         }
     }

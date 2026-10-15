@@ -1,5 +1,5 @@
 {
-  "description": "chrono: instala el binario la primera vez, crea/actualiza el índice del repo al empezar cada sesión y, si el índice tiene logs, avisa al modelo de que los use para contar y rankear en vez de las líneas truncadas de Loki/Grafana.",
+  "description": "chrono: instala el binario la primera vez, crea/actualiza el índice al empezar la sesión, avisa al modelo de los logs indexados y, si existe .chrono/intermediario.json, hace de intermediario (resume salidas grandes de MCP y lecturas de ficheros de datos grandes con cifras exactas).",
   "hooks": {
     "SessionStart": [
       {
@@ -31,6 +31,28 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/claude/log-hint.sh\" PostToolUse",
             "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/scripts/claude/intermediario.py\" post",
+            "timeout": 90
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/scripts/claude/intermediario.py\" read",
+            "timeout": 120
           }
         ]
       }

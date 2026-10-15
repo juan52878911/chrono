@@ -475,6 +475,7 @@ pub fn events(
         level: scope.level,
         grep: scope.grep,
         entity: scope.entity,
+        attr: scope.attr,
     };
     let rows = chrono_metrics::events(store.conn(), &filter, limit)?;
     let items: Vec<Json> = rows
@@ -617,6 +618,7 @@ pub fn top(
         level: scope.level,
         kind: scope.kind,
         entity: scope.entity,
+        attr: scope.attr,
         until_epoch: until_epoch(until)?,
     };
     let rows = chrono_metrics::top_filtered(store.conn(), dim, w.since_epoch, &filter, limit)?;

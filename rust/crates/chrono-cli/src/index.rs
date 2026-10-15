@@ -463,6 +463,7 @@ pub fn tail(
             level,
             grep,
             entity: None,
+            attr: None,
         };
         let rows = chrono_metrics::events(store.conn(), &filter, 1000)?;
         for r in &rows {

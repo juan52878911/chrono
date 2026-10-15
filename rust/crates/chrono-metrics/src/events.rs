@@ -35,6 +35,8 @@ pub struct EventFilter<'a> {
     pub grep: Option<&'a str>,
     /// Una o varias entidades exactas separadas por coma (servicio, fichero…).
     pub entity: Option<&'a str>,
+    /// `clave:valor` sobre los atributos (ver `EventScope::attr`).
+    pub attr: Option<&'a str>,
 }
 
 /// Eventos en orden CRONOLÓGICO (`at_epoch` ASC, luego `id` ASC), aplicando los
@@ -48,6 +50,7 @@ pub fn events(conn: &Connection, f: &EventFilter, limit: usize) -> Result<Vec<Ev
         level: f.level,
         kind: f.kind,
         entity: f.entity,
+        attr: f.attr,
         until_epoch: f.until_epoch,
     };
     let (filters, extra) = scope.sql(3);

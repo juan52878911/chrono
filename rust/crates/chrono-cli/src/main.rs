@@ -64,7 +64,7 @@ Symbols (git, needs 'init --symbols'):
 Log-native (multi-source). timeline, stats, top, patterns and events share the same filters:
   --since/--until (window; until exclusive), --level FATAL,ERROR (list, any case),
   --entity svc1,svc2 (the service in logs, the file in git), --source <kind|id|cmd:name>,
-  --kind <kind|prefix*>, --grep <text>.
+  --kind <kind|prefix*>, --grep <text>, --attr key:value (e.g. container:db-1).
   timeline             Event counts per time bucket (--bucket 1h, --by level|kind).
   stats <attr>         min/p50/p95/max/sum of a numeric attribute per group
                        (--by level|kind|entity|attr:<k>).
@@ -140,7 +140,7 @@ Símbolos (git, requiere 'init --symbols'):
 Log-native (multi-fuente). timeline, stats, top, patterns y events comparten filtros:
   --since/--until (ventana; until exclusivo), --level FATAL,ERROR (lista, sin mayúsculas),
   --entity svc1,svc2 (el servicio en logs, el fichero en git), --source <tipo|id|cmd:nombre>,
-  --kind <tipo|prefijo*>, --grep <texto>.
+  --kind <tipo|prefijo*>, --grep <texto>, --attr clave:valor (p.ej. container:db-1).
   timeline             Conteo de eventos por bucket temporal (--bucket 1h, --by level|kind).
   stats <attr>         min/p50/p95/max/suma de un atributo numérico por grupo
                        (--by level|kind|entity|attr:<c>).
@@ -189,6 +189,7 @@ struct Flags {
     by: Option<String>,
     limit: Option<String>,
     entity: Option<String>,
+    attr: Option<String>,
     symbols: bool,
     source: Option<String>,
     kind: Option<String>,
@@ -242,6 +243,10 @@ fn parse_args(args: &[String]) -> Flags {
             "--limit" if i + 1 < args.len() => {
                 i += 1;
                 f.limit = Some(args[i].clone());
+            }
+            "--attr" if i + 1 < args.len() => {
+                i += 1;
+                f.attr = Some(args[i].clone());
             }
             "--entity" if i + 1 < args.len() => {
                 i += 1;
@@ -497,6 +502,7 @@ fn main() {
         level: f.level.as_deref(),
         kind: f.kind.as_deref(),
         entity: f.entity.as_deref(),
+        attr: f.attr.as_deref(),
         until_epoch: 0,
     };
     let out = match cmd {

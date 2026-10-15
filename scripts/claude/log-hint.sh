@@ -32,6 +32,8 @@ while [ -n "$d" ]; do
   d=$(dirname "$d")
 done
 [ -n "$db" ] || exit 0
+# Con intermediario configurado, él ya sustituye la salida de esas tools.
+[ "$evento" = "PostToolUse" ] && [ -f "$(dirname "$db")/intermediario.json" ] && exit 0
 bin=$(CHRONO_AUTO_INSTALL=0 "$(cd "$(dirname "$0")" && pwd)/ensure-chrono.sh" 2>/dev/null) || exit 0
 
 # Fuentes con niveles que no son git: logs, CI, comandos.
