@@ -81,7 +81,7 @@ fn handle(mode: &str, ev: &Value) -> R<Option<String>> {
         "read" => read_deny(&cfg, input, &root)?.map(|reason| {
             json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}})
         }),
-        "after-read" => after_read(&cfg, input, &root)?
+        "after-read" => after_read(&cfg, input, &root, ev.get("session_id").and_then(Value::as_str).unwrap_or(""))?
             .map(|ctx| json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": ctx}})),
         "post" => {
             let mut out = None;
@@ -719,7 +719,8 @@ fn data_file(rc: &Value, input: &Value) -> Option<(PathBuf, u64)> {
     if input.get("offset").is_some_and(|v| !v.is_null()) || input.get("limit").is_some_and(|v| !v.is_null()) {
         return None; // lecturas parciales: nunca se interceptan
     }
-    let p = PathBuf::from(input.get("file_path")?.as_str()?);
+    // Read trae `file_path`; Grep, `path` (que puede ser un directorio: entonces no aplica).
+    let p = PathBuf::from(input.get("file_path").or_else(|| input.get("path"))?.as_str()?);
     let exts: Vec<String> = rc
         .get("extensions")
         .and_then(Value::as_array)
@@ -770,17 +771,29 @@ fn read_deny(cfg: &Value, input: &Value, root: &Path) -> R<Option<String>> {
     Ok(Some(parts.iter().filter(|p| !p.is_empty()).cloned().collect::<Vec<_>>().join("\n")))
 }
 
-fn after_read(cfg: &Value, input: &Value, root: &Path) -> R<Option<String>> {
+fn after_read(cfg: &Value, input: &Value, root: &Path, session: &str) -> R<Option<String>> {
     let Some(rc) = read_cfg(cfg) else { return Ok(None) };
-    let Some((path, size)) = data_file(rc, input) else { return Ok(None) };
-    if (size as i64) < num(rc, "min_bytes", 200_000) || (size as i64) >= num(rc, "deny_bytes", 5_000_000) {
+    let is_grep = input.get("pattern").is_some();
+    let Some((path, size)) = data_file(rc, if is_grep { &Value::Null } else { input }).or_else(|| is_grep.then(|| data_file(rc, &json!({"file_path": input.get("path")}))).flatten()) else {
+        return Ok(None);
+    };
+    // Tras un Grep el fichero puede ser de cualquier tamaño a partir de min_bytes
+    // (nadie lo leyó entero); tras un Read, solo los medianos (los grandes se interceptan antes).
+    if (size as i64) < num(rc, "min_bytes", 200_000) || (!is_grep && (size as i64) >= num(rc, "deny_bytes", 5_000_000)) {
         return Ok(None);
     }
+    // Un aviso por fichero y sesión: repetirlo en cada Grep solo gastaría contexto.
+    let mark = root.join(".chrono/mcp").join(format!("aviso-{:016x}", chrono_core_hash(&format!("{session}{}", path.display()))));
+    if mark.exists() {
+        return Ok(None);
+    }
+    let _ = std::fs::create_dir_all(root.join(".chrono/mcp"));
+    let _ = std::fs::write(&mark, b"");
     let (db, src) = index_file(root, &path);
     let levels = chrono_q(&db, &["top", "level", "--source", &src]);
     let lv: Vec<String> = levels.lines().skip(3).map(|l| l.replace('\t', "=")).collect();
     Ok(Some(format!(
-        "{} ({} KB) ya está indexado en chrono (source={src}; niveles: {}). Lo que acabas de leer es solo el principio: para contar, rankear, ver patrones o qué precede a algo, usa chrono (top, patterns, precede, timeline, events) en vez de recontar a mano; sus cifras son exactas sobre el fichero entero.",
+        "{} ({} KB) ya está indexado en chrono (source={src}; niveles: {}). Lo que acabas de leer/buscar es solo una parte: para contar, rankear, ver patrones o qué precede a algo, usa chrono (top, patterns, precede, timeline, events) en vez de recontar a mano; sus cifras son exactas sobre el fichero entero.",
         path.display(),
         size / 1024,
         lv.join(" ")
