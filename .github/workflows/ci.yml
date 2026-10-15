@@ -1,0 +1,21 @@
+# Tests de Rust y bench determinista contra el oro (sin LLM) en cada push y PR.
+name: CI
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tests
+        working-directory: rust
+        run: cargo test --locked -q
+      - name: Compilar
+        working-directory: rust
+        run: cargo build --locked -q -p chrono-cli
+      - name: Bench determinista contra el oro
+        run: python3 -I bench/agentes/regresion/oro_chrono.py "$PWD/rust/target/debug/chrono"

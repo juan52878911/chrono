@@ -1,0 +1,9 @@
+En este directorio está logs-sandbox.jsonl: los logs de un CRM (entorno sandbox) de la ventana 2026-10-13T22:00:00Z → 2026-10-14T22:00:00Z, una línea JSON por log con los campos ts (epoch en ms), msg, service, level y container.
+
+Responde con cifras exactas:
+1. Número de líneas por nivel FATAL, ERROR, CRITICAL y WARNING, y en qué servicios caen.
+2. Los 3 mensajes de error (FATAL/ERROR/CRITICAL) más frecuentes, con su número.
+3. Causa raíz de las excepciones de product_service: qué endpoint falló y qué excepción exacta.
+4. Cuántas veces se reinició postgres, a qué horas UTC, y qué error aparece justo antes de cada reinicio.
+
+Si no puedes verificar una cifra, dilo en vez de estimarla.

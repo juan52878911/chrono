@@ -1,0 +1,79 @@
+{
+ "lineas": 6587,
+ "p1_niveles": {
+  "FATAL": {
+   "total": 51,
+   "servicios": {
+    "postgres": 51
+   }
+  },
+  "ERROR": {
+   "total": 11,
+   "servicios": {
+    "postgres": 9,
+    "product_service": 2
+   }
+  },
+  "CRITICAL": {
+   "total": 1,
+   "servicios": {
+    "notification_system": 1
+   }
+  },
+  "WARNING": {
+   "total": 25,
+   "servicios": {
+    "notification_system": 9,
+    "api_gateway": 7,
+    "postgres": 6,
+    "prospect_service": 3
+   }
+  }
+ },
+ "p1_sin_nivel_texto": {
+  "FATAL": 28,
+  "ERROR": 4,
+  "WARNING": 3
+ },
+ "p2_top3": [
+  {
+   "clave": "terminating connection due to administrator command",
+   "veces": 28
+  },
+  {
+   "clave": "TimescaleDB Background Worker Scheduler",
+   "veces": 12
+  },
+  {
+   "clave": "TimescaleDB Background Worker Launcher",
+   "veces": 8
+  }
+ ],
+ "p3": {
+  "endpoint": "DELETE /api/collections/1",
+  "excepcion": "AttributeError: type object 'ImportJob' has no attribute 'import_source_id'",
+  "veces": 2,
+  "comprobado": true
+ },
+ "p4": {
+  "reinicios": 6,
+  "horas_utc": [
+   "19:08",
+   "19:15",
+   "19:28",
+   "20:19",
+   "20:35",
+   "20:54"
+  ],
+  "preflight_horas_utc": [
+   "19:07",
+   "19:14",
+   "19:27",
+   "20:18",
+   "20:34",
+   "20:53"
+  ],
+  "precursor": "catalog version mismatch, expected \"2.30.0\" seen \"2.29.0\"",
+  "precede_a_todos": true
+ }
+}

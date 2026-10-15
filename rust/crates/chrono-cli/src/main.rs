@@ -614,7 +614,7 @@ fn main() {
                     a.insert(k.into(), serde_json::Value::String(v.clone()));
                 }
             };
-            a.insert("tipo".into(), f.pos.get(1).cloned().unwrap_or_else(|| "logs".into()).into());
+            put(&mut a, "tipo", &f.pos.get(1).cloned());
             put(&mut a, "target", &f.pos.get(2).cloned());
             put(&mut a, "since", &f.since);
             put(&mut a, "until", &f.until);
