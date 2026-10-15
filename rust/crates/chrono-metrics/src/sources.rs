@@ -19,6 +19,8 @@ pub struct SourceSummary {
     pub first: Option<String>,
     pub last: Option<String>,
     pub levels: Vec<(String, i64)>,
+    /// Eventos SIN nivel de la fuente cuyo texto lo dice (`infer_level`), por nivel.
+    pub inferred_levels: Vec<(String, i64)>,
     pub kinds: Vec<(String, i64)>,
     pub top_entities: Vec<(String, i64)>,
 }
@@ -51,6 +53,12 @@ pub fn sources(conn: &Connection) -> Result<Vec<SourceSummary>> {
             levels: counts(
                 "SELECT level, COUNT(*) c FROM events WHERE source_ref = ?1 AND level != ''
                  GROUP BY level ORDER BY c DESC, level LIMIT 10",
+                sref,
+            )?,
+            inferred_levels: counts(
+                "SELECT json_extract(attrs, '$.level_inferred') l, COUNT(*) c FROM events
+                 WHERE source_ref = ?1 AND level = '' AND json_extract(attrs, '$.level_inferred') IS NOT NULL
+                 GROUP BY l ORDER BY c DESC, l LIMIT 10",
                 sref,
             )?,
             kinds: counts("SELECT kind, COUNT(*) c FROM events WHERE source_ref = ?1 GROUP BY kind ORDER BY c DESC, kind LIMIT 5", sref)?,

@@ -45,6 +45,7 @@ fn with_scope(own: Value) -> Value {
         "source": str_prop("Fuente: tipo (git, jsonl, cmd…) o id/alias (cmd:loki) (opcional)"),
         "kind": str_prop("Tipo de evento: commit, log, ci.run… o prefijo con * (ci.*) (opcional)"),
         "grep": str_prop("Subcadena del mensaje/título (opcional)"),
+        "infer_level": json!({"type": "boolean", "description": "Contar también las líneas SIN nivel cuyo texto lo dice (FATAL:, ERROR:…). sources dice cuántas hay (opcional, por defecto false)"}),
         "attr": str_prop("Atributo clave:valor, p. ej. container:crm_aura_sandbox_postgres (valor con * = prefijo; varios con coma) (opcional)")
     });
     if let (Some(p), Some(o)) = (props.as_object_mut(), own.as_object()) {
@@ -221,6 +222,18 @@ pub fn tool_defs() -> Vec<Value> {
             })),
             &["attr"],
         ),
+        tool(
+            "precede",
+            "Episodios de lo que casan los filtros (el ancla: p. ej. grep=\"received fast shutdown request\" attr=container:<db>, o un mensaje de error, o level=FATAL) y QUÉ LOS PRECEDE: errores/avisos en la ventana previa a cada episodio (con el nivel deducido del texto aunque la fuente no lo traiga) y los precursores comunes («antes de 6/6»). Para «¿cuántas veces pasó X, cuándo, y qué lo provoca?» en una sola llamada.",
+            with_scope(json!({
+                "gap_secs": json!({"type": "integer", "description": "Hueco máximo entre anclas del mismo episodio (por defecto 120)"}),
+                "window_secs": json!({"type": "integer", "description": "Ventana previa a cada episodio que se examina (por defecto 120)"}),
+                "before_levels": str_prop("Niveles de los precursores (por defecto FATAL,CRITICAL,ERROR,WARNING)"),
+                "before_entity": str_prop("Solo precursores de esta(s) entidad(es) (opcional)"),
+                "limit": json!({"type": "integer", "description": "Máximo de episodios (por defecto 50)"})
+            })),
+            &[],
+        ),
     ]
 }
 
@@ -315,6 +328,7 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
                 kind: sc.kind,
                 entity: sc.entity,
                 attr: sc.attr,
+                infer_level: sc.infer_level,
                 until_epoch: sc.until_epoch,
             };
             let rows = chrono_metrics::top_filtered(conn, dim, since_epoch, &filter, limit)?;
@@ -322,6 +336,40 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
             json!({"dim": dim, "top": items})
         }
         "sources" => sources(conn)?,
+        "precede" => {
+            let anchor = scope_from(args);
+            if anchor.is_empty() {
+                return Err("precede necesita un ancla: grep, entity, attr o level (lo que marca cada episodio)".into());
+            }
+            let o = chrono_metrics::PrecedeOpts {
+                since_epoch,
+                anchor,
+                gap_ms: arg_i64(args, "gap_secs", 120).max(1) * 1000,
+                window_ms: arg_i64(args, "window_secs", 120).max(1) * 1000,
+                levels: args.get("before_levels").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or("FATAL,CRITICAL,ERROR,WARNING"),
+                entity: args.get("before_entity").and_then(Value::as_str).filter(|s| !s.is_empty()),
+                max_episodes: arg_i64(args, "limit", 50).max(1) as usize,
+                ..Default::default()
+            };
+            let (eps, common) = chrono_metrics::precede(conn, &o)?;
+            let n = eps.len();
+            let episodes: Vec<Value> = eps
+                .iter()
+                .map(|e| {
+                    let pre: Vec<Value> = e
+                        .preceding
+                        .iter()
+                        .map(|p| json!({"level": p.level, "count": p.count, "secs_before": p.last_before_secs, "entity": p.entity, "template": p.template, "example_id": p.example_id}))
+                        .collect();
+                    json!({"start": e.start_at, "anchors": e.anchors, "origins": e.origins, "first_id": e.first_id, "preceding": pre})
+                })
+                .collect();
+            let commons: Vec<Value> = common
+                .iter()
+                .map(|c| json!({"before_episodes": format!("{}/{}", c.episodes, n), "level": c.level, "template": c.template}))
+                .collect();
+            json!({"episodes_total": n, "common_precursors": commons, "episodes": episodes})
+        }
         "stats" => {
             let attr = arg_str(args, "attr")?;
             let by = args.get("by").and_then(Value::as_str).filter(|s| !s.is_empty());
@@ -366,6 +414,7 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
                 grep: sc.grep,
                 entity: sc.entity,
                 attr: sc.attr,
+                infer_level: sc.infer_level,
             };
             events(conn, &filter, limit)?
         }
@@ -408,6 +457,7 @@ fn scope_from(args: &Value) -> chrono_metrics::EventScope<'_> {
         kind: s("kind"),
         entity: s("entity"),
         attr: s("attr"),
+        infer_level: args.get("infer_level").and_then(Value::as_bool).unwrap_or(false),
         until_epoch: s("until").map_or(0, since_to_epoch),
     }
 }
@@ -421,7 +471,7 @@ fn sources(conn: &Connection) -> Result<Value> {
             json!({
                 "source": s.source, "alias": s.alias, "kind": s.kind, "events": s.events,
                 "first": s.first, "last": s.last,
-                "levels": vc(&s.levels), "kinds": vc(&s.kinds), "top_entities": vc(&s.top_entities),
+                "levels": vc(&s.levels), "inferred_levels_unlabeled": vc(&s.inferred_levels), "kinds": vc(&s.kinds), "top_entities": vc(&s.top_entities),
             })
         })
         .collect();

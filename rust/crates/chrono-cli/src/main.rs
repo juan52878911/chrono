@@ -64,7 +64,7 @@ Symbols (git, needs 'init --symbols'):
 Log-native (multi-source). timeline, stats, top, patterns and events share the same filters:
   --since/--until (window; until exclusive), --level FATAL,ERROR (list, any case),
   --entity svc1,svc2 (the service in logs, the file in git), --source <kind|id|cmd:name>,
-  --kind <kind|prefix*>, --grep <text>, --attr key:value (e.g. container:db-1).
+  --kind <kind|prefix*>, --grep <text>, --attr key:value (e.g. container:db-1), --infer-level (also lines with no level whose text says it).
   timeline             Event counts per time bucket (--bucket 1h, --by level|kind).
   stats <attr>         min/p50/p95/max/sum of a numeric attribute per group
                        (--by level|kind|entity|attr:<k>).
@@ -74,6 +74,10 @@ Log-native (multi-source). timeline, stats, top, patterns and events share the s
                        e.g. patterns --level FATAL,ERROR,CRITICAL --limit 3.
   trace <id>           Follow an event's links chain (reverts, same ticket/PR, vcs.commit ↔ commit).
   events               Unified chronological stream across sources.
+  precede              Episodes of what the filters match (e.g. --grep 'fast shutdown') and what
+                       precedes each one (errors/warnings in --window 2m, levels inferred from the
+                       text), plus the precursors common to several episodes. --gap 2m splits
+                       episodes; --before-levels FATAL,ERROR narrows the precursors.
   correlate <id>       Events from OTHER sources within ±Δt of an event (--delta 1h;
                        --kind commit,ci.* keeps only those kinds).
 
@@ -140,7 +144,7 @@ Símbolos (git, requiere 'init --symbols'):
 Log-native (multi-fuente). timeline, stats, top, patterns y events comparten filtros:
   --since/--until (ventana; until exclusivo), --level FATAL,ERROR (lista, sin mayúsculas),
   --entity svc1,svc2 (el servicio en logs, el fichero en git), --source <tipo|id|cmd:nombre>,
-  --kind <tipo|prefijo*>, --grep <texto>, --attr clave:valor (p.ej. container:db-1).
+  --kind <tipo|prefijo*>, --grep <texto>, --attr clave:valor (p.ej. container:db-1), --infer-level (también líneas sin nivel cuyo texto lo dice).
   timeline             Conteo de eventos por bucket temporal (--bucket 1h, --by level|kind).
   stats <attr>         min/p50/p95/max/suma de un atributo numérico por grupo
                        (--by level|kind|entity|attr:<c>).
@@ -150,6 +154,10 @@ Log-native (multi-fuente). timeline, stats, top, patterns y events comparten fil
                        p.ej. patterns --level FATAL,ERROR,CRITICAL --limit 3.
   trace <id>           Sigue la cadena de links de un evento (reverts, mismo ticket/PR, vcs.commit ↔ commit).
   events               Stream cronológico unificado de todas las fuentes.
+  precede              Episodios de lo que casan los filtros (p.ej. --grep 'fast shutdown') y qué
+                       precede a cada uno (errores/avisos en --window 2m, con el nivel deducido del
+                       texto), más los precursores comunes a varios episodios. --gap 2m separa
+                       episodios; --before-levels FATAL,ERROR acota los precursores.
   correlate <id>       Eventos de OTRAS fuentes en ±Δt de un evento (--delta 1h;
                        --kind commit,ci.* se queda solo con esos tipos).
 
@@ -186,10 +194,14 @@ struct Flags {
     until: Option<String>,
     bucket: Option<String>,
     delta: Option<String>,
+    gap: Option<String>,
+    window: Option<String>,
+    before_levels: Option<String>,
     by: Option<String>,
     limit: Option<String>,
     entity: Option<String>,
     attr: Option<String>,
+    infer_level: bool,
     symbols: bool,
     source: Option<String>,
     kind: Option<String>,
@@ -232,6 +244,18 @@ fn parse_args(args: &[String]) -> Flags {
                 i += 1;
                 f.bucket = Some(args[i].clone());
             }
+            "--gap" if i + 1 < args.len() => {
+                i += 1;
+                f.gap = Some(args[i].clone());
+            }
+            "--window" if i + 1 < args.len() => {
+                i += 1;
+                f.window = Some(args[i].clone());
+            }
+            "--before-levels" if i + 1 < args.len() => {
+                i += 1;
+                f.before_levels = Some(args[i].clone());
+            }
             "--delta" if i + 1 < args.len() => {
                 i += 1;
                 f.delta = Some(args[i].clone());
@@ -243,6 +267,9 @@ fn parse_args(args: &[String]) -> Flags {
             "--limit" if i + 1 < args.len() => {
                 i += 1;
                 f.limit = Some(args[i].clone());
+            }
+            "--infer-level" => {
+                f.infer_level = true;
             }
             "--attr" if i + 1 < args.len() => {
                 i += 1;
@@ -503,6 +530,7 @@ fn main() {
         kind: f.kind.as_deref(),
         entity: f.entity.as_deref(),
         attr: f.attr.as_deref(),
+        infer_level: f.infer_level,
         until_epoch: 0,
     };
     let out = match cmd {
@@ -564,6 +592,16 @@ fn main() {
             let target = require_pos(&f, "explain needs a <file>[:FROM-TO]", "explain necesita un <fichero>[:DESDE-HASTA]");
             query::explain(&store, &target, f.limit.as_deref())
         }
+        "precede" => query::precede(
+            &store,
+            &window,
+            f.until.as_deref(),
+            &scope,
+            f.gap.as_deref(),
+            f.window.as_deref(),
+            f.before_levels.as_deref(),
+            f.limit.as_deref(),
+        ),
         "correlate" => {
             let id = require_pos(&f, "correlate needs an <id>", "correlate necesita un <id>");
             query::correlate(&store, &id, f.delta.as_deref(), f.kind.as_deref(), f.limit.as_deref())

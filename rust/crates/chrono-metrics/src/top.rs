@@ -94,6 +94,8 @@ pub struct TopFilter<'a> {
     pub kind: Option<&'a str>,
     pub entity: Option<&'a str>,
     pub attr: Option<&'a str>,
+    /// `level` casa también lo deducido del texto, y `dim=level` cuenta por el nivel efectivo.
+    pub infer_level: bool,
     pub until_epoch: i64,
 }
 
@@ -105,6 +107,7 @@ pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilte
         kind: f.kind,
         entity: f.entity,
         attr: f.attr,
+        infer_level: f.infer_level,
         until_epoch: f.until_epoch,
     };
     let map = |r: &rusqlite::Row| Ok(TopValue { value: r.get(0)?, count: r.get(1)? });
@@ -136,8 +139,9 @@ pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilte
         return collect(rows);
     }
 
+    let level_value = crate::timeline::level_expr("events", f.infer_level);
     let (from_clause, value_expr) = match dim {
-        "level" => ("events", "events.level"),
+        "level" => ("events", level_value.as_str()),
         "kind" => ("events", "events.kind"),
         "actor" => (
             "events JOIN actors ON actors.id = events.actor_id",
@@ -153,7 +157,7 @@ pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilte
 
     // Sin filtros, la consulta de siempre: con condiciones presentes, aunque
     // valgan NULL, SQLite deja de usar los índices covering y recorre `events`.
-    if scope.is_empty() {
+    if scope.is_empty() && !f.infer_level {
         let mut stmt = conn.prepare(&top_sql(from_clause, value_expr))?;
         let rows = stmt.query_map(params![since_epoch, limit], map)?;
         return collect(rows);

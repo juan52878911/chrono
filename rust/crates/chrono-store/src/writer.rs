@@ -70,7 +70,19 @@ impl<'a> Writer<'a> {
         let actor_id = self.actor_id(&ev.actor)?;
         let source_ref = self.source_ref(&ev.source_id)?;
 
-        let attrs_json = attrs_to_json(&ev.attrs);
+        // Sin nivel de la fuente: el que diga el texto, APARTE (`level` sigue
+        // siendo el de la fuente para que las cifras coincidan con ella).
+        let attrs_json = match (ev.level.is_empty() && ev.kind != "commit")
+            .then(|| chrono_core::infer_level(&ev.title))
+            .flatten()
+        {
+            Some(lv) if !ev.attrs.contains_key("level_inferred") => {
+                let mut a = ev.attrs.clone();
+                a.insert("level_inferred".to_string(), lv.to_string());
+                attrs_to_json(&a)
+            }
+            _ => attrs_to_json(&ev.attrs),
+        };
         let touches_n = ev.touches.len() as i64;
         let is_bulk = i64::from(ev.is_bulk);
         // u64 -> i64 reinterpretando bits (misma convención que el Go: int64(simhash)).

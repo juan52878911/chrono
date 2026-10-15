@@ -37,6 +37,8 @@ pub struct EventFilter<'a> {
     pub entity: Option<&'a str>,
     /// `clave:valor` sobre los atributos (ver `EventScope::attr`).
     pub attr: Option<&'a str>,
+    /// `level` casa también el nivel deducido del texto.
+    pub infer_level: bool,
 }
 
 /// Eventos en orden CRONOLÓGICO (`at_epoch` ASC, luego `id` ASC), aplicando los
@@ -51,6 +53,7 @@ pub fn events(conn: &Connection, f: &EventFilter, limit: usize) -> Result<Vec<Ev
         kind: f.kind,
         entity: f.entity,
         attr: f.attr,
+        infer_level: f.infer_level,
         until_epoch: f.until_epoch,
     };
     let (filters, extra) = scope.sql(3);

@@ -172,13 +172,13 @@ fn tools_list_incluye_los_dieciocho_tools() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools debe ser array");
-    assert_eq!(tools.len(), 21);
+    assert_eq!(tools.len(), 22);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     for expected in [
         "hotspots", "coupling", "owners", "churn", "search", "similar", "bugs", "tickets",
         "phases", "branches", "explain", "prs", "timeline", "top", "correlate", "patterns", "events", "trace",
-        "session_patterns", "sources", "stats",
+        "session_patterns", "sources", "stats", "precede",
     ] {
         assert!(
             names.contains(&expected),
@@ -232,7 +232,7 @@ fn tools_call_sin_indice_pide_chrono_init() {
 
     // tools/list debe seguir funcionando igual sin índice.
     let list = call(&state, 6, "tools/list", json!({}));
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 21);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 22);
 }
 
 #[test]
@@ -290,7 +290,7 @@ fn consultas_de_eventos_exponen_los_filtros_comunes() {
     let (_db, state) = state_with_fixture();
     let resp = call(&state, 30, "tools/list", json!({}));
     let tools = resp["result"]["tools"].as_array().unwrap();
-    for name in ["top", "patterns", "timeline", "events", "stats"] {
+    for name in ["top", "patterns", "timeline", "events", "stats", "precede"] {
         let t = tools.iter().find(|t| t["name"] == name).unwrap();
         for prop in ["since", "until", "level", "entity", "source", "kind", "grep", "attr"] {
             assert!(t["inputSchema"]["properties"].get(prop).is_some(), "{name} no expone '{prop}'");

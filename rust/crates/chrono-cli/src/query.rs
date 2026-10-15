@@ -320,6 +320,7 @@ pub fn sources(store: &Store) -> Result<Json> {
                 .set("first", s.first.as_deref().map_or(Json::Null, Json::str))
                 .set("last", s.last.as_deref().map_or(Json::Null, Json::str))
                 .set("levels", Json::str(&pairs(&s.levels)))
+                .set("unlabeled_inferred", Json::str(&pairs(&s.inferred_levels)))
                 .set("top_entities", Json::str(&pairs(&s.top_entities)))
         })
         .collect();
@@ -476,6 +477,7 @@ pub fn events(
         grep: scope.grep,
         entity: scope.entity,
         attr: scope.attr,
+        infer_level: scope.infer_level,
     };
     let rows = chrono_metrics::events(store.conn(), &filter, limit)?;
     let items: Vec<Json> = rows
@@ -619,6 +621,7 @@ pub fn top(
         kind: scope.kind,
         entity: scope.entity,
         attr: scope.attr,
+        infer_level: scope.infer_level,
         until_epoch: until_epoch(until)?,
     };
     let rows = chrono_metrics::top_filtered(store.conn(), dim, w.since_epoch, &filter, limit)?;
@@ -628,6 +631,87 @@ pub fn top(
         .collect();
     let n = items.len();
     envelope(store, "top", w, limit, n, Json::obj().set("dim", Json::str(dim)).set("top", Json::Arr(items)))
+}
+
+/// `precede`: episodios de lo que casan los filtros y qué los precede.
+#[allow(clippy::too_many_arguments)]
+pub fn precede(
+    store: &Store,
+    w: &Window,
+    until: Option<&str>,
+    scope: &chrono_metrics::EventScope,
+    gap: Option<&str>,
+    window: Option<&str>,
+    before_levels: Option<&str>,
+    limit: Option<&str>,
+) -> Result<Json> {
+    let dur = |v: Option<&str>, flag: &str| -> Result<i64> {
+        match v {
+            None | Some("") => Ok(120_000),
+            Some(s) => Ok(parse_duration(s).ok_or_else(|| {
+                t(format!("invalid --{flag}: {s:?} (e.g. 2m, 90s)"), format!("--{flag} no válido: {s:?} (usa p.ej. 2m, 90s)"))
+            })?),
+        }
+    };
+    if scope.is_empty() {
+        return Err(t(
+            "precede needs an anchor: --grep, --entity, --attr or --level (what marks each episode)",
+            "precede necesita un ancla: --grep, --entity, --attr o --level (lo que marca cada episodio)",
+        )
+        .into());
+    }
+    let max = parse_limit(limit, 50)?;
+    let anchor = chrono_metrics::EventScope { until_epoch: until_epoch(until)?, ..scope.clone() };
+    let o = chrono_metrics::PrecedeOpts {
+        since_epoch: w.since_epoch,
+        anchor,
+        gap_ms: dur(gap, "gap")?,
+        window_ms: dur(window, "window")?,
+        levels: before_levels.unwrap_or("FATAL,CRITICAL,ERROR,WARNING"),
+        max_episodes: max,
+        ..Default::default()
+    };
+    let (eps, common) = chrono_metrics::precede(store.conn(), &o)?;
+    let episodes: Vec<Json> = eps
+        .iter()
+        .map(|e| {
+            let pre: Vec<Json> = e
+                .preceding
+                .iter()
+                .map(|p| {
+                    Json::obj()
+                        .set("level", Json::str(&p.level))
+                        .set("count", Json::Int(p.count))
+                        .set("secs_before", Json::Int(p.last_before_secs))
+                        .set("entity", Json::str(&p.entity))
+                        .set("template", Json::str(&p.template))
+                })
+                .collect();
+            Json::obj()
+                .set("start", Json::str(&epoch_to_iso8601(e.start_epoch)))
+                .set("anchors", Json::Int(e.anchors))
+                .set("origins", Json::str(&e.origins.join(",")))
+                .set("first_id", Json::str(&e.first_id))
+                .set("preceding", Json::Arr(pre))
+        })
+        .collect();
+    let commons: Vec<Json> = common
+        .iter()
+        .map(|c| {
+            Json::obj()
+                .set("before_episodes", Json::str(&format!("{}/{}", c.episodes, eps.len())))
+                .set("level", Json::str(&c.level))
+                .set("template", Json::str(&c.template))
+        })
+        .collect();
+    let n = episodes.len();
+    let result = Json::obj()
+        .set("episodes_total", Json::Int(n as i64))
+        .set("gap_ms", Json::Int(o.gap_ms))
+        .set("window_ms", Json::Int(o.window_ms))
+        .set("common_precursors", Json::Arr(commons))
+        .set("episodes", Json::Arr(episodes));
+    envelope(store, "precede", w, max, n, result)
 }
 
 /// Serializa un `EventRef` de `correlate` a JSON.

@@ -123,6 +123,8 @@ pub fn timeline(
 /// - `attr`: `clave:valor` sobre los atributos del evento (p. ej.
 ///   `container:crm_aura_sandbox_postgres`); varios separados por coma se
 ///   exigen todos. El valor admite `*` al final como prefijo.
+/// - `infer_level`: el filtro `level` casa también las líneas SIN nivel de la
+///   fuente cuyo texto lo dice (`attrs.level_inferred`, ver `chrono_core::infer_level`).
 /// - `until_epoch`: fin de la ventana en ms (exclusivo; 0 = sin fin).
 #[derive(Debug, Clone, Default)]
 pub struct EventScope<'a> {
@@ -132,7 +134,18 @@ pub struct EventScope<'a> {
     pub kind: Option<&'a str>,
     pub entity: Option<&'a str>,
     pub attr: Option<&'a str>,
+    pub infer_level: bool,
     pub until_epoch: i64,
+}
+
+/// Expresión SQL del nivel efectivo de un evento: el de la fuente, o el
+/// deducido del texto si la fuente no lo trae y se pidió `infer_level`.
+pub(crate) fn level_expr(t: &str, infer: bool) -> String {
+    if infer {
+        format!("COALESCE(NULLIF({t}.level, ''), json_extract({t}.attrs, '$.level_inferred'), '')")
+    } else {
+        format!("{t}.level")
+    }
 }
 
 /// `,A,B,` en mayúsculas y sin espacios: el parámetro de una lista separada por
@@ -181,7 +194,8 @@ impl EventScope<'_> {
             push("$t.title LIKE ?N", format!("%{g}%"));
         }
         if let Some(l) = self.level.filter(|l| !l.trim().is_empty()) {
-            push("instr(?N, ',' || UPPER($t.level) || ',') > 0", comma_list(l, true));
+            let expr = level_expr("$t", self.infer_level);
+            push(&format!("instr(?N, ',' || UPPER({expr}) || ',') > 0"), comma_list(l, true));
         }
         if let Some(k) = self.kind.filter(|k| !k.is_empty()) {
             match k.strip_suffix('*') {
