@@ -714,8 +714,11 @@ pub fn precede(
         })
         .collect();
     let n = episodes.len();
-    let result = Json::obj()
-        .set("episodes_total", Json::Int(total as i64))
+    let mut result = Json::obj().set("episodes_total", Json::Int(total as i64));
+    if o.join.is_some() {
+        result = result.set("anchors_without_key", Json::Int(r.anchors_without_key as i64));
+    }
+    let result = result
         .set("gap_ms", Json::Int(o.gap_ms))
         .set("window_ms", Json::Int(o.window_ms))
         .set("common_precursors", Json::Arr(commons))

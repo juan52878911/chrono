@@ -66,6 +66,8 @@ pub struct Preceded {
     pub episodes: Vec<Episode>,
     pub episodes_total: usize,
     pub common: Vec<Common>,
+    /// Con `join`: anclas sin ningún valor de la clave (no forman episodio).
+    pub anchors_without_key: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -145,10 +147,14 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
             return Err(format!("precede: clave de relación no válida: {k:?}").into());
         }
     }
-    // 1. Anclas en orden temporal (con su valor de la clave, si se pide).
+    // 1. Anclas en orden temporal (con sus valores de la clave, si se pide,
+    // separados por \x1f: un ancla con varios cuenta en cada uno).
     let (filters, extra) = o.anchor.sql(2);
     let key_col = match join {
-        Some(k) => format!("(SELECT MIN(kv.value) FROM ({}) kv WHERE kv.rid = e.rid)", crate::relate::key_values_sql(k)),
+        Some(k) => format!(
+            "(SELECT group_concat(value, char(31)) FROM (SELECT DISTINCT kv.value AS value FROM ({}) kv WHERE kv.rid = e.rid ORDER BY 1))",
+            crate::relate::key_values_sql(k)
+        ),
         None => "''".to_string(),
     };
     let sql = format!(
@@ -167,15 +173,28 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
         .collect::<std::result::Result<_, _>>()?;
 
     // 2. Episodios por hueco (por valor de la clave o por origen si se pide;
-    // si no, todos juntos). Con clave, un ancla sin ella no forma episodio.
+    // si no, todos juntos). Con clave, un ancla sin ella no forma episodio (se
+    // cuenta en `anchors_without_key`) y una con varios valores entra en el
+    // episodio de cada uno.
     let mut episodes: Vec<Episode> = Vec::new();
     let mut keys: Vec<String> = Vec::new();
     let mut open: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut anchors_without_key = 0;
+    let anchors: Vec<(String, String, i64, String, String)> = anchors
+        .into_iter()
+        .flat_map(|(id, at, epoch, entity, key)| {
+            let values: Vec<String> = match key {
+                Some(k) if join.is_some() => k.split('\x1f').filter(|v| !v.is_empty()).map(str::to_string).collect(),
+                _ if join.is_some() => Vec::new(),
+                _ => vec![String::new()],
+            };
+            if values.is_empty() {
+                anchors_without_key += 1;
+            }
+            values.into_iter().map(move |v| (id.clone(), at.clone(), epoch, entity.clone(), v))
+        })
+        .collect();
     for (id, at, epoch, entity, key) in anchors {
-        let key = key.unwrap_or_default();
-        if join.is_some() && key.is_empty() {
-            continue;
-        }
         let group = if join.is_some() { &key } else { &entity };
         let slot = if join.is_some() || o.by_origin { open.get(group).copied() } else { episodes.len().checked_sub(1) };
         let last = slot.and_then(|i| episodes.get_mut(i));
@@ -304,7 +323,7 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
     });
     commons.truncate(10);
     let episodes: Vec<Episode> = episodes.into_iter().take(o.max_episodes).map(|(e, _)| e).collect();
-    Ok(Preceded { episodes, episodes_total, common: commons })
+    Ok(Preceded { episodes, episodes_total, common: commons, anchors_without_key })
 }
 
 /// Frecuencia base de cada plantilla: la fracción de las ventanas de
@@ -518,6 +537,33 @@ mod tests {
         let pre: Vec<usize> = r.episodes.iter().map(|e| e.preceding.len()).collect();
         assert_eq!(pre, [1, 0], "el aviso de A no precede a B: {:?}", r.episodes);
         assert!(precede(store.conn(), &PrecedeOpts { join: Some("a b"), ..base }).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn join_un_ancla_con_varios_valores_cuenta_en_cada_uno_y_las_sin_clave_se_cuentan() {
+        let (path, mut store) = temp_store("join-multi");
+        {
+            let mut w = store.writer().unwrap();
+            let mut e = |id: &str, secs, level: &str, title: &str, trazas: &[&str]| {
+                let mut x = ev(id, secs, level, "tool", title);
+                x.links = trazas.iter().map(|t| chrono_core::Link { rel: "traza".into(), target: t.to_string() }).collect();
+                w.add_event(&x).unwrap();
+            };
+            // Un fallo de las trazas A y B a la vez: cada una tuvo su aviso antes. Y
+            // un fallo sin traza.
+            e("pa", 100, "WARNING", "WARNING: cola llena", &["A"]);
+            e("pb", 101, "WARNING", "WARNING: disco lento", &["B"]);
+            e("f", 110, "ERROR", "Exit code 1", &["A", "B"]);
+            e("g", 500, "ERROR", "Exit code 1", &[]);
+            w.commit().unwrap();
+        }
+        let o = PrecedeOpts { anchor: EventScope { grep: Some("Exit code"), ..Default::default() }, join: Some("traza"), ..Default::default() };
+        let r = precede(store.conn(), &o).unwrap();
+        assert_eq!(r.episodes_total, 2, "uno por traza, no solo por la menor: {:?}", r.episodes);
+        let pre: Vec<&str> = r.episodes.iter().map(|e| e.preceding[0].template.as_str()).collect();
+        assert_eq!(pre, ["WARNING: cola llena", "WARNING: disco lento"], "{:?}", r.episodes);
+        assert_eq!(r.anchors_without_key, 1);
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -86,7 +86,8 @@ Log-native (multi-source). timeline, stats, top, patterns and events share the s
                        precedes each one (errors/warnings in --window 2m, levels inferred from the
                        text), plus the precursors common to several episodes. --gap 2m splits
                        episodes; --before-levels FATAL,ERROR narrows the precursors (* = any, even none).
-                       --join K: only precursors sharing the episode's value of K (same session, trace…).
+                       --join K: only precursors sharing the episode's value of K (same session, trace…);
+                       an anchor with several values counts in each, anchors_without_key counts those with none.
                        Each common precursor brings expected (base rate) and lift; totals cover every episode.
   correlate <id>       Events from OTHER sources within ±Δt of an event (--delta 1h;
                        --kind commit,ci.* keeps only those kinds). --via K: instead of time, every
@@ -182,7 +183,8 @@ Log-native (multi-fuente). timeline, stats, top, patterns y events comparten fil
                        precede a cada uno (errores/avisos en --window 2m, con el nivel deducido del
                        texto), más los precursores comunes a varios episodios. --gap 2m separa
                        episodios; --before-levels FATAL,ERROR acota los precursores (* = cualquiera, también sin nivel).
-                       --join K: solo precursores con el mismo valor de K que el episodio (sesión, traza…).
+                       --join K: solo precursores con el mismo valor de K que el episodio (sesión, traza…);
+                       un ancla con varios valores cuenta en cada uno; anchors_without_key, las que no tienen.
                        Cada precursor común trae lo esperado (frecuencia base) y el lift; las cifras, de todos los episodios.
   correlate <id>       Eventos de OTRAS fuentes en ±Δt de un evento (--delta 1h;
                        --kind commit,ci.* se queda solo con esos tipos). --via K: en vez del tiempo,
