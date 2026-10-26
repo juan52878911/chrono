@@ -399,7 +399,13 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
             let attr = arg_str(args, "attr")?;
             let by = args.get("by").and_then(Value::as_str).filter(|s| !s.is_empty());
             let limit = arg_i64(args, "limit", 25).max(1) as usize;
-            let rows = chrono_metrics::stats(conn, attr, by, since_epoch, &scope_from(args), limit)?;
+            // Aquí `attr` es el atributo numérico, no el filtro `clave:valor`
+            // de las demás consultas: tomarlo como filtro no casaba nada.
+            let mut filters = args.clone();
+            if let Some(o) = filters.as_object_mut() {
+                o.remove("attr");
+            }
+            let rows = chrono_metrics::stats(conn, attr, by, since_epoch, &scope_from(&filters), limit)?;
             let groups: Vec<Value> = rows
                 .iter()
                 .map(|r| json!({"group": r.group, "count": r.count, "min": r.min, "p50": r.p50, "p95": r.p95, "max": r.max, "sum": r.sum}))
