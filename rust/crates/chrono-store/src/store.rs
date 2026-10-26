@@ -33,6 +33,16 @@ const SELECTED_EVENTS: &str = "source_ref = (SELECT ref FROM sources WHERE id = 
                                WHERE v.key = 'file' AND v.value = ?2)
                     OR json_extract(attrs, '$.file') = ?2)";
 
+/// Antes de borrar eventos, el `rid` más alto que ha existido queda en
+/// `meta.rid_hwm` (solo sube). `events.rid` es `INTEGER PRIMARY KEY` sin
+/// AUTOINCREMENT: SQLite daría a lo nuevo los rid de lo borrado si eran los más
+/// altos, y quien sigue el índice por rid (`tail`, la marca `stale_dims`, los
+/// watermarks de FTS y rollups) se saltaba esos eventos o los contaba mal. El
+/// `Writer` numera por encima de este suelo (ver `Writer::add_event`).
+pub(crate) const BUMP_RID_HWM: &str = "INSERT INTO meta(key, value)
+    SELECT 'rid_hwm', (SELECT MAX(rid) FROM events) WHERE EXISTS (SELECT 1 FROM events)
+    ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER))";
+
 impl Store {
     /// Abre (o crea) el índice en `path`.
     ///
@@ -408,6 +418,7 @@ impl Store {
         // Los rids primero: la selección por fichero lee `event_dims`, que se borra.
         tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS del_rids(rid INTEGER PRIMARY KEY); DELETE FROM del_rids;")?;
         tx.execute(&format!("INSERT INTO del_rids SELECT rid FROM events WHERE {selected}"), params![source_id, file])?;
+        tx.execute(BUMP_RID_HWM, [])?;
         for child in ["touches", "labels", "event_links", "event_dims"] {
             tx.execute(&format!("DELETE FROM {child} WHERE event_rid IN (SELECT rid FROM del_rids)"), [])?;
         }
@@ -424,6 +435,7 @@ impl Store {
     /// El orden de borrado respeta las claves foráneas: hijos antes que padres.
     pub fn reset(&mut self) -> Result<()> {
         let tx = self.conn.transaction()?;
+        tx.execute(BUMP_RID_HWM, [])?;
         for table in [
             "touches",
             "event_links",
@@ -450,8 +462,8 @@ impl Store {
         // events_fts es de contenido externo: hay que vaciarlo explícitamente.
         tx.execute("INSERT INTO events_fts(events_fts) VALUES ('delete-all')", [])?;
         // Los watermarks incrementales (FTS/rollups) apuntan a rowids que ya no
-        // existen; al vaciar `events` los rowids reinician en 1, así que se
-        // borran para que el próximo build completo los recalcule desde 0.
+        // existen: se borran para que el próximo build completo los recalcule
+        // desde 0. Los rid nuevos siguen por encima de `rid_hwm`, no desde 1.
         tx.execute("DELETE FROM meta WHERE key IN ('fts_max_rowid', 'rollup_max_rowid')", [])?;
         tx.commit()?;
         Ok(())

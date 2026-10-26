@@ -43,16 +43,20 @@ pub struct Writer<'a> {
     c: WriterCaches,
     /// `(id, rid)` del último evento insertado: `add_labels` va justo detrás.
     last: Option<(String, i64)>,
+    /// `rid` del siguiente evento: por encima del máximo de `events` y de
+    /// `meta.rid_hwm`, para no reutilizar los de lo borrado. Se calcula al
+    /// primer evento del lote.
+    next_rid: Option<i64>,
 }
 
 impl<'a> Writer<'a> {
     pub(crate) fn new(tx: Transaction<'a>) -> Self {
-        Writer { tx, c: WriterCaches::default(), last: None }
+        Writer { tx, c: WriterCaches::default(), last: None, next_rid: None }
     }
 
     /// Como [`Writer::new`] pero sembrado con cachés de un lote anterior.
     pub(crate) fn new_seeded(tx: Transaction<'a>, caches: WriterCaches) -> Self {
-        Writer { tx, c: caches, last: None }
+        Writer { tx, c: caches, last: None, next_rid: None }
     }
 
     /// Commitea el lote y DEVUELVE las cachés, para sembrar el siguiente lote.
@@ -100,13 +104,24 @@ impl<'a> Writer<'a> {
         // u64 -> i64 reinterpretando bits (misma convención que el Go: int64(simhash)).
         let simhash = ev.simhash as i64;
 
+        let rid = match self.next_rid {
+            Some(r) => r,
+            None => {
+                self.tx.query_row(
+                    "SELECT MAX(COALESCE((SELECT MAX(rid) FROM events), 0),
+                                COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'rid_hwm'), 0)) + 1",
+                    [],
+                    |r| r.get(0),
+                )?
+            }
+        };
         let inserted = self
             .tx
             .prepare_cached(
                 "INSERT OR IGNORE INTO events
-                    (id, source_ref, kind, at_epoch, actor_id, title, body, level,
+                    (rid, id, source_ref, kind, at_epoch, actor_id, title, body, level,
                      simhash, is_bulk, touches_n, attrs)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                 VALUES (?13,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             )?
             .execute(params![
                 ev.id,
@@ -121,11 +136,12 @@ impl<'a> Writer<'a> {
                 is_bulk,
                 touches_n,
                 attrs_json,
+                rid,
             ])?;
+        self.next_rid = Some(rid + i64::from(inserted > 0));
         if inserted == 0 {
             return Ok(false);
         }
-        let rid = self.tx.last_insert_rowid();
         self.last = Some((ev.id.clone(), rid));
 
         for (key, value) in dims {

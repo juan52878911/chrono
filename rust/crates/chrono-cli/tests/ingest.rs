@@ -494,6 +494,37 @@ fn tail_ensena_todo_lo_nuevo_aunque_comparta_instante() {
 }
 
 #[test]
+fn tail_ensena_lo_releido_tras_reescribir_un_fichero() {
+    let env = Env::new("tail-relectura", r#"{"version":2}"#);
+    let log = env.dir().join("app.jsonl");
+    let line = |tag: &str, i: u32| format!(r#"{{"ts":"2024-01-01T00:00:0{i}Z","msg":"{tag} {i}"}}"#) + "\n";
+    write(env.dir(), "app.jsonl", &(line("uno", 1) + &line("uno", 2)));
+    env.ok(&["add", &path_s(&log)]);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_chrono"))
+        .args(["tail", "--interval", "1s", "--db", &env.db()])
+        .current_dir(env.dir())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut s);
+        s
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    // Otro contenido: divergencia, se borran sus eventos (los rid más altos) y se relee.
+    write(env.dir(), "app.jsonl", &(line("dos", 1) + &line("dos", 2) + &line("dos", 3)));
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    let _ = child.kill();
+    let _ = child.wait();
+    let text = reader.join().unwrap();
+    // Antes: los releídos reutilizaban los rid 1 y 2 y solo salía «dos 3».
+    assert_eq!(text.lines().filter(|l| l.contains("dos ")).count(), 3, "{text}");
+}
+
+#[test]
 fn tail_sigue_en_el_indice_nuevo_tras_un_reindex() {
     let env = Env::new("tail-reindex", r#"{"version":2}"#);
     let log = env.dir().join("app.jsonl");
