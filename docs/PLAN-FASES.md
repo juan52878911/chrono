@@ -15,7 +15,53 @@ solo ejecutable Rust estático, sin modelos ni runtimes dentro (hoy pesa 2,2 MB)
 
 Las cifras marcadas como *objetivo* son estimaciones que valida la fase correspondiente.
 
-## Estado (2026-10-26)
+## Estado (2026-10-26, tras F4)
+
+**F4 hecha → 0.6.0 (esquema v7, se migra al abrir).** Binario 2 361 120 → 2 427 712 B (+3 %), sin dependencias
+nuevas. Detalle en la decisión 30 de `DECISIONS.md`.
+- **P-REL-2** `relations` en `.chrono/config.json` (versión 2, `config check` las valida con la ruta de la clave y el
+  error del patrón): la clave sale de un campo, de `link:<rel>` o de un patrón sobre la ruta o el título
+  (`chrono_core::Pattern`, matcher propio sin `regex`) y se guarda como link al ingerir. Una clave `K` es la unión de
+  links `rel = K` y dims `K`, comparada por valor. `events|top|timeline --join K=v|K=pre*|K=@id|K`,
+  `correlate <id> --via K`, `precede --join K` y `gaps --from A --to B --via K [--by U]`, también por MCP (tool
+  `gaps`, `via` en `correlate`, `join` en los filtros comunes).
+- **Links internados**: `link_targets` + `event_links` y vista `links`. Sesiones de Claude (copia congelada, 1 930
+  ficheros, 265 240 eventos): índice 166,7 → **144,6 MB** (`links` 54 → 29,5 MB tras migrar un v6), ingesta 28,3 →
+  26,8 s y 354 → 324 MB de RSS. 0.5.0 y 0.6.0 dan lo mismo en `top entity|level|kind`, `top entity --level ERROR`,
+  `top attr:sessionId`, `patterns --level ERROR` y `sources`.
+- **P-MSR-3** `precede`: `episodes_total` y «antes de x/N» salen de TODOS los episodios (`limit` solo acota los
+  devueltos) y cada precursor común trae `expected` y `lift` frente a la frecuencia base de `rollups`; se ordenan por
+  exceso sobre lo esperado (un `heartbeat` cada 5 min deja de salir primero; test). En las sesiones, antes de un fallo
+  de Bash (60 s, `before_levels=*`): 0.5.0 decía 50 episodios y «43/50»; ahora **1 760** episodios, Bash 1 594/1 760
+  (lift 5,2) en 0,52 s; con `--join sessionId`, 2 012 episodios (uno por sesión) en 2,05 s.
+- **`entity_via=tool_use`** sustituye a `entity_join` en `claude-sessions`: el resultado toma la tool de su uso por el
+  link en el índice. Fallos por tool idénticos a 0.5.0 (Bash 3 784, Edit 186, Read 83…), y ahora también con el `sync`
+  cortado entre uso y resultado o con los dos en ficheros distintos (tests).
+- **Sesiones ↔ git** (índice con este repo y las sesiones; relación `ruta`: links `file` de la sesión sin el prefijo del
+  repo o del worktree ↔ ficheros del commit): 10 sesiones editaron (Edit/Write) ficheros de chrono, 9 con algún fichero
+  que entra en un commit y 1 sin ninguno; 7 de 150 rutas editadas nunca se commitearon (`gaps`, 1,4 s). `correlate`
+  sesión ↔ git, por tiempo (`--kind commit --delta 2h`) y por clave (`--via ruta`: 14 commits tocan el fichero de un
+  Edit; el de 8 min después sale en las dos).
+- **`~/archivo-pruebas-oriuno`** (Trycore; solo cifras): 6 324 ficheros en 1,0 s. 291 rutas con palabras de prueba,
+  1 371 de resultado y 25 de decisión; de 179 claves específicas (≤ 20 ficheros), 4 aparecen en pruebas y resultados
+  (13 de 291 pruebas emparejadas, 3 de ellas copias del mismo fichero), 2 en resultados y decisiones y **0 en los
+  tres**. Con `relations` + `gaps` por patrón, 0 de 3 y 1 de 9 cubiertas. **No hay clave común en rutas ni nombres**:
+  relacionar prueba → resultado → decisión necesita el contenido (F6) o un manifiesto.
+- **Bench a 1M** (`bench/escala/f4-0.6.0.json` frente a `f3-0.5.0.json`, load 3-4): ingesta 28,5 → 23,1 s, `.db` igual
+  (321 MB), consultas iguales o más rápidas (−8 a −33 %). `informe` 0,77 → **1,86 s**: sus 1 750 episodios por origen
+  ya cuentan todos (antes «x/24» sobre los 24 devueltos). `events` +30 % de bytes es la ruta del fichero del bench, más
+  larga en el scratchpad. Esquemas MCP 20 147 → 23 078 B (24 tools; F5 los consolida).
+- Delegación en Trycore: 2 trabajadores (tests de ingesta de `relations`/`entity_via` y de `gaps`/`--via`/`--join`,
+  0,33 $ + 0,79 $). Los nodos no tienen toolchain de Rust: escribieron los tests sin compilar; aquí compilaron y
+  destaparon 3 fallos reales (`field: id` con prefijo de fichero, `K=pre*` con `LIKE`: `_` comodín y sin distinguir
+  mayúsculas).
+
+Sin verificar o pendiente:
+- La frecuencia base es temporal sobre todo el periodo: en fuentes a ráfagas (sesiones) casi todo sale con lift > 1;
+  con `--join` el lift es conservador (la base no se condiciona a la clave). Mejor base: por actividad o por clave.
+- `gaps` no mira el orden (un commit anterior a la edición también cubre) ni admite espacios en `grep=` de un lado.
+- `informe` paga +1,1 s por contar todos los episodios: un solo barrido ordenado en vez de una consulta por episodio.
+- `token_budget.truncated` es `returned >= max`: con exactamente `limit` unidades dice truncado sin estarlo (venía de antes).
 
 **F3 hecha → 0.5.0 (esquema v6, reindex avisado).** Binario 2 311 152 → 2 361 120 B (+2 %), sin dependencias
 nuevas. Detalle en la decisión 29 de `DECISIONS.md`.
