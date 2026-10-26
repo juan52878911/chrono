@@ -70,7 +70,7 @@ En el CLI son `--since`, `--until`, `--level`… y siempre `--compact`.
 | Cuántas veces pasó X, cuándo y qué lo precede | `precede` grep="<mensaje de X>" attr=container:<nombre> | `chrono precede --grep "<mensaje>" --attr container:<nombre>` |
 | Qué pasó justo antes de X (o lo último que pasó) | `events` entity=postgres until=<ts> order=desc limit=30 | `chrono events --entity postgres --until <ts> --order desc --limit 30` |
 | Una traza o excepción completa | `events` entity=<svc> since=<ts> limit=80 | `chrono events --entity <svc> --since <ts> --limit 80` |
-| Latencias, tamaños, duraciones | `stats` attr=duration_s by=entity | `chrono stats duration_s --by entity` |
+| Latencias, tamaños, duraciones | `stats` attr=duration_s by=entity (filtro clave:valor en where_attr, no en attr) | `chrono stats duration_s --by entity [--attr clave:valor]` |
 | Qué hubo en OTRAS fuentes alrededor | `correlate` id=<evento> delta_secs=1800 | `chrono correlate <id> --delta 30m --kind commit` |
 | Qué comparte una clave con un evento (misma sesión, sha, prueba) | `correlate` id=<evento> via=<clave> | `chrono correlate <id> --via <clave>` |
 | Los eventos de una clave | `events` join=<clave>=<valor> | `chrono events --join <clave>=<valor>` |
