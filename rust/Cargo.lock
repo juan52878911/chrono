@@ -55,6 +55,7 @@ dependencies = [
  "chrono-metrics",
  "chrono-source-changelog",
  "chrono-source-csv",
+ "chrono-source-dir",
  "chrono-source-git",
  "chrono-source-jsonl",
  "chrono-source-nod",
@@ -101,6 +102,13 @@ dependencies = [
 
 [[package]]
 name = "chrono-source-csv"
+version = "0.3.0"
+dependencies = [
+ "chrono-core",
+]
+
+[[package]]
+name = "chrono-source-dir"
 version = "0.3.0"
 dependencies = [
  "chrono-core",

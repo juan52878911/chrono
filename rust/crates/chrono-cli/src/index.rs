@@ -92,6 +92,7 @@ pub(crate) fn build_registry() -> Registry {
     r.register(Box::new(chrono_source_oslog::OsLogSource::new()));
     r.register(Box::new(chrono_source_template::TemplateSource::new()));
     r.register(Box::new(chrono_source_nod::NodSource::new()));
+    r.register(Box::new(chrono_source_dir::DirSource::new()));
     r
 }
 
@@ -127,8 +128,8 @@ fn resolve_source<'a>(
     let src = match as_kind.filter(|s| !s.is_empty()) {
         Some(kind) => registry.by_kind(kind).ok_or_else(|| {
             t(
-                format!("unknown source kind {kind:?} for --as (try: git, jsonl, csv, textlog, changelog, oslog, template, nod)"),
-                format!("kind de fuente desconocido {kind:?} para --as (prueba: git, jsonl, csv, textlog, changelog, oslog, template, nod)"),
+                format!("unknown source kind {kind:?} for --as (try: git, jsonl, csv, textlog, changelog, oslog, template, nod, dir)"),
+                format!("kind de fuente desconocido {kind:?} para --as (prueba: git, jsonl, csv, textlog, changelog, oslog, template, nod, dir)"),
             )
         })?,
         None => registry.pick(start).ok_or_else(|| unrecognized_source_err(start))?,
@@ -768,9 +769,10 @@ fn ingest_source(
     let redact = source_cfg.options.get("redact").map(String::as_str) != Some("off");
     let mut redacted = 0usize;
     let classifier = RulesClassifier::new(cfg);
-    // Nod es telemetría del PROCESO (sesiones con agentes), no cambios del
-    // repo: no se clasifica (un tool `fix_*` o un prompt no son un fix).
-    let classify = source.kind() != "nod";
+    // Nod es telemetría del PROCESO (sesiones con agentes) y dir un inventario
+    // de ficheros, no cambios del repo: no se clasifican (un tool `fix_*` o un
+    // fichero `fix.pdf` no son un fix).
+    let classify = !matches!(source.kind(), "nod" | "dir");
 
     let mut cur: Box<dyn Cursor> = match source.open(path, watermark, &source_cfg) {
         Ok(c) => c,
