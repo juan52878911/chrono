@@ -19,8 +19,9 @@ pub(crate) fn peek_first_nonempty_line(path: &Path) -> Option<String> {
     let reader = BufReader::new(file);
     for line in reader.lines() {
         let line = line.ok()?;
+        let line = line.strip_prefix('\u{feff}').unwrap_or(&line);
         if !line.trim().is_empty() {
-            return Some(line);
+            return Some(line.to_string());
         }
     }
     None
@@ -155,7 +156,10 @@ impl JsonlCursor {
         // relee entera en el sync siguiente; antes se saltaba y su resto
         // llegaba suelto y se descartaba: la línea se perdía. Un final sin
         // `\n` que ya es JSON completo sí entra (ficheros sin salto final).
-        if buf.last() != Some(&b'\n') && !serde_json::from_slice::<Value>(&buf).is_ok_and(|v| v.is_object()) {
+        // BOM de UTF-8 al principio del fichero (PowerShell, editores de
+        // Windows): fuera, o la primera línea no era JSON y se descartaba.
+        let bom = if self.bytes_read == 0 && buf.starts_with(b"\xEF\xBB\xBF") { 3 } else { 0 };
+        if buf.last() != Some(&b'\n') && !serde_json::from_slice::<Value>(&buf[bom..]).is_ok_and(|v| v.is_object()) {
             self.reader.seek(SeekFrom::Start(self.bytes_read))?;
             return Ok(None);
         }
@@ -166,7 +170,7 @@ impl JsonlCursor {
         if buf.last() == Some(&b'\r') {
             buf.pop();
         }
-        Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+        Ok(Some(String::from_utf8_lossy(&buf[bom.min(buf.len())..]).into_owned()))
     }
 }
 

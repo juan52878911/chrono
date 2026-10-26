@@ -90,7 +90,6 @@ fn cortes_en_cada_byte_ni_pierden_ni_duplican() {
 }
 
 #[test]
-#[ignore = "PEND"]
 fn bom_al_principio_no_pierde_la_primera_linea() {
     let f = Tmp::new("\u{feff}{\"ts\":1704067200,\"msg\":\"uno\"}\n{\"ts\":1704067201,\"msg\":\"dos\"}\n".as_bytes());
     let (evs, _) = sync(&f.0, None, &cfg(&[]));
