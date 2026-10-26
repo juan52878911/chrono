@@ -235,6 +235,23 @@ pub(crate) fn cube(conn: &Connection, since: i64, scope: &EventScope, dims: &[Di
     Ok(Some(cells))
 }
 
+/// Cuántos eventos CON tiempo de `scope` hay desde `since` (la cabecera `total`
+/// del MCP): del cubo si puede, si no de `events`.
+pub fn count_events(conn: &Connection, since: i64, scope: &EventScope) -> Result<i64> {
+    if let Some(drb) = fresh(conn)? {
+        if let Some(cells) = cube(conn, since, scope, &[], Some(drb))? {
+            return Ok(cells.values().map(|(n, _)| n).sum());
+        }
+    }
+    let (filters, extra) = scope.sql(2);
+    let sql = format!("SELECT COUNT(*) FROM events e WHERE e.at_epoch > 0 AND (?1 = 0 OR e.at_epoch >= ?1) {filters}");
+    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&since];
+    for p in &extra {
+        bound.push(p);
+    }
+    Ok(conn.query_row(&sql, rusqlite::params_from_iter(bound), |r| r.get(0))?)
+}
+
 /// Id del evento de un rid (el `example_id` de `patterns`).
 pub(crate) fn id_of(conn: &Connection, rid: i64) -> Result<String> {
     Ok(conn.query_row("SELECT id FROM events WHERE rid = ?1", params![rid], |r| r.get(0)).optional()?.unwrap_or_default())
@@ -296,6 +313,7 @@ mod tests {
                 if !sc.only_source_grep() {
                     out.push(format!("patterns {since} {sc:?}: {:?}", patterns_scoped(conn, since, &sc, 50).unwrap()));
                 }
+                out.push(format!("count {since} {sc:?}: {}", super::count_events(conn, since, &sc).unwrap()));
                 for (bucket, by) in [(600_000, None), (1_200_000, Some("level")), (600_000, Some("kind"))] {
                     let t = timeline_scoped(conn, since, until, bucket, by, &sc, 0).unwrap();
                     out.push(format!("timeline {bucket} {by:?} {since} {sc:?}: {t:?}"));

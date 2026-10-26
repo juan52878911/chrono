@@ -68,13 +68,7 @@ pub fn canonical(tool: &str, args: &Value) -> String {
 /// `(total que casa, primera y última fecha de las fuentes consultadas)`.
 pub fn coverage(conn: &Connection, args: &Value, since_epoch: i64) -> (i64, Option<(i64, String, i64, String)>) {
     let scope = crate::tools::scope_from(args);
-    let (filters, extra) = scope.sql_public(2);
-    let sql = format!("SELECT COUNT(*) FROM events e WHERE e.at_epoch > 0 AND (?1 = 0 OR e.at_epoch >= ?1) {filters}");
-    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&since_epoch];
-    for p in &extra {
-        bound.push(p);
-    }
-    let total: i64 = conn.query_row(&sql, rusqlite::params_from_iter(bound), |r| r.get(0)).unwrap_or(0);
+    let total = chrono_metrics::count_events(conn, since_epoch, &scope).unwrap_or(0);
     // Cobertura: solo por fuente (lo que hay), sin los demás filtros (lo que se busca).
     let src = chrono_metrics::EventScope { source: scope.source, ..Default::default() };
     let (sf, sx) = src.sql_public(1);
