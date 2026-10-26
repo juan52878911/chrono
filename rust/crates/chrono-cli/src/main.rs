@@ -530,7 +530,7 @@ fn main() {
         return;
     }
 
-    let store = chrono_store::Store::open(&db).unwrap_or_else(|e| fatal(e));
+    let store = chrono_store::Store::open_read(&db).unwrap_or_else(|e| fatal(e));
     let window = query::Window::from_flag(f.since.as_deref()).unwrap_or_else(|e| fatal(e));
 
     // `--by symbol` cambia el alcance de las consultas de entidades a símbolos

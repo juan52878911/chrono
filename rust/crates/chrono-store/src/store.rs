@@ -93,6 +93,22 @@ impl Store {
         Ok(Store { conn })
     }
 
+    /// Abre el índice para consultar: como `open`, pero sin la caché de ingesta.
+    ///
+    /// La caché de 256 MB y el mmap de 256 MB de `open` se llenan con las páginas
+    /// que toca un recorrido, y eso es RSS del proceso aunque la consulta devuelva
+    /// 50 filas. Medido a 1M eventos (bench/escala): 16 MB de caché sin mmap baja
+    /// el RSS de 440-613 MB a 24-77 MB con el mismo tiempo en las consultas
+    /// filtradas; `informe` tarda un 27 % más (9,5 → 12,1 s) mientras recorra `events`.
+    pub fn open_read(path: &Path) -> Result<Store> {
+        let store = Store::open(path)?;
+        store.conn.execute_batch(
+            "PRAGMA cache_size = -16384;
+             PRAGMA mmap_size = 0;",
+        )?;
+        Ok(store)
+    }
+
     /// Escribe (o reemplaza) un valor del manifiesto `meta`.
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute(

@@ -87,14 +87,14 @@ pub fn serve(db: Option<PathBuf>) -> Result<()> {
 }
 
 /// Abre el índice explícito, o lo autodescubre subiendo desde el cwd. Nunca
-/// propaga error: si no hay fichero, o si `Store::open` falla, se queda sin
+/// propaga error: si no hay fichero, o si `Store::open_read` falla, se queda sin
 /// store (se loguea a stderr) en vez de abortar el arranque del servidor.
 fn open_or_discover(db: Option<PathBuf>) -> Option<Store> {
     let path = db.or_else(discover_db)?;
     if !path.is_file() {
         return None;
     }
-    match Store::open(&path) {
+    match Store::open_read(&path) {
         Ok(store) => Some(store),
         Err(err) => {
             eprintln!(

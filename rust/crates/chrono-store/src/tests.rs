@@ -365,3 +365,16 @@ fn open_con_schema_version_distinta_devuelve_err() {
     let err = Store::open(db.path());
     assert!(err.is_err(), "abrir con schema_version incompatible debe fallar");
 }
+
+#[test]
+fn open_read_usa_la_cache_pequena_y_sin_mmap() {
+    let db = TempDb::new("open-read");
+    drop(Store::open(db.path()).unwrap());
+    let s = Store::open_read(db.path()).unwrap();
+    let pragma = |p: &str| -> i64 { s.conn().query_row(&format!("PRAGMA {p}"), [], |r| r.get(0)).unwrap() };
+    assert_eq!(pragma("cache_size"), -16384);
+    assert_eq!(pragma("mmap_size"), 0);
+    // La de ingesta sigue con su caché grande.
+    let w = Store::open(db.path()).unwrap();
+    assert_eq!(w.conn().query_row("PRAGMA cache_size", [], |r| r.get::<_, i64>(0)).unwrap(), -262144);
+}
