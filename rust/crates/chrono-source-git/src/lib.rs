@@ -70,6 +70,12 @@ impl Source for GitSource {
         }
     }
 
+    fn options(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("rev", "rama o revisión a indexar (p. ej. origin/dev)"),
+        ]
+    }
+
     fn open(
         &self,
         path: &Path,

@@ -58,6 +58,17 @@ impl Source for TemplateSource {
         0 // nunca autodetectado: se fuerza con --as template o config "adapter".
     }
 
+    fn options(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("template", "plantilla con <campos> (obligatoria)"),
+            ("time_field", "campo del tiempo"),
+            ("message_field", "campo del mensaje"),
+            ("level_field", "campo del nivel"),
+            ("entity_field", "campo de la entidad"),
+            ("actor_field", "campo del actor"),
+        ]
+    }
+
     fn open(
         &self,
         path: &Path,

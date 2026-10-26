@@ -91,6 +91,14 @@ impl Source for JsonlSource {
         }
     }
 
+    fn options(&self) -> &'static [(&'static str, &'static str)] {
+        config::OPTIONS
+    }
+
+    fn validate(&self, cfg: &SourceConfig) -> CoreResult<()> {
+        config::validate_options(cfg)
+    }
+
     fn open(&self, path: &Path, watermark: Option<Watermark>, cfg: &SourceConfig) -> CoreResult<Box<dyn chrono_core::Cursor>> {
         let meta = fs::metadata(path).map_err(|e| CoreError::Other(format!("leyendo metadata de {}: {e}", path.display())))?;
         if !meta.is_file() {

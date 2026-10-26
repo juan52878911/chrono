@@ -30,6 +30,21 @@ pub const ENTITY_FIELDS: &[&str] =
     &["service", "logger", "name", "path", "source", "unit", "container", "component"];
 pub const ACTOR_FIELDS: &[&str] = &["host", "hostname", "service", "pod", "node"];
 
+/// Opciones que lee el adaptador (ver `Source::options`).
+pub const OPTIONS: &[(&str, &str)] = &[
+    ("time_field", "campo del tiempo (ruta JSON: a.b, a.0, a[].b)"),
+    ("message_field", "campo del título"),
+    ("level_field", "campo del nivel"),
+    ("entity_field", "campo de la entidad"),
+    ("actor_field", "campo del actor"),
+    ("kind", "kind fijo de los eventos (por defecto log)"),
+    ("kind_field", "campo del que sale el kind"),
+    ("id_field", "campo con el id estable del registro"),
+    ("links", "enlaces rel=campo separados por comas"),
+    ("explode", "ruta a un array: un evento por elemento"),
+    ("explode_where", "filtro de explode: clave=valor"),
+];
+
 /// Expansión de un array de la línea: una línea → N eventos (ver
 /// `SourceConfig.options["explode"]` / `["explode_where"]`).
 #[derive(Debug, Clone, PartialEq, Eq)]

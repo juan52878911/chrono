@@ -11,6 +11,7 @@ mod glob;
 mod hook;
 mod i18n;
 mod command;
+mod config;
 mod index;
 mod json;
 mod query;
@@ -39,6 +40,7 @@ Index:
                        --as <kind> forces the adapter (e.g. --as template, config-defined;
                        --as nod for a Nod event file that is still empty).
   sync [path]          Process only the delta since the last watermark (all sources).
+  config check         Validate .chrono/config.json: each problem with its key path.
 
 Queries (JSON, schema_version 2: `entity`/`id`; add --compact for a plain-text table of `result`
 only, without metadata: about 2-5x smaller and byte-identical for the same index, meant for agents):
@@ -124,6 +126,7 @@ Uso:
                        --as <kind> fuerza el adaptador (p.ej. --as template, definido por config;
                        --as nod para un fichero de eventos de Nod aún vacío).
   sync [ruta]          Procesa solo el delta desde la última marca (todas las fuentes).
+  config check         Valida .chrono/config.json: cada problema con la ruta de su clave.
 
 Consulta (JSON, schema_version 2: `entity`/`id`):
   hotspots             Entidades que más cambian y más pesan.
@@ -434,6 +437,23 @@ fn main() {
         }
         "help" | "--help" | "-h" => {
             print!("{}", usage());
+            return;
+        }
+        "config" => {
+            if f.pos.get(1).map(String::as_str) != Some("check") {
+                fatal(t("usage: chrono config check", "uso: chrono config check"));
+            }
+            // Raíz: la del índice si lo hay (o --db); si no, el directorio actual.
+            let root = f
+                .db
+                .as_ref()
+                .map(PathBuf::from)
+                .or_else(discover_db)
+                .map(|db| index::index_root_of(&db))
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|e| fatal(e)));
+            if config::run_check(&root, &index::build_registry()) {
+                std::process::exit(1);
+            }
             return;
         }
         "init" => {

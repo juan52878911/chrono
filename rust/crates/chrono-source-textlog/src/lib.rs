@@ -107,6 +107,13 @@ impl Source for TextlogSource {
         self.detect_with_config(path, &SourceConfig::default())
     }
 
+    fn options(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("preset", "formato: syslog, nginx, apache…"),
+            ("year", "año para fechas sin año (syslog)"),
+        ]
+    }
+
     fn open(&self, path: &Path, watermark: Option<Watermark>, cfg: &SourceConfig) -> CoreResult<Box<dyn chrono_core::Cursor>> {
         let meta = fs::metadata(path).map_err(|e| CoreError::Other(format!("leyendo metadata de {}: {e}", path.display())))?;
         if !meta.is_file() {

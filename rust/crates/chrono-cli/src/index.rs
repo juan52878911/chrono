@@ -79,7 +79,7 @@ fn unrecognized_source_err(path: &Path) -> Box<dyn std::error::Error + Send + Sy
 
 /// Registro de fuentes disponibles para `init`/`sync`. `pick` elige la de
 /// mayor confianza vía `Source::detect`.
-fn build_registry() -> Registry {
+pub(crate) fn build_registry() -> Registry {
     let mut r = Registry::new();
     r.register(Box::new(GitSource::new()));
     r.register(Box::new(chrono_source_jsonl::JsonlSource::new()));

@@ -1,8 +1,9 @@
 //! `chrono hook <modo>`: chrono como intermediario entre las herramientas y el
 //! modelo, para los hooks de Claude Code. Sustituye al prototipo en Python.
 //!
-//! Solo actúa donde `.chrono/intermediario.json` lo pide (lo escribe la skill
-//! `chrono-intermediario`) y por encima de sus límites; en cualquier otro caso
+//! Solo actúa donde la config del intermediario lo pide (clave `intermediario`
+//! de `.chrono/config.json` o el antiguo `.chrono/intermediario.json`; la escribe
+//! la skill `chrono-intermediario`) y por encima de sus límites; en cualquier otro caso
 //! no imprime nada y la herramienta sigue igual. Nunca rompe la herramienta: un
 //! error se apunta en `CHRONO_INTERMEDIARIO_LOG` (si está) y se sale con 0.
 //!
@@ -77,9 +78,8 @@ fn handle(mode: &str, ev: &Value) -> R<Option<String>> {
         return Ok(edit_hint(ev)?.map(|ctx| json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": ctx}}).to_string()));
     }
     let cwd = ev.get("cwd").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let Some(root) = find_root(&cwd) else { return Ok(None) };
-    let cfg: Value = serde_json::from_str(&std::fs::read_to_string(root.join(".chrono/intermediario.json")).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("intermediario.json: {e}"))?;
+    let Some((root, cfg)) = find_root(&cwd) else { return Ok(None) };
+    let cfg = cfg?;
     if !cfg.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
         return Ok(None);
     }
@@ -146,11 +146,13 @@ fn wild(p: &[u8], s: &[u8]) -> bool {
     }
 }
 
-fn find_root(start: &Path) -> Option<PathBuf> {
+/// Primer directorio, subiendo desde `start`, con config del intermediario
+/// (`config.json#intermediario` o el antiguo `intermediario.json`), y esa config.
+fn find_root(start: &Path) -> Option<(PathBuf, R<Value>)> {
     let mut d = start.to_path_buf();
     loop {
-        if d.join(".chrono/intermediario.json").is_file() {
-            return Some(d);
+        if let Some(cfg) = chrono_classify_rules::load_intermediario(&d) {
+            return Some((d, cfg));
         }
         if !d.pop() {
             return None;
@@ -310,8 +312,8 @@ fn covered_windows(root: &Path, selector: &str) -> Vec<(i64, i64)> {
 /// encuentre los datos.
 fn prefetch(ev: &Value) -> R<()> {
     let cwd = ev.get("cwd").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let Some(root) = find_root(&cwd) else { return Ok(()) };
-    let cfg: Value = serde_json::from_str(&std::fs::read_to_string(root.join(".chrono/intermediario.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let Some((root, cfg)) = find_root(&cwd) else { return Ok(()) };
+    let cfg = cfg?;
     for rule in cfg.get("rules").and_then(Value::as_array).cloned().unwrap_or_default() {
         let Some(pf) = rule.get("prefetch") else { continue };
         let Some(sel) = pf.get("selector").and_then(Value::as_str) else { continue };
@@ -1111,11 +1113,10 @@ fn edit_hint(ev: &Value) -> R<Option<String>> {
 fn verify_numbers(ev: &Value) -> R<Option<String>> {
     // Opt-in (medido con Opus: al bloquear, el modelo responde al aviso y ESE mensaje queda como respuesta
     // final, tapando la buena; y los falsos positivos —un código HTTP, una suma de 4 cifras— lo disparan).
-    // Se activa con CHRONO_VERIFY=1 o "verify": true en .chrono/intermediario.json.
+    // Se activa con CHRONO_VERIFY=1 o "verify": true en la config del intermediario.
     let cwd = ev.get("cwd").and_then(Value::as_str).map(PathBuf::from).unwrap_or_default();
     let by_config = find_root(&cwd)
-        .and_then(|r| std::fs::read_to_string(r.join(".chrono/intermediario.json")).ok())
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|(_, c)| c.ok())
         .and_then(|c| c.get("verify").and_then(Value::as_bool))
         .unwrap_or(false);
     let on = match std::env::var("CHRONO_VERIFY").as_deref() {

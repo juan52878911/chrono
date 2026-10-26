@@ -39,6 +39,19 @@ pub trait Source {
         watermark: Option<Watermark>,
         cfg: &SourceConfig,
     ) -> Result<Box<dyn Cursor>>;
+
+    /// Opciones que el adaptador lee de `SourceConfig.options`, como
+    /// `(clave, ayuda)`. Es lo que `chrono config check` usa para señalar claves
+    /// desconocidas; las comunes a todas las fuentes (`adapter`, `redact`) no van aquí.
+    fn options(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
+
+    /// Comprueba los VALORES de las opciones (formas `clave=valor`, opciones que
+    /// requieren otra…) sin abrir nada. `chrono config check` la llama por fuente.
+    fn validate(&self, _cfg: &SourceConfig) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Cursor de streaming sobre una fuente: entrega eventos uno a uno con RAM constante.
@@ -83,6 +96,11 @@ impl Registry {
     }
 
     /// Busca un adaptador por su `kind` (para forzar con `--as`).
+    /// Todos los adaptadores registrados, en orden de registro.
+    pub fn all(&self) -> impl Iterator<Item = &dyn Source> {
+        self.sources.iter().map(|b| b.as_ref())
+    }
+
     pub fn by_kind(&self, kind: &str) -> Option<&dyn Source> {
         self.sources.iter().map(|s| s.as_ref()).find(|s| s.kind() == kind)
     }

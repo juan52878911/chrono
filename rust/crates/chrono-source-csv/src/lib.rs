@@ -87,6 +87,18 @@ impl Source for CsvSource {
         }
     }
 
+    fn options(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("time_column", "columna del tiempo"),
+            ("message_column", "columna del mensaje"),
+            ("level_column", "columna del nivel"),
+            ("entity_column", "columna de la entidad"),
+            ("actor_column", "columna del actor"),
+            ("id_column", "columna del id estable"),
+            ("delimiter", "separador (por defecto se detecta)"),
+        ]
+    }
+
     fn open(&self, path: &Path, watermark: Option<Watermark>, cfg: &SourceConfig) -> CoreResult<Box<dyn chrono_core::Cursor>> {
         let meta = fs::metadata(path).map_err(|e| CoreError::Other(format!("leyendo metadata de {}: {e}", path.display())))?;
         if !meta.is_file() {
