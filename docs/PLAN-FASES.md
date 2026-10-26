@@ -17,9 +17,31 @@ Las cifras marcadas como *objetivo* son estimaciones que valida la fase correspo
 
 ## Estado (2026-10-26, tras F4 y sus pendientes)
 
-**Pendientes de F2–F4 resueltos → 0.7.0 (esquema v7, sin reindex).** Sin dependencias nuevas. Tests 523 → **583**,
-en verde en macOS y en Linux (contenedor `rust:1.90` en trycorepc). Detalle en las decisiones 31 a 36 de
-`DECISIONS.md`.
+**Pendientes de F2–F4 resueltos → 0.7.0 (esquema v7, sin reindex).** Sin dependencias nuevas (solo la feature
+`backup` de rusqlite). Tests 523 → **641**, en verde en macOS y en Linux (contenedor `rust:1.90` en trycorepc).
+Detalle en las decisiones 31 a 37 de `DECISIONS.md`.
+
+Segunda vuelta (tras una segunda auditoría, tests adversarios y estrés en remoto):
+- **Ids por fuente (`ids:2`):** dos fuentes de un fichero con la misma línea en el mismo offset (o dos globs con
+  los mismos nombres relativos) se fundían en un evento por `INSERT OR IGNORE`. Las de un fichero se reindexan una
+  vez al detectar la marca; las globs cambian de ids fichero a fichero al releerse (decisión 37).
+- **`reindex`:** construye en `<db>.new` y lo copia en su sitio con la API de backup (con `rename` los lectores
+  abiertos compartían `-wal`/`-shm` con el fichero nuevo: «disk I/O error» y «malformed» en el estrés). Una fuente
+  ilegible queda fuera con sus cifras y sale con 3; `chrono remove <fuente>` nuevo. Los `rid` borrados no se
+  reutilizan (`rid_hwm`): `tail` y `stale_dims` ya no se tragan ni cuentan mal eventos.
+- **Glob > 64 MB:** huella por muestra (16 bloques); un `chmod`/`touch` ya no relee 340 k eventos (20 s → 0,01 s).
+  `sync` separa «nuevos» de «releídos».
+- **Adversarios (≈ 150 000 casos generados):** `Pattern` pasa a autómata lineal (era exponencial: 20 s con
+  `\w*\w*\w*\w*!`); 6 fugas de `redact`; `templatize` idempotente; `--since/--until` con fracción y zona y
+  fechas imposibles rechazadas; `attr` inválida ya no cuenta todo; `%`/`_` literales en `grep`; jsonl con
+  última línea a medio escribir, BOM y epoch en µs/ns. Ningún panic en ~7 700 invocaciones de la CLI.
+- `add` de un `.jsonl` vacío y un glob con un fichero vacío fallaban («no reconozco esta fuente»).
+- **Estrés (pve, 4 min):** escritor + 3 `sync` + `tail` + 2 lectores + `reindex` cada 15 s: 0 fallos, recuentos
+  exactos (106 851 / 107 051), `integrity_check` ok, ids únicos.
+- **10M eventos (trycorepc, índice de 3 GB):** igual o mejor que 0.6.0 en todo (`informe` 34,6 → 27,1 s,
+  `search` 1,11 → 0,71 s). Lo lento a esa escala viene de antes: `informe` 27 s y `top attr:host` 8 s (F7).
+- Sesiones reales con el binario final: mismas cifras que 0.6.0 en sources, top, patterns, timeline e informe;
+  `sync` sin cambios 0,055 s.
 - **Relaciones.** `gaps` por defecto solo cubre con un `to` en o después del primer `from` de la unidad
   (`--any-order` para el criterio de antes); `grep=` admite espacios, `--until` acota los dos lados,
   `from_without_key` cuenta los `from` sin valor de la clave y `units_without_time` las unidades sin ningún `from`
@@ -76,9 +98,12 @@ en verde en macOS y en Linux (contenedor `rust:1.90` en trycorepc). Detalle en l
 
 Sin verificar o pendiente:
 - Con `--join` sigue sin lift: falta una frecuencia base por clave.
-- Glob por encima de 64 MB: una edición en medio seguida de un append no se ve (la huella no cubre el medio).
+- Glob por encima de 64 MB: una edición entre los bloques de la muestra no se ve.
+- `informe` a 10M tarda 27 s y `top attr:k` 8 s (F7). Redact no tapa `Basic` con base64 corto; por MCP un
+  `since` inválido o un filtro de tipo erróneo se ignoran sin aviso.
+- Los agentes Claude no corren en los nodos remotos con la cuenta personal (sin token ni Rust allí); los nodos se
+  usaron solo para cómputo en contenedores.
 - Lo ya indexado de una fuente irrecuperable conserva las dims u opciones de antes (se cuenta, no se arregla).
-- `Pattern` hace vuelta atrás sin memo (venía de F4).
 - `informe` sigue contando cada episodio con una consulta (1,72 s a 1M): falta el barrido ordenado.
 - `token_budget.truncated` sigue siendo `returned >= max` en las listas con `limit`.
 - `top attr:k` con filtros sigue uniendo `event_dims` con `events` por rid (venía de F3).
