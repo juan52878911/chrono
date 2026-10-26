@@ -352,10 +352,16 @@ mod tests {
         store.build_rollups(60_000).unwrap();
         let conn = store.conn();
         assert!(super::fresh(conn).unwrap().is_some(), "el cubo tiene que estar al día");
+        // El cubo responde de verdad (si devolviera siempre None, se compararía events con events).
+        for (since, until) in [(0, 0), (123_457, 1_234_567)] {
+            let sc = EventScope { level: Some("ERROR"), entity: Some("svc-1"), until_epoch: until, ..Default::default() };
+            assert!(super::cube(conn, since, &sc, &[super::Dim::Template, super::Dim::Entity], Some(600_000)).unwrap().is_some());
+        }
         let con_cubo = answers(conn);
         conn.execute("DELETE FROM meta WHERE key = 'dim_rollup_bucket_ms'", []).unwrap();
         assert!(super::fresh(conn).unwrap().is_none());
         let con_events = answers(conn);
+        assert_eq!(con_cubo.len(), con_events.len());
         for (a, b) in con_cubo.iter().zip(&con_events) {
             assert_eq!(a, b);
         }
@@ -370,7 +376,9 @@ mod tests {
         let conn = store.conn();
         let con_cubo = answers(conn);
         conn.execute("DELETE FROM meta WHERE key = 'dim_rollup_bucket_ms'", []).unwrap();
-        for (a, b) in con_cubo.iter().zip(&answers(conn)) {
+        let con_events = answers(conn);
+        assert_eq!(con_cubo.len(), con_events.len());
+        for (a, b) in con_cubo.iter().zip(&con_events) {
             assert_eq!(a, b);
         }
         drop(store);

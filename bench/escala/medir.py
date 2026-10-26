@@ -62,6 +62,9 @@ seg, rss, _ = run(["add", corpus, "--db", db])
 res["ingesta"] = {"s": seg, "rss_mb": rss, "db_bytes": os.path.getsize(db),
                   "bytes_por_evento": round(os.path.getsize(db) / a.n, 1)}
 con = sqlite3.connect(db)
+# Sin la dim, `top attr:host` mediría el camino del JSON sin avisar.
+if con.execute("select count(*) from event_dims").fetchone()[0] != a.n:
+    sys.exit("host no quedó como dim: revisa la config del bench")
 res["plantillas"] = con.execute("select count(*) from templates").fetchone()[0]
 con.close()
 if shutil.which("sqlite3"):  # dbstat suele venir en el sqlite3 del sistema, no en el de Python

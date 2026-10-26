@@ -1253,10 +1253,14 @@ mod tests {
         assert_eq!(count(&db, host_dims), 0);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM events WHERE json_extract(attrs, '$.host') = 'h1'"), 3);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM dim_values WHERE key = 'file'"), 1);
-        // Igual que antes: nada que hacer.
+        // Los rollups se rehicieron sobre los eventos nuevos (watermark al día).
+        let max_rid = count(&db, "SELECT MAX(rid) FROM events");
+        assert_eq!(count(&db, "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'rollup_max_rowid'"), max_rid);
+        assert_eq!(count(&db, "SELECT SUM(count) FROM dim_rollups"), 9);
+        // Igual que antes: nada que hacer (no se relee: los rids no cambian).
         sync(&db, None).unwrap();
         assert_eq!(count(&db, "SELECT COUNT(*) FROM events"), 9);
-        assert_eq!(count(&db, "SELECT SUM(count) FROM dim_rollups"), 9);
+        assert_eq!(count(&db, "SELECT MAX(rid) FROM events"), max_rid);
         std::fs::remove_dir_all(&dir).ok();
     }
 

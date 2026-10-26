@@ -611,6 +611,10 @@ mod tests_p3 {
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
-        assert!(!p.iter().any(|l| l.contains("SCAN events")), "no debe recorrer events:\n{}", p.join("\n"));
+        let p = p.join("\n");
+        assert!(!p.contains("SCAN events"), "no debe recorrer events:\n{p}");
+        // Cuenta por valor sobre la clave primaria, y events solo para las fuentes de attr_keys.
+        assert!(p.contains("CORRELATED SCALAR SUBQUERY") && p.contains("SEARCH d USING PRIMARY KEY"), "{p}");
+        assert!(p.contains("SEARCH attr_keys"), "{p}");
     }
 }
