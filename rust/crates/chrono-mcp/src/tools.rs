@@ -313,6 +313,9 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
     let since_epoch = since_to_epoch(since);
     // Una clave de `join` que no existe no casaría nada: error, no vacío.
     chrono_metrics::check_join(conn, args.get("join").and_then(Value::as_str))?;
+    // En `stats`, `attr` es el atributo numérico y el filtro va en `where_attr`.
+    let attr_filter = args.get(if name == "stats" { "where_attr" } else { "attr" });
+    chrono_metrics::check_attr(attr_filter.and_then(Value::as_str))?;
 
     let result = match name {
         "hotspots" => hotspots(conn, since_epoch)?,
@@ -620,9 +623,15 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| format!("tools/call: falta el argumento requerido '{key}'").into())
 }
 
-/// Lee un entero de `args[key]`, o `default` si falta o no es entero.
-fn arg_i64(args: &Value, key: &str, default: i64) -> i64 {
-    args.get(key).and_then(Value::as_i64).unwrap_or(default)
+/// Lee un entero de `args[key]`, o `default` si falta o no es un número. Un
+/// número en una cadena (`"10"`, como lo mandan a menudo los modelos) o con
+/// decimales (`10.0`) también vale.
+pub(crate) fn arg_i64(args: &Value, key: &str, default: i64) -> i64 {
+    match args.get(key) {
+        Some(Value::Number(n)) => n.as_i64().or_else(|| n.as_f64().filter(|f| f.is_finite()).map(|f| f as i64)).unwrap_or(default),
+        Some(Value::String(s)) => s.trim().parse().unwrap_or(default),
+        _ => default,
+    }
 }
 
 /// Los filtros comunes de `args` (ver [`with_scope`]). `since` va aparte: cada

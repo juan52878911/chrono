@@ -193,6 +193,16 @@ pub(crate) fn attr_rids_sql(key: &str, p: &str, like: bool) -> String {
     )
 }
 
+/// Una condición de `attr` (`k:v` o `k=v`) partida por el PRIMER separador:
+/// `k=v:w` es la clave `k` con valor `v:w` (antes se partía por `:` primero y
+/// la clave `k=v` se descartaba sin avisar).
+pub(crate) fn split_attr(cond: &str) -> (&str, &str) {
+    match cond.find([':', '=']) {
+        Some(i) => (cond[..i].trim(), &cond[i + 1..]),
+        None => (cond.trim(), ""),
+    }
+}
+
 /// `,A,B,` en mayúsculas y sin espacios: el parámetro de una lista separada por
 /// comas, para casar con `instr(?, ',' || x || ',')`.
 pub(crate) fn comma_list(raw: &str, upper: bool) -> String {
@@ -273,10 +283,12 @@ impl EventScope<'_> {
             );
         }
         for cond in self.attr.unwrap_or("").split(',').map(str::trim).filter(|c| !c.is_empty()) {
-            let (k, v) = cond.split_once(':').or_else(|| cond.split_once('=')).unwrap_or((cond, ""));
+            let (k, v) = split_attr(cond);
             // La clave va en el path JSON: solo caracteres seguros (como en `top attr:`).
-            let k = k.trim();
-            if k.is_empty() || !k.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+            // Los frontales la validan antes (`check_attr`); aquí, por si acaso,
+            // una clave inválida no casa nada en vez de quitar el filtro.
+            if !crate::relate::valid_key(k) {
+                push("0 = ?N", "1".to_string());
                 continue;
             }
             match v.trim().strip_suffix('*') {

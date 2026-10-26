@@ -930,7 +930,7 @@ fn main() {
         until_epoch: 0,
     };
     // Una clave de `--join` que no existe no casaría nada: error, no vacío.
-    if let Err(e) = chrono_metrics::check_join(store.conn(), scope.join) {
+    if let Err(e) = chrono_metrics::check_join(store.conn(), scope.join).and_then(|_| chrono_metrics::check_attr(scope.attr)) {
         fatal(localized(e));
     }
     // Un `--level` mal escrito (`eror`) daba vacío sin más: se avisa con los
