@@ -57,7 +57,7 @@ only, without metadata: about 2-5x smaller and byte-identical for the same index
   branches [base]      Branch status vs base: ahead/behind, merged, stale, authors.
   phases               Project phases (tags/releases).
   sources              What is indexed: per source, events, time window, levels, top entities.
-  search <text>        Search events by text (FTS5, LIKE fallback).
+  search <text>        Search events by text (FTS5, LIKE fallback; --limit, default 25).
   similar <id>         Near-duplicate events (by SimHash).
   show <id>            Show a commit's diff live (git, bounded; --entity <path>).
   explain <file>[:A-B] Why this code is like this: commits that wrote those lines (git blame at the
@@ -158,7 +158,7 @@ Consulta (JSON con `schema_version`, `entity`/`id`; con --compact, una tabla de 
   branches [base]      Estado de ramas vs base: ahead/behind, mergeada, stale, autores.
   phases               Fases del proyecto (etiquetas).
   sources              Qué hay indexado: por fuente, eventos, ventana, niveles y entidades principales.
-  search <texto>       Busca eventos por texto (FTS5, con fallback a LIKE).
+  search <texto>       Busca eventos por texto (FTS5, con fallback a LIKE; --limit, por defecto 25).
   similar <id>         Eventos casi-duplicados (por SimHash).
   show <id>            Muestra el diff de un commit en vivo (git, acotado; --entity <ruta>).
   explain <fich>[:A-B] Por qué este código está así: commits que escribieron esas líneas (git blame en
@@ -549,6 +549,63 @@ fn fatal_open(e: Box<dyn std::error::Error + Send + Sync>, db: &Path, f: &Flags)
     }
 }
 
+/// `--source` que no casa con ninguna fuente: antes daba un resultado vacío,
+/// indistinguible de «no hay eventos»; ahora falla con las fuentes que hay.
+/// Mismo criterio que el filtro (`EventScope`): kind, prefijo de id o alias.
+fn check_source(store: &chrono_store::Store, s: &str, arg: &str) {
+    let Ok(sources) = store.list_sources() else { return };
+    let prefix = if s.contains(':') { s.to_lowercase() } else { format!("{}:", s.to_lowercase()) };
+    let alias = |m: &str| serde_json::from_str::<serde_json::Value>(m).ok().and_then(|v| v["alias"].as_str().map(str::to_string));
+    if sources.iter().any(|x| x.id.to_lowercase().starts_with(&prefix) || alias(&x.manifest_json).as_deref() == Some(s)) {
+        return;
+    }
+    let names: Vec<String> = sources.iter().map(|x| alias(&x.manifest_json).unwrap_or_else(|| x.id.clone())).collect();
+    fatal(t(
+        format!("no source matches --source {arg:?}. Sources: {} (or their kind: git, jsonl…; see chrono sources)", names.join(", ")),
+        format!("ninguna fuente casa con --source {arg:?}. Fuentes: {} (o su tipo: git, jsonl…; ver chrono sources)", names.join(", ")),
+    ))
+}
+
+/// Subcomandos que entiende `main` (los que no abren índice y las consultas).
+const COMMANDS: &[&str] = &[
+    "version", "help", "config", "init", "hook", "mcp", "sync", "reindex", "add", "tail", "hotspots", "coupling", "owners",
+    "bugs", "churn", "tickets", "prs", "branches", "phases", "sources", "search", "similar", "timeline", "stats", "top",
+    "patterns", "events", "bench", "explain", "informe", "precede", "correlate", "gaps", "trace", "session_patterns", "show",
+];
+
+/// Distancia de edición (Levenshtein) entre dos palabras cortas.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            cur.push((prev[j] + usize::from(ca != *cb)).min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// Comando desconocido: se dice antes de buscar el índice (antes, sin índice,
+/// salía «no encontré un índice»), con el parecido si lo hay, sin volcar la
+/// ayuda entera.
+fn unknown_command(cmd: &str) -> ! {
+    let near = COMMANDS.iter().map(|c| (edit_distance(cmd, c), *c)).filter(|(d, _)| *d <= 2).min();
+    let hint = match near {
+        Some((_, c)) => t(format!(" Did you mean {c:?}?"), format!(" ¿Querías decir {c:?}?")),
+        None => String::new(),
+    };
+    eprintln!(
+        "{}",
+        t(
+            format!("chrono: unknown command {cmd:?}.{hint} Commands: chrono help"),
+            format!("chrono: comando desconocido {cmd:?}.{hint} Comandos: chrono help"),
+        )
+    );
+    std::process::exit(2)
+}
+
 fn require_pos(f: &Flags, msg_en: &str, msg_es: &str) -> String {
     f.pos.get(1).cloned().unwrap_or_else(|| fatal(t(msg_en, msg_es)))
 }
@@ -630,11 +687,13 @@ fn main() {
             }
             return;
         }
+        other if !COMMANDS.contains(&other) => unknown_command(other),
         _ => {}
     }
 
     // Comandos que necesitan un índice existente.
     let db = resolve_db(&f);
+    let source_arg = f.source.clone();
     // `--source cmd:<nombre>` es el alias de la fuente de un comando: su id real
     // es la ruta absoluta del caché (`jsonl:/…/cmd/<nombre>.cmd.jsonl`).
     if let Some(name) = f.source.as_deref().and_then(|s| s.strip_prefix(command::PREFIX)) {
@@ -720,7 +779,19 @@ fn main() {
     }
 
     let store = chrono_store::Store::open_read(&db).unwrap_or_else(|e| fatal_open(e, &db, &f));
+    if let (Some(s), Some(arg)) = (f.source.as_deref().filter(|s| !s.is_empty()), source_arg.as_deref()) {
+        check_source(&store, s, arg);
+    }
     let window = query::Window::from_flag(f.since.as_deref()).unwrap_or_else(|e| fatal(e));
+    // Una ventana vacía (until antes que since) daba un resultado vacío sin más.
+    if let Ok(u) = query::Window::from_flag(f.until.as_deref()) {
+        if window.since_epoch > 0 && u.since_epoch > 0 && u.since_epoch <= window.since_epoch {
+            fatal(t(
+                format!("--until {:?} is not after --since {:?}: the window is empty", f.until.as_deref().unwrap_or(""), f.since.as_deref().unwrap_or("")),
+                format!("--until {:?} no es posterior a --since {:?}: la ventana está vacía", f.until.as_deref().unwrap_or(""), f.since.as_deref().unwrap_or("")),
+            ));
+        }
+    }
 
     // `--by symbol` cambia el alcance de las consultas de entidades a símbolos
     // (S1); por defecto (o `--by file`) se excluyen los símbolos.
@@ -770,7 +841,7 @@ fn main() {
         "sources" => query::sources(&store),
         "search" => {
             let text = require_pos(&f, "search needs a <text>", "search necesita un <texto>");
-            query::search(&store, &text)
+            query::search(&store, &text, f.limit.as_deref())
         }
         "similar" => {
             let id = require_pos(&f, "similar needs an <id>", "similar necesita un <id>");
@@ -813,6 +884,12 @@ fn main() {
             put(&mut a, "attr", &f.attr);
             put(&mut a, "grep", &f.grep);
             put(&mut a, "kind", &f.kind);
+            // Antes se perdían: `informe --level ERROR` daba el panorama de todo.
+            put(&mut a, "level", &f.level);
+            put(&mut a, "join", &f.join);
+            if f.infer_level {
+                a.insert("infer_level".into(), serde_json::Value::Bool(true));
+            }
             match chrono_mcp::run_tool_text(&store, "informe", &serde_json::Value::Object(a)) {
                 Ok(t) => {
                     println!("{t}");
@@ -855,16 +932,7 @@ fn main() {
             let id = require_pos(&f, "show needs an <id>", "show necesita un <id>");
             query::show(&store, &id, f.entity.as_deref())
         }
-        other => {
-            eprint!(
-                "{}",
-                t(
-                    format!("chrono: unknown command {other:?}\n\n{}", usage()),
-                    format!("chrono: comando desconocido {other:?}\n\n{}", usage()),
-                )
-            );
-            std::process::exit(2);
-        }
+        other => unknown_command(other),
     };
     match out {
         Ok(j) if f.compact => print!("{}", j.compact()),
