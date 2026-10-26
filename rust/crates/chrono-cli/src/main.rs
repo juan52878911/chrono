@@ -84,7 +84,7 @@ Log-native (multi-source). timeline, stats, top, patterns and events share the s
   precede              Episodes of what the filters match (e.g. --grep 'fast shutdown') and what
                        precedes each one (errors/warnings in --window 2m, levels inferred from the
                        text), plus the precursors common to several episodes. --gap 2m splits
-                       episodes; --before-levels FATAL,ERROR narrows the precursors.
+                       episodes; --before-levels FATAL,ERROR narrows the precursors (* = any, even none).
   correlate <id>       Events from OTHER sources within ±Δt of an event (--delta 1h;
                        --kind commit,ci.* keeps only those kinds).
 
@@ -169,7 +169,7 @@ Log-native (multi-fuente). timeline, stats, top, patterns y events comparten fil
   precede              Episodios de lo que casan los filtros (p.ej. --grep 'fast shutdown') y qué
                        precede a cada uno (errores/avisos en --window 2m, con el nivel deducido del
                        texto), más los precursores comunes a varios episodios. --gap 2m separa
-                       episodios; --before-levels FATAL,ERROR acota los precursores.
+                       episodios; --before-levels FATAL,ERROR acota los precursores (* = cualquiera, también sin nivel).
   correlate <id>       Eventos de OTRAS fuentes en ±Δt de un evento (--delta 1h;
                        --kind commit,ci.* se queda solo con esos tipos).
 

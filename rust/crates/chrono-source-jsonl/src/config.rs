@@ -40,7 +40,9 @@ pub const OPTIONS: &[(&str, &str)] = &[
     ("kind", "kind fijo de los eventos (por defecto log)"),
     ("kind_field", "campo del que sale el kind"),
     ("id_field", "campo con el id estable del registro"),
+    ("uid_field", "id global (a|b): el mismo valor en otra línea u otro fichero es el mismo evento"),
     ("links", "enlaces rel=campo separados por comas"),
+    ("where", "solo las líneas con clave=valor o clave=v1|v2 (en la raíz)"),
     ("explode", "ruta a un array: un evento por elemento"),
     ("explode_where", "filtro de explode: clave=valor o clave=v1|v2"),
     ("level_map", "traduce valores del nivel: true=ERROR,false= (vacío = sin nivel)"),
@@ -60,12 +62,18 @@ pub const PRESETS: &[(&str, &[(&str, &str)])] = &[(
     // salvo la primera línea de los errores (redactada como todo el título).
     "claude-sessions",
     &[
+        // Solo los mensajes: las líneas `api-request-blob` repiten la petición
+        // entera a la API (usos y resultados ya contados) y no traen tiempo.
+        ("where", "type=assistant|user"),
         ("explode", "message.content"),
         ("explode_where", "type=tool_use|tool_result"),
         ("time_field", "timestamp"),
         ("kind_field", "type"),
         ("entity_field", "name"),
         ("entity_join", "tool_use_id=id"),
+        // Una sesión reanudada o bifurcada copia el historial en otro fichero:
+        // el mismo `toolu_…` es la misma llamada y cuenta una vez.
+        ("uid_field", "id|tool_use_id"),
         ("message_field", "name"),
         ("error_message_field", "content|content.0.text"),
         ("level_field", "is_error"),
@@ -114,12 +122,14 @@ impl ExplodeSpec {
             .iter()
             .enumerate()
             .filter_map(|(i, v)| v.as_object().map(|m| (i, m)))
-            .filter(|(_, m)| match &self.filter {
-                None => true,
-                Some((key, want)) => path::lookup(m, key).and_then(scalar_to_string).is_some_and(|got| want.contains(&got)),
-            })
+            .filter(|(_, m)| self.filter.as_ref().is_none_or(|f| matches_filter(m, f)))
             .collect()
     }
+}
+
+/// ¿Casa `obj` con el filtro `(clave, valores)`? (`clave` es una ruta).
+pub fn matches_filter(obj: &Map<String, Value>, filter: &(String, Vec<String>)) -> bool {
+    path::lookup(obj, &filter.0).and_then(scalar_to_string).is_some_and(|got| filter.1.contains(&got))
 }
 
 /// Convierte un valor JSON escalar (string/number/bool) a `String`; `None`
@@ -143,6 +153,8 @@ pub struct JsonlOverrides {
     pub entity_field: Option<String>,
     pub actor_field: Option<String>,
     pub explode: Option<ExplodeSpec>,
+    /// `where`: `(clave, valores)`; las líneas cuya raíz no casa no dan eventos.
+    pub line_filter: Option<(String, Vec<String>)>,
     /// `kind` fijo de los eventos (por defecto `log`): `ci.run`, `deploy`… Es lo
     /// que permite a `correlate --kind`/`events --kind` separar fuentes que no
     /// son logs (ejecuciones de CI, despliegues, incidentes).
@@ -152,6 +164,10 @@ pub struct JsonlOverrides {
     /// Campo con el id estable del registro (`databaseId`, `run_id`…). Sin él,
     /// el id es el de siempre (`id`/`_id`/`uuid` o hash de línea+offset).
     pub id_field: Option<String>,
+    /// `uid_field`: alternativas (`a|b`) de un id GLOBAL. Si resuelve, el id del
+    /// evento es `<kind>:<valor>`, sin el fichero: repetido en otro fichero, el
+    /// índice lo guarda una vez.
+    pub uid_field: Vec<String>,
     /// Enlaces `rel=campo` separados por comas (`commit=headSha,url=url`): un
     /// `Link { rel, target: valor del campo }` por cada uno que resuelva. Con
     /// `rel=commit` el evento queda unido al commit (lo siguen `trace` y la
@@ -236,6 +252,9 @@ fn parse_list(s: &str, sep: char) -> Vec<String> {
 pub fn validate_options(cfg: &SourceConfig) -> CoreResult<()> {
     let cfg = &effective_options(cfg)?;
     let explode = option_trimmed(&cfg.options, "explode");
+    if let Some(w) = option_trimmed(&cfg.options, "where").filter(|w| parse_where(w).is_none()) {
+        return Err(CoreError::Other(format!("jsonl: `where` debe ser `clave=valor` o `clave=v1|v2`, no {w:?}")));
+    }
     if let Some(m) = option_trimmed(&cfg.options, "level_map") {
         if m.split(',').any(|p| !p.contains('=') || p.split_once('=').is_some_and(|(k, _)| k.trim().is_empty())) {
             return Err(CoreError::Other(format!("jsonl: `level_map` debe ser `valor=NIVEL,…`, no {m:?}")));
@@ -269,9 +288,11 @@ pub fn overrides_from(cfg: &SourceConfig) -> JsonlOverrides {
         entity_field: override_of(&cfg.options, "entity_field"),
         actor_field: override_of(&cfg.options, "actor_field"),
         explode,
+        line_filter: option_trimmed(&cfg.options, "where").and_then(|w| parse_where(&w)),
         kind: override_of(&cfg.options, "kind"),
         kind_field: override_of(&cfg.options, "kind_field"),
         id_field: override_of(&cfg.options, "id_field"),
+        uid_field: option_trimmed(&cfg.options, "uid_field").map(|s| parse_list(&s, '|')).unwrap_or_default(),
         links: option_trimmed(&cfg.options, "links").map(|s| parse_links(&s)).unwrap_or_default(),
         level_map: option_trimmed(&cfg.options, "level_map").map(|s| parse_pairs(&s)).unwrap_or_default(),
         error_message_field: option_trimmed(&cfg.options, "error_message_field").map(|s| parse_list(&s, '|')).unwrap_or_default(),

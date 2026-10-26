@@ -230,7 +230,7 @@ pub fn tool_defs() -> Vec<Value> {
             with_scope(json!({
                 "gap_secs": json!({"type": "integer", "description": "Hueco máximo entre anclas del mismo episodio (por defecto 120)"}),
                 "window_secs": json!({"type": "integer", "description": "Ventana previa a cada episodio que se examina (por defecto 120)"}),
-                "before_levels": str_prop("Niveles de los precursores (por defecto FATAL,CRITICAL,ERROR,WARNING)"),
+                "before_levels": str_prop("Niveles de los precursores (por defecto FATAL,CRITICAL,ERROR,WARNING; * = cualquiera, también sin nivel)"),
                 "before_entity": str_prop("Solo precursores de esta(s) entidad(es) (opcional)"),
                 "by_origin": json!({"type": "boolean", "description": "Un episodio por contenedor/servicio de origen en vez de mezclarlos (recomendado si hay preflight/sidecars) (por defecto false)"}),
                 "limit": json!({"type": "integer", "description": "Máximo de episodios (por defecto 50)"})

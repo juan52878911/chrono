@@ -751,7 +751,7 @@ fn ingest_source(
         options.entry("preset".to_string()).or_insert_with(|| preset.to_string());
     }
     let source_cfg = SourceConfig { options };
-    // En una fuente glob, los ids llevan delante un hash del fichero: dos ficheros
+    // En una fuente glob, los ids de hash llevan delante un hash del fichero: dos ficheros
     // con la misma línea en el mismo offset darían el mismo id y el segundo
     // evento se perdería (`INSERT OR IGNORE`).
     let group = ctx.group.map(|(id, file)| (id, file, format!("{:08x}", fnv1a32(file.as_bytes()))));
@@ -809,13 +809,20 @@ fn ingest_source(
                 }
                 if let Some((id, file, salt)) = &group {
                     ev.source_id = id.to_string();
-                    ev.id = format!("{salt}.{}", ev.id);
+                    // Solo los ids de hash (sin `:`); uno declarado (`id_field`,
+                    // `uid_field`) ya es estable y puede repetirse a propósito.
+                    if !ev.id.contains(':') {
+                        ev.id = format!("{salt}.{}", ev.id);
+                    }
                     ev.attrs.insert("file".to_string(), file.to_string());
                 }
                 if redact {
                     redacted += chrono_core::redact_event(&mut ev);
                 }
-                w.add_event(&ev)?;
+                if !w.add_event(&ev)? {
+                    // Ya estaba: no cuenta como nuevo ni se reclasifica.
+                    continue;
+                }
                 if classify {
                     let labels = classifier.classify(&ev);
                     w.add_labels(&ev.id, &labels)?;

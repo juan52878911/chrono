@@ -58,7 +58,9 @@ pub struct PrecedeOpts<'a> {
     pub gap_ms: i64,
     /// Ventana previa (ms) que se mira antes del inicio de cada episodio.
     pub window_ms: i64,
-    /// Niveles de lo que se cuenta como precursor (lista con comas).
+    /// Niveles de lo que se cuenta como precursor (lista con comas); `*` =
+    /// cualquiera, también sin nivel (fuentes cuyos pasos no llevan nivel, como
+    /// las tools de una sesión).
     pub levels: &'a str,
     /// Solo precursores de esta(s) entidad(es) (por defecto, todas).
     pub entity: Option<&'a str>,
@@ -154,7 +156,8 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<(Vec<Episode>, Vec<
     episodes.truncate(o.max_episodes);
 
     // 3. Lo que precede a cada uno: niveles pedidos (con el deducido), ventana previa.
-    let pre_scope = EventScope { level: Some(o.levels), entity: o.entity, infer_level: true, ..Default::default() };
+    let level = (o.levels.trim() != "*").then_some(o.levels);
+    let pre_scope = EventScope { level, entity: o.entity, infer_level: true, ..Default::default() };
     let (pf, pextra) = pre_scope.sql(3);
     let level_sql = crate::timeline::level_expr("e", true);
     let pre_sql = format!(

@@ -149,6 +149,9 @@ pub fn line_to_events(
     source_id: &str,
     memo: &mut EntityMemo,
 ) -> Vec<Event> {
+    if ov.line_filter.as_ref().is_some_and(|f| !config::matches_filter(obj, f)) {
+        return Vec::new();
+    }
     match &ov.explode {
         None => {
             let scope = Scope::root_only(obj);
@@ -285,8 +288,9 @@ fn build_event(scope: &Scope<'_>, id: String, raw_line: &str, ov: &JsonlOverride
         })
         .collect();
 
+    let uid = ov.uid_field.iter().map(|f| field_value(scope, f)).find(|v| !v.is_empty());
     Event {
-        id,
+        id: uid.map_or(id, |v| format!("{kind}:{v}")),
         source_id: source_id.to_string(),
         kind,
         at,
@@ -541,11 +545,19 @@ mod tests {
                 ("tool_result", "Bash", "", "tool_result"),
             ]
         );
+        assert_eq!((evs[0].id.as_str(), evs[1].id.as_str(), evs[2].id.as_str()), ("tool_use:toolu_9", "tool_result:toolu_9", "tool_result:toolu_9"));
         assert_eq!(evs[0].links, [Link { rel: "tool_use".into(), target: "toolu_9".into() }]);
         assert_eq!(evs[1].links, [Link { rel: "tool_use".into(), target: "toolu_9".into() }]);
         // Solo las attrs de la lista: ni `content` ni el input de la tool.
         assert_eq!(evs[0].attrs.keys().map(String::as_str).collect::<Vec<_>>(), ["cwd", "id", "sessionId", "type"]);
         assert!(evs.iter().all(|e| !e.attrs.values().any(|v| v.contains("secreto") || v.contains("línea 1"))));
+    }
+
+    #[test]
+    fn where_descarta_las_copias_de_la_peticion() {
+        let blob = r#"{"type":"api-request-blob","hash":"h","message":{"content":[{"type":"tool_use","id":"toolu_9","name":"Bash"}]}}"#;
+        let evs = run(&[USE_LINE, blob], &preset_ov());
+        assert_eq!(evs.len(), 1);
     }
 
     #[test]

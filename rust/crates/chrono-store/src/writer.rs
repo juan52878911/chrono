@@ -66,7 +66,10 @@ impl<'a> Writer<'a> {
     ///
     /// Todas las inserciones usan `INSERT OR IGNORE` / upsert idempotente, así
     /// que reingestar el mismo evento es seguro (no falla ni duplica filas).
-    pub fn add_event(&mut self, ev: &chrono_core::Event) -> Result<()> {
+    /// Devuelve si el evento entró: con un id que ya estaba (re-lectura tras un
+    /// watermark, o un `uid_field` repetido en otro fichero) no se toca nada, ni
+    /// sus touches ni sus links (otra entidad lo contaría dos veces).
+    pub fn add_event(&mut self, ev: &chrono_core::Event) -> Result<bool> {
         let actor_id = self.actor_id(&ev.actor)?;
         let source_ref = self.source_ref(&ev.source_id)?;
 
@@ -88,7 +91,8 @@ impl<'a> Writer<'a> {
         // u64 -> i64 reinterpretando bits (misma convención que el Go: int64(simhash)).
         let simhash = ev.simhash as i64;
 
-        self.tx
+        let inserted = self
+            .tx
             .prepare_cached(
                 "INSERT OR IGNORE INTO events
                     (id, source_ref, kind, at, at_epoch, actor_id, title, body, level,
@@ -110,6 +114,9 @@ impl<'a> Writer<'a> {
                 touches_n,
                 attrs_json,
             ])?;
+        if inserted == 0 {
+            return Ok(false);
+        }
 
         for t in &ev.touches {
             let entity_id = self.entity_id(&t.entity, &t.entity_type)?;
@@ -134,7 +141,7 @@ impl<'a> Writer<'a> {
                 .execute(params![ev.id, l.rel, l.target])?;
         }
 
-        Ok(())
+        Ok(true)
     }
 
     /// Inserta las etiquetas de clasificación de `event_id` (una fila por
