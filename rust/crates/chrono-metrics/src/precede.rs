@@ -45,8 +45,26 @@ pub struct Episode {
 pub struct Common {
     pub level: String,
     pub template: String,
-    /// En cuántos episodios aparece en la ventana previa.
+    /// En cuántos episodios aparece en la ventana previa (de TODOS, no solo
+    /// de los devueltos).
     pub episodes: i64,
+    /// Frecuencia base (P-MSR-3): fracción de las ventanas del mismo tamaño en
+    /// el periodo que contienen la plantilla (con cualquier nivel), desde los
+    /// `rollups` de 60 s. `None` si la plantilla no está en los rollups.
+    pub base_rate: Option<f64>,
+    /// `base_rate × episodios`: en cuántos estaría por azar.
+    pub expected: Option<f64>,
+    /// `(episodes / episodios) / base_rate`: >1, aparece antes más que por azar.
+    pub lift: Option<f64>,
+}
+
+/// Lo que devuelve [`precede`]: los episodios (acotados a `max_episodes`) y
+/// las cifras de TODOS (`episodes_total`, precursores comunes).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Preceded {
+    pub episodes: Vec<Episode>,
+    pub episodes_total: usize,
+    pub common: Vec<Common>,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +82,10 @@ pub struct PrecedeOpts<'a> {
     pub levels: &'a str,
     /// Solo precursores de esta(s) entidad(es) (por defecto, todas).
     pub entity: Option<&'a str>,
+    /// Clave de relación (P-REL-2): los episodios se separan por su valor y
+    /// solo cuentan los precursores con ese mismo valor (la misma sesión, la
+    /// misma traza), además de la ventana.
+    pub join: Option<&'a str>,
     pub max_episodes: usize,
     pub per_episode: usize,
     /// Episodios por ORIGEN (contenedor/servicio) en vez de mezclar orígenes que
@@ -81,6 +103,7 @@ impl Default for PrecedeOpts<'_> {
             window_ms: 120_000,
             levels: "FATAL,CRITICAL,ERROR,WARNING",
             entity: None,
+            join: None,
             max_episodes: 50,
             per_episode: 8,
             by_origin: false,
@@ -112,11 +135,23 @@ fn severity(level: &str) -> u8 {
 }
 
 /// Episodios del ancla y lo que los precede, más los precursores comunes.
-pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<(Vec<Episode>, Vec<Common>)> {
-    // 1. Anclas en orden temporal.
+/// Las cifras (`episodes_total`, «antes de x/N», lift) salen de TODOS los
+/// episodios; `max_episodes` solo acota los que se devuelven.
+pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
+    let join = o.join.map(str::trim).filter(|k| !k.is_empty());
+    if let Some(k) = join {
+        if !crate::relate::valid_key(k) {
+            return Err(format!("precede: clave de relación no válida: {k:?}").into());
+        }
+    }
+    // 1. Anclas en orden temporal (con su valor de la clave, si se pide).
     let (filters, extra) = o.anchor.sql(2);
+    let key_col = match join {
+        Some(k) => format!("(SELECT MIN(kv.value) FROM ({}) kv WHERE kv.rid = e.rid)", crate::relate::key_values_sql(k)),
+        None => "''".to_string(),
+    };
     let sql = format!(
-        "SELECT e.id, e.at, e.at_epoch, {entity} FROM events e
+        "SELECT e.id, e.at, e.at_epoch, {entity}, {key_col} FROM events e
          WHERE e.at_epoch > 0 AND (?1 = 0 OR e.at_epoch >= ?1) {filters}
          ORDER BY e.at_epoch ASC, e.id ASC",
         entity = entity_sql()
@@ -126,15 +161,22 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<(Vec<Episode>, Vec<
         bound.push(p);
     }
     let mut stmt = conn.prepare(&sql)?;
-    let anchors: Vec<(String, String, i64, String)> = stmt
-        .query_map(rusqlite::params_from_iter(bound), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+    let anchors: Vec<(String, String, i64, String, Option<String>)> = stmt
+        .query_map(rusqlite::params_from_iter(bound), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
         .collect::<std::result::Result<_, _>>()?;
 
-    // 2. Episodios por hueco (por origen si se pide; si no, todos juntos).
+    // 2. Episodios por hueco (por valor de la clave o por origen si se pide;
+    // si no, todos juntos). Con clave, un ancla sin ella no forma episodio.
     let mut episodes: Vec<Episode> = Vec::new();
+    let mut keys: Vec<String> = Vec::new();
     let mut open: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for (id, at, epoch, entity) in anchors {
-        let slot = if o.by_origin { open.get(&entity).copied() } else { episodes.len().checked_sub(1) };
+    for (id, at, epoch, entity, key) in anchors {
+        let key = key.unwrap_or_default();
+        if join.is_some() && key.is_empty() {
+            continue;
+        }
+        let group = if join.is_some() { &key } else { &entity };
+        let slot = if join.is_some() || o.by_origin { open.get(group).copied() } else { episodes.len().checked_sub(1) };
         let last = slot.and_then(|i| episodes.get_mut(i));
         match last {
             Some(ep) if epoch - ep.end_epoch <= o.gap_ms => {
@@ -145,7 +187,8 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<(Vec<Episode>, Vec<
                 }
             }
             _ => {
-                open.insert(entity.clone(), episodes.len());
+                open.insert(group.clone(), episodes.len());
+                keys.push(key.clone());
                 episodes.push(Episode {
                     start_at: at,
                     start_epoch: epoch,
@@ -159,28 +202,37 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<(Vec<Episode>, Vec<
             }
         }
     }
-    episodes.sort_by(|a, b| a.start_epoch.cmp(&b.start_epoch).then(a.entity.cmp(&b.entity)));
-    episodes.truncate(o.max_episodes);
+    let mut order: Vec<usize> = (0..episodes.len()).collect();
+    order.sort_by(|&a, &b| episodes[a].start_epoch.cmp(&episodes[b].start_epoch).then(episodes[a].entity.cmp(&episodes[b].entity)));
+    let mut episodes: Vec<(Episode, String)> = order.into_iter().map(|i| (episodes[i].clone(), keys[i].clone())).collect();
+    let episodes_total = episodes.len();
 
     // 3. Lo que precede a cada uno: niveles pedidos (con el deducido), ventana previa.
     let level = (o.levels.trim() != "*").then_some(o.levels);
     let pre_scope = EventScope { level, entity: o.entity, infer_level: true, ..Default::default() };
     let (pf, pextra) = pre_scope.sql(3);
     let level_sql = crate::timeline::level_expr("e", true);
+    let same_key = match join {
+        Some(k) => format!("AND e.rid IN ({})", crate::relate::key_rids_sql(k, &format!("?{}", 3 + pextra.len()), false)),
+        None => String::new(),
+    };
     let pre_sql = format!(
         "SELECT e.id, e.at_epoch, e.title, {level_sql}, {entity} FROM events e
-         WHERE e.at_epoch >= ?1 AND e.at_epoch < ?2 {pf}
+         WHERE e.at_epoch >= ?1 AND e.at_epoch < ?2 {pf} {same_key}
          ORDER BY e.at_epoch ASC, e.id ASC",
         entity = entity_sql()
     );
     let mut pre = conn.prepare(&pre_sql)?;
     let mut common: BTreeMap<(String, String), i64> = BTreeMap::new();
-    for ep in &mut episodes {
+    for (ep, key) in &mut episodes {
         let from = ep.start_epoch - o.window_ms;
         let to = ep.start_epoch;
         let mut b: Vec<&dyn rusqlite::ToSql> = vec![&from, &to];
         for p in &pextra {
             b.push(p);
+        }
+        if join.is_some() {
+            b.push(&*key);
         }
         let rows: Vec<(String, i64, String, String, String)> = pre
             .query_map(rusqlite::params_from_iter(b), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
@@ -222,14 +274,108 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<(Vec<Episode>, Vec<
         list.truncate(o.per_episode);
         ep.preceding = list;
     }
-    let mut commons: Vec<Common> = common
+    let candidates: Vec<((String, String), i64)> = common.into_iter().filter(|(_, n)| *n >= 2 || episodes_total == 1).collect();
+    let templates: Vec<&str> = candidates.iter().map(|((_, t), _)| t.as_str()).collect();
+    let rates = base_rates(conn, &templates, o.window_ms, o.since_epoch, o.anchor.until_epoch)?;
+    let total = episodes_total as f64;
+    let mut commons: Vec<Common> = candidates
         .into_iter()
-        .filter(|(_, n)| *n >= 2 || episodes.len() == 1)
-        .map(|((level, template), episodes)| Common { level, template, episodes })
+        .map(|((level, template), n)| {
+            let base_rate = rates.get(&template).copied().filter(|r| *r > 0.0);
+            let expected = base_rate.map(|r| r * total);
+            let lift = base_rate.map(|r| (n as f64 / total) / r);
+            Common { level, template, episodes: n, base_rate, expected, lift }
+        })
         .collect();
-    commons.sort_by(|a, b| b.episodes.cmp(&a.episodes).then(severity(&a.level).cmp(&severity(&b.level))).then(a.template.cmp(&b.template)));
+    // Primero lo que más episodios explica POR ENCIMA del azar: una plantilla
+    // que sale cada minuto «precede» a todo y no aporta (exceso ≈ 0). Sin
+    // frecuencia base, el exceso es el número de episodios.
+    let excess = |c: &Common| c.episodes as f64 - c.expected.unwrap_or(0.0);
+    commons.sort_by(|a, b| {
+        excess(b)
+            .partial_cmp(&excess(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.episodes.cmp(&a.episodes))
+            .then(severity(&a.level).cmp(&severity(&b.level)))
+            .then(a.template.cmp(&b.template))
+    });
     commons.truncate(10);
-    Ok((episodes, commons))
+    let episodes: Vec<Episode> = episodes.into_iter().take(o.max_episodes).map(|(e, _)| e).collect();
+    Ok(Preceded { episodes, episodes_total, common: commons })
+}
+
+/// Frecuencia base de cada plantilla: la fracción de las ventanas de
+/// `window_ms` (su final recorriendo el periodo) que contienen al menos un
+/// evento con ella, desde `rollups`. Un bucket ocupado `[b, b+bucket)` cubre
+/// los finales de ventana en `[b, b+bucket+window)`; se unen los intervalos.
+/// O(buckets de esas plantillas), sin tocar `events`.
+fn base_rates(conn: &Connection, templates: &[&str], window_ms: i64, since: i64, until: i64) -> Result<HashMap<String, f64>> {
+    let mut out = HashMap::new();
+    if templates.is_empty() {
+        return Ok(out);
+    }
+    let bucket: i64 = conn
+        .query_row("SELECT value FROM meta WHERE key = 'rollup_bucket_ms'", [], |r| r.get::<_, String>(0))
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60_000);
+    let (lo, hi): (Option<i64>, Option<i64>) =
+        conn.query_row("SELECT MIN(at_epoch), MAX(at_epoch) FROM events WHERE at_epoch > 0", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let (Some(mut lo), Some(mut hi)) = (lo, hi) else { return Ok(out) };
+    if since > 0 {
+        lo = lo.max(since);
+    }
+    if until > 0 {
+        hi = hi.min(until);
+    }
+    if hi <= lo {
+        return Ok(out);
+    }
+    let wanted: std::collections::HashSet<&str> = templates.iter().copied().collect();
+    let mut ids: HashMap<i64, String> = HashMap::new();
+    let mut stmt = conn.prepare("SELECT id, template FROM templates")?;
+    for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
+        let (id, t) = row?;
+        if wanted.contains(t.as_str()) {
+            ids.insert(id, t);
+        }
+    }
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    let mut buckets: HashMap<&str, Vec<i64>> = HashMap::new();
+    let mut stmt = conn.prepare("SELECT template_id, bucket_epoch FROM rollups WHERE bucket_epoch > 0 AND bucket_epoch < ?1 AND bucket_epoch + ?2 + ?3 > ?4")?;
+    for row in stmt.query_map(rusqlite::params![hi, bucket, window_ms, lo], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
+        let (tid, b) = row?;
+        if let Some(t) = ids.get(&tid) {
+            buckets.entry(t.as_str()).or_default().push(b);
+        }
+    }
+    let span = (hi - lo) as f64;
+    for (t, mut bs) in buckets {
+        bs.sort_unstable();
+        bs.dedup();
+        let (mut covered, mut cur): (i64, Option<(i64, i64)>) = (0, None);
+        for b in bs {
+            let (s, e) = (b.max(lo), (b + bucket + window_ms).min(hi));
+            if e <= s {
+                continue;
+            }
+            cur = match cur {
+                Some((cs, ce)) if s <= ce => Some((cs, ce.max(e))),
+                Some((cs, ce)) => {
+                    covered += ce - cs;
+                    Some((s, e))
+                }
+                None => Some((s, e)),
+            };
+        }
+        if let Some((cs, ce)) = cur {
+            covered += ce - cs;
+        }
+        out.insert(t.to_string(), (covered as f64 / span).min(1.0));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -275,7 +421,8 @@ mod tests {
             w.commit().unwrap();
         }
         let o = PrecedeOpts { anchor: EventScope { grep: Some("fast shutdown"), ..Default::default() }, ..Default::default() };
-        let (eps, common) = precede(store.conn(), &o).unwrap();
+        let r = precede(store.conn(), &o).unwrap();
+        let (eps, common) = (r.episodes, r.common);
         assert_eq!(eps.len(), 2, "{eps:?}");
         assert_eq!(eps[0].anchors, 2);
         assert_eq!(eps[0].preceding[0].template, "ERROR: catalog version mismatch");
@@ -283,6 +430,80 @@ mod tests {
         assert_eq!(eps[1].preceding.len(), 2);
         assert_eq!(common.len(), 1, "solo el mismatch está en los dos: {common:?}");
         assert_eq!(common[0].episodes, 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn temp_store(tag: &str) -> (PathBuf, Store) {
+        let path: PathBuf = std::env::temp_dir().join(format!("chrono-precede-{tag}-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).unwrap();
+        (path, store)
+    }
+
+    #[test]
+    fn las_cifras_salen_de_todos_los_episodios_y_el_ubicuo_baja() {
+        let (path, mut store) = temp_store("lift");
+        {
+            let mut w = store.writer().unwrap();
+            // 30 caídas cada hora; 20 min antes de cada una, un `disk full` (raro
+            // fuera de ahí); y un `heartbeat lost` cada 5 min todo el periodo (sale
+            // antes de casi todo, por azar).
+            for i in 0..30i64 {
+                let t = 3600 * (i + 1);
+                w.add_event(&ev(&format!("a{i}"), t, "FATAL", "db", "FATAL: shutting down")).unwrap();
+                w.add_event(&ev(&format!("d{i}"), t - 20, "ERROR", "disk", "ERROR: disk full")).unwrap();
+            }
+            for k in 0..(31 * 12) {
+                w.add_event(&ev(&format!("h{k}"), 300 * k + 7, "WARNING", "net", "WARNING: heartbeat lost")).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        store.build_rollups(60_000).unwrap();
+        store.set_meta("rollup_bucket_ms", "60000").unwrap();
+        let o = PrecedeOpts {
+            anchor: EventScope { level: Some("FATAL"), ..Default::default() },
+            window_ms: 600_000,
+            max_episodes: 5,
+            ..Default::default()
+        };
+        let r = precede(store.conn(), &o).unwrap();
+        assert_eq!(r.episodes.len(), 5);
+        assert_eq!(r.episodes_total, 30, "el total no se recorta con max_episodes");
+        let by = |t: &str| r.common.iter().find(|c| c.template.contains(t)).unwrap_or_else(|| panic!("{t}: {:?}", r.common));
+        let (disk, hb) = (by("disk full"), by("heartbeat"));
+        assert_eq!(disk.episodes, 30);
+        assert_eq!(hb.episodes, 30);
+        assert!(hb.base_rate.unwrap() > 0.9, "{hb:?}");
+        assert!(disk.lift.unwrap() > 3.0 * hb.lift.unwrap(), "{disk:?} {hb:?}");
+        assert_eq!(r.common[0].template, disk.template, "el ubicuo deja de salir primero: {:?}", r.common);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn join_separa_episodios_y_precursores_por_clave() {
+        let (path, mut store) = temp_store("join");
+        {
+            let mut w = store.writer().unwrap();
+            w.set_dims(vec!["sesion".into()]);
+            let mut e = |id: &str, secs, level: &str, title: &str, ses: &str| {
+                let mut x = ev(id, secs, level, "tool", title);
+                x.attrs.insert("sesion".into(), ses.into());
+                w.add_event(&x).unwrap();
+            };
+            // Dos sesiones fallan a la vez; solo la A tuvo antes un `permiso denegado`.
+            e("pa", 100, "WARNING", "WARNING: permiso denegado", "A");
+            e("fa", 110, "ERROR", "Exit code 1", "A");
+            e("fb", 111, "ERROR", "Exit code 1", "B");
+            w.commit().unwrap();
+        }
+        let base = PrecedeOpts { anchor: EventScope { grep: Some("Exit code"), ..Default::default() }, ..Default::default() };
+        let r = precede(store.conn(), &base).unwrap();
+        assert_eq!(r.episodes_total, 1, "sin clave, las dos caídas son un episodio");
+        let r = precede(store.conn(), &PrecedeOpts { join: Some("sesion"), ..base.clone() }).unwrap();
+        assert_eq!(r.episodes_total, 2, "con clave, uno por sesión");
+        let pre: Vec<usize> = r.episodes.iter().map(|e| e.preceding.len()).collect();
+        assert_eq!(pre, [1, 0], "el aviso de A no precede a B: {:?}", r.episodes);
+        assert!(precede(store.conn(), &PrecedeOpts { join: Some("a b"), ..base }).is_err());
         let _ = std::fs::remove_file(&path);
     }
 }

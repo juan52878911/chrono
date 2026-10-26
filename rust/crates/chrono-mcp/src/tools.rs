@@ -375,11 +375,13 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
                 entity: args.get("before_entity").and_then(Value::as_str).filter(|s| !s.is_empty()),
                 max_episodes: arg_i64(args, "limit", 50).max(1) as usize,
                 by_origin: args.get("by_origin").and_then(Value::as_bool).unwrap_or(false),
+                join: join_key(args),
                 ..Default::default()
             };
-            let (eps, common) = chrono_metrics::precede(conn, &o)?;
-            let n = eps.len();
-            let episodes: Vec<Value> = eps
+            let r = chrono_metrics::precede(conn, &o)?;
+            let n = r.episodes_total;
+            let episodes: Vec<Value> = r
+                .episodes
                 .iter()
                 .map(|e| {
                     let pre: Vec<Value> = e
@@ -390,11 +392,8 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
                     json!({"start": e.start_at, "anchors": e.anchors, "origins": e.origins, "first_id": e.first_id, "preceding": pre})
                 })
                 .collect();
-            let commons: Vec<Value> = common
-                .iter()
-                .map(|c| json!({"before_episodes": format!("{}/{}", c.episodes, n), "level": c.level, "template": c.template}))
-                .collect();
-            json!({"episodes_total": n, "common_precursors": commons, "episodes": episodes})
+            let commons: Vec<Value> = r.common.iter().map(|c| common_json(c, n)).collect();
+            json!({"episodes_total": n, "episodes_returned": r.episodes.len(), "common_precursors": commons, "episodes": episodes})
         }
         "stats" => {
             let attr = arg_str(args, "attr")?;
@@ -495,6 +494,21 @@ fn arg_i64(args: &Value, key: &str, default: i64) -> i64 {
 
 /// Los filtros comunes de `args` (ver [`with_scope`]). `since` va aparte: cada
 /// consulta lo recibe como `since_epoch`.
+/// La clave de `join` (`K=v` → `K`) para separar episodios en `precede`.
+pub(crate) fn join_key(args: &Value) -> Option<&str> {
+    let j = args.get("join").and_then(Value::as_str)?.trim();
+    let k = j.split(['=', ':']).next().unwrap_or("").trim();
+    (!k.is_empty()).then_some(k)
+}
+
+/// Un precursor común: «antes de x/N» de todos los episodios, con lo esperado
+/// por azar y el lift (P-MSR-3).
+pub(crate) fn common_json(c: &chrono_metrics::Common, total: usize) -> Value {
+    let r2 = |x: f64| (x * 100.0).round() / 100.0;
+    json!({"before_episodes": format!("{}/{}", c.episodes, total), "level": c.level, "template": c.template,
+           "expected": c.expected.map(|x| (x * 10.0).round() / 10.0), "lift": c.lift.map(r2)})
+}
+
 pub(crate) fn scope_from(args: &Value) -> chrono_metrics::EventScope<'_> {
     let s = |k: &str| args.get(k).and_then(Value::as_str).filter(|v| !v.trim().is_empty());
     chrono_metrics::EventScope {

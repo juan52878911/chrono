@@ -671,10 +671,13 @@ pub fn precede(
         window_ms: dur(window, "window")?,
         levels: before_levels.unwrap_or("FATAL,CRITICAL,ERROR,WARNING"),
         max_episodes: max,
+        join: scope.join.and_then(|j| j.split(['=', ':']).next()).map(str::trim).filter(|k| !k.is_empty()),
         ..Default::default()
     };
-    let (eps, common) = chrono_metrics::precede(store.conn(), &o)?;
-    let episodes: Vec<Json> = eps
+    let r = chrono_metrics::precede(store.conn(), &o)?;
+    let total = r.episodes_total;
+    let episodes: Vec<Json> = r
+        .episodes
         .iter()
         .map(|e| {
             let pre: Vec<Json> = e
@@ -697,18 +700,22 @@ pub fn precede(
                 .set("preceding", Json::Arr(pre))
         })
         .collect();
-    let commons: Vec<Json> = common
+    let opt = |v: Option<f64>, scale: f64| v.map_or(Json::Null, |x| Json::Float((x * scale).round() / scale));
+    let commons: Vec<Json> = r
+        .common
         .iter()
         .map(|c| {
             Json::obj()
-                .set("before_episodes", Json::str(&format!("{}/{}", c.episodes, eps.len())))
+                .set("before_episodes", Json::str(&format!("{}/{}", c.episodes, total)))
                 .set("level", Json::str(&c.level))
                 .set("template", Json::str(&c.template))
+                .set("expected", opt(c.expected, 10.0))
+                .set("lift", opt(c.lift, 100.0))
         })
         .collect();
     let n = episodes.len();
     let result = Json::obj()
-        .set("episodes_total", Json::Int(n as i64))
+        .set("episodes_total", Json::Int(total as i64))
         .set("gap_ms", Json::Int(o.gap_ms))
         .set("window_ms", Json::Int(o.window_ms))
         .set("common_precursors", Json::Arr(commons))
