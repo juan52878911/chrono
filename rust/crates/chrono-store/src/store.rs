@@ -276,6 +276,9 @@ impl Store {
             tx.execute(&format!("DELETE FROM {child} WHERE event_rid IN (SELECT rid FROM del_rids)"), [])?;
         }
         tx.execute("DELETE FROM events WHERE rid IN (SELECT rid FROM del_rids)", [])?;
+        // Los rollups aún cuentan lo borrado: sin watermark, nadie los da por al
+        // día (`dim_rollups`, `timeline`) y el siguiente build los rehace enteros.
+        tx.execute("DELETE FROM meta WHERE key = 'rollup_max_rowid'", [])?;
         tx.commit()?;
         Ok(())
     }
@@ -417,11 +420,11 @@ impl Store {
         if bucket_ms <= 0 {
             return Err("build_rollups: bucket_ms debe ser > 0".into());
         }
-        let since_rowid: i64 = if reset {
-            0
-        } else {
-            self.meta("rollup_max_rowid")?.and_then(|v| v.parse().ok()).unwrap_or(0)
-        };
+        // Incremental sin watermark (nunca construidos, o eventos borrados
+        // después): sumar desde 0 sobre lo que haya contaría dos veces.
+        let wm: Option<i64> = self.meta("rollup_max_rowid")?.and_then(|v| v.parse().ok());
+        let reset = reset || wm.is_none();
+        let since_rowid = if reset { 0 } else { wm.unwrap_or(0) };
         let drb = crate::DIM_ROLLUP_BUCKET_MS;
 
         // Fase 1: escanear eventos (solo el delta si no es reset) y agregar en

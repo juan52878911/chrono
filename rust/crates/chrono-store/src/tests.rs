@@ -391,3 +391,29 @@ fn open_read_usa_la_cache_pequena_y_sin_mmap() {
     let w = Store::open(db.path()).unwrap();
     assert_eq!(w.conn().query_row("PRAGMA cache_size", [], |r| r.get::<_, i64>(0)).unwrap(), -262144);
 }
+
+#[test]
+fn borrar_eventos_invalida_los_rollups_y_el_incremental_no_suma_dos_veces() {
+    let db = TempDb::new("rollups-borrado");
+    let mut store = Store::open(db.path()).unwrap();
+    let log = |id: &str, source: &str| Event { source_id: source.to_string(), kind: "log".to_string(), level: "ERROR".to_string(), ..sample_event(id, &["svc"], "") };
+    {
+        let mut w = store.writer().unwrap();
+        for (id, src) in [("a1", "jsonl:/a"), ("b1", "jsonl:/b"), ("a2", "jsonl:/a")] {
+            w.add_event(&log(id, src)).unwrap();
+        }
+        w.commit().unwrap();
+    }
+    store.build_rollups(60_000).unwrap();
+    let total = |s: &Store| -> (i64, i64) {
+        s.conn().query_row("SELECT (SELECT SUM(count) FROM rollups), (SELECT SUM(count) FROM dim_rollups)", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+    };
+    assert_eq!(total(&store), (3, 3));
+    // Borrar una fuente deja los rollups sin watermark (nadie los da por al día)…
+    store.delete_source_events("jsonl:/b").unwrap();
+    assert_eq!(store.meta("rollup_max_rowid").unwrap(), None);
+    // …y un build incremental sin watermark reconstruye en vez de sumar encima.
+    store.build_rollups_sync(60_000).unwrap();
+    assert_eq!(total(&store), (2, 2));
+    assert_eq!(store.meta("rollup_max_rowid").unwrap().as_deref(), Some("3"));
+}
