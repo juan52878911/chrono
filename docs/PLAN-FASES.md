@@ -35,8 +35,9 @@ nuevas. Detalle en la decisión 30 de `DECISIONS.md`.
   de Bash (60 s, `before_levels=*`): 0.5.0 decía 50 episodios y «43/50»; ahora **1 760** episodios, Bash 1 594/1 760
   (lift 5,2) en 0,52 s; con `--join sessionId`, 2 012 episodios (uno por sesión) en 2,05 s.
 - **`entity_via=tool_use`** sustituye a `entity_join` en `claude-sessions`: el resultado toma la tool de su uso por el
-  link en el índice. Fallos por tool idénticos a 0.5.0 (Bash 3 784, Edit 186, Read 83…), y ahora también con el `sync`
-  cortado entre uso y resultado o con los dos en ficheros distintos (tests).
+  link en el índice, con una segunda pasada al acabar la ingesta para el resultado leído antes que su uso (sobre lo que
+  aún no cuentan los rollups). Fallos por tool idénticos a 0.5.0 (Bash 3 784, Edit 186, Read 83…; 0 en `unknown`), y
+  ahora también con el `sync` cortado entre uso y resultado, en ficheros distintos o en orden inverso (tests).
 - **Sesiones ↔ git** (índice con este repo y las sesiones; relación `ruta`: links `file` de la sesión sin el prefijo del
   repo o del worktree ↔ ficheros del commit): 10 sesiones editaron (Edit/Write) ficheros de chrono, 9 con algún fichero
   que entra en un commit y 1 sin ninguno; 7 de 150 rutas editadas nunca se commitearon (`gaps`, 1,4 s). `correlate`
@@ -56,10 +57,23 @@ nuevas. Detalle en la decisión 30 de `DECISIONS.md`.
   destaparon 3 fallos reales (`field: id` con prefijo de fichero, `K=pre*` con `LIKE`: `_` comodín y sin distinguir
   mayúsculas).
 
+- Auditorías (`auditor-senales`, `auditor-silencios`) sobre el diff; corregido: `tail` escribía una relación nueva
+  en `source_dims` y el `sync` siguiente ya no reindexaba (ahora `tail` se salta la fuente y avisa); el lift con
+  rollups atrasados salía inflado y con `--join` no correspondía a la población (ahora `null` en los dos casos);
+  `gaps` aplicaba `--since` al lado `to` y una fuente mal escrita daba «todo es hueco» (ahora error); el resultado leído
+  antes que su uso; tests que pasaban con el código viejo (orden del lift, prefijo `_`, «sin cambios no reindexa») y
+  un test MCP que ejecuta `gaps`, `correlate via`, `precede` con tope y `events join`.
+
 Sin verificar o pendiente:
-- La frecuencia base es temporal sobre todo el periodo: en fuentes a ráfagas (sesiones) casi todo sale con lift > 1;
-  con `--join` el lift es conservador (la base no se condiciona a la clave). Mejor base: por actividad o por clave.
-- `gaps` no mira el orden (un commit anterior a la edición también cubre) ni admite espacios en `grep=` de un lado.
+- La frecuencia base es temporal sobre todo el periodo: en fuentes a ráfagas (sesiones) casi todo sale con lift > 1.
+  Con `--join` no hay lift (falta una base por clave).
+- `gaps` no mira el orden (un commit anterior a la edición también cubre), ni admite espacios en `grep=` de un lado,
+  ni `--until`; un evento de `from` sin valor de `--by` no es unidad (sin aviso).
+- `precede --join` agrupa un ancla con varios valores por el menor y descarta sin contar las anclas sin clave.
+- `--join` con una clave que no existe devuelve vacío sin avisar (`gaps`, `--via` y `precede` sí dan error).
+- Activar `entity_via` a mano en una fuente ya indexada no reindexa; un resultado ya agregado en rollups cuyo uso llega
+  en un `sync` posterior sigue en `unknown`. La migración v6→v7 de dos procesos a la vez: el segundo falla (con error).
+- `Pattern` hace vuelta atrás sin memo: un patrón como `.*.*.*x` sobre un título largo es polinómico.
 - `informe` paga +1,1 s por contar todos los episodios: un solo barrido ordenado en vez de una consulta por episodio.
 - `token_budget.truncated` es `returned >= max`: con exactamente `limit` unidades dice truncado sin estarlo (venía de antes).
 
