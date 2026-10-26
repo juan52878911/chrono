@@ -96,6 +96,8 @@ fn attr_top_sql(scope: &crate::EventScope, since_epoch: i64) -> (String, Vec<Str
          )
          WHERE value IS NOT NULL AND value != ''
          GROUP BY value
+         -- Un valor de dim_values sin eventos (su fuente se borró) no cuenta.
+         HAVING count > 0
          ORDER BY count DESC, value ASC
          LIMIT ?3"
     );
@@ -616,5 +618,12 @@ mod tests_p3 {
         // Cuenta por valor sobre la clave primaria, y events solo para las fuentes de attr_keys.
         assert!(p.contains("CORRELATED SCALAR SUBQUERY") && p.contains("SEARCH d USING PRIMARY KEY"), "{p}");
         assert!(p.contains("SEARCH attr_keys"), "{p}");
+        // Borrada la fuente, sus valores siguen en dim_values pero no salen con cuenta 0.
+        with_dims.delete_source_events("jsonl:/a").unwrap();
+        let t = top_filtered(with_dims.conn(), "attr:dur", 0, &TopFilter::default(), 20).unwrap();
+        assert!(t.iter().all(|v| v.count > 0) && t.iter().map(|v| v.count).sum::<i64>() == 60, "solo los 60 de b: {t:?}");
+        with_dims.delete_source_events("jsonl:/b").unwrap();
+        let t = top_filtered(with_dims.conn(), "attr:dur", 0, &TopFilter::default(), 20).unwrap();
+        assert!(t.is_empty(), "{t:?}");
     }
 }

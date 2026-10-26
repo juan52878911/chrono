@@ -291,11 +291,17 @@ fn build_event(scope: &Scope<'_>, id: String, raw_line: &str, ov: &JsonlOverride
     let uid = ov.uid_field.iter().map(|f| field_value(scope, f)).find(|v| !v.is_empty());
     // Lo que ya va en una columna (tiempo, título, nivel, entidad, kind, id) no
     // se repite en `attrs` (P-ESC-2). El actor sí se queda: suele ser el host.
+    // Se quedan: el tiempo que no se pudo leer, el mensaje si el título salió
+    // de otro campo, y lo que el usuario pidió por nombre en `attrs`.
     let mut attrs = if ov.attrs.is_empty() { scalar_attrs(scope) } else { listed_attrs(scope, &ov.attrs) };
-    let promoted = [&time_field, &message_field, &level_field, &entity_field];
-    let declared = ov.kind_field.iter().chain(&ov.id_field).chain(&ov.uid_field);
-    for k in promoted.into_iter().chain(declared) {
-        attrs.remove(k.as_str());
+    let time_kept = time_value.is_none();
+    let message_kept = title != field_value(scope, &message_field);
+    let promoted = [(&time_field, time_kept), (&message_field, message_kept), (&level_field, false), (&entity_field, false)];
+    let declared = ov.kind_field.iter().chain(&ov.id_field).chain(&ov.uid_field).map(|k| (k, false));
+    for (k, keep) in promoted.into_iter().chain(declared) {
+        if !keep && !ov.attrs.iter().any(|a| a == k) {
+            attrs.remove(k.as_str());
+        }
     }
     Event {
         id: uid.map_or(id, |v| format!("{kind}:{v}")),
@@ -604,5 +610,17 @@ mod tests {
         }
         assert_eq!(m.map.len(), JOIN_MEMORY);
         assert!(!m.map.contains_key("k0") && m.map.contains_key(&format!("k{}", JOIN_MEMORY + 9)));
+    }
+
+    #[test]
+    fn attrs_conserva_el_tiempo_ilegible_y_lo_pedido_por_nombre() {
+        let raw = r#"{"ts":"ayer a las 3","msg":"hola","level":"Notice","service":"api"}"#;
+        let sample = obj(serde_json::from_str(raw).unwrap());
+        let ev = line_to_event(&sample, raw, 0, &ov_with(&[]), "jsonl:/tmp/a.log");
+        assert_eq!(ev.at_epoch, 0);
+        assert_eq!(ev.attrs.get("ts").map(String::as_str), Some("ayer a las 3"), "sin tiempo, el valor crudo se queda");
+        assert!(!ev.attrs.contains_key("msg") && !ev.attrs.contains_key("service"));
+        let ev = line_to_event(&sample, raw, 0, &ov_with(&[("attrs", "level,service")]), "jsonl:/tmp/a.log");
+        assert_eq!(ev.attrs.keys().map(String::as_str).collect::<Vec<_>>(), ["level", "service"], "lo pedido en attrs se queda");
     }
 }

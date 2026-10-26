@@ -294,7 +294,7 @@ mod tests {
             EventScope { source: Some("jsonl:/b"), ..Default::default() },
             EventScope { entity: Some("svc-1,svc-3"), level: Some("ERROR"), ..Default::default() },
         ];
-        let mut out = Vec::new();
+        let mut out = vec![format!("sources {:?}", crate::sources(conn).unwrap())];
         for (since, until) in windows {
             for sc in &scopes {
                 let sc = EventScope { until_epoch: until, ..sc.clone() };
@@ -338,7 +338,11 @@ mod tests {
                 let kind = if i % 4 == 0 { "tool_use" } else { "log" };
                 let level = levels[(i % 6) as usize];
                 // Sin tiempo, uno de cada 37; el resto repartido en ~2,5 buckets de 10 min.
-                let at = if i % 37 == 0 { 0 } else { 1 + i * 4_321 };
+                let at = match i {
+                    _ if i % 37 == 0 => 0,
+                    11 => -700_000,
+                    _ => 1 + i * 4_321,
+                };
                 let title = if level.is_empty() && i % 2 == 0 { format!("FATAL: disk {i} full") } else { format!("request {i} failed with {}", i % 5) };
                 let svc = format!("svc-{}", i % 4);
                 let ents: Vec<&str> = match i % 50 {
