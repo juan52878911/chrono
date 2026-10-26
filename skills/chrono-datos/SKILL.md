@@ -21,6 +21,8 @@ Antes de contar con otra herramienta, mira qué hay indexado:
 
 Si la ventana que te piden está dentro, las cifras salen de chrono (sección 2). Si no está,
 cárgalo (sección 1) o, si no puedes, dilo y usa la otra herramienta solo para leer detalle.
+Una fuente con `sync_error` no se pudo leer en el último `sync`: sus cifras pueden ir atrasadas (dilo).
+Si chrono responde que el índice es de otro esquema o que un reindex no terminó: `chrono reindex`.
 
 ## 1. Meterlo en el índice
 
@@ -30,7 +32,7 @@ cárgalo (sección 1) o, si no puedes, dilo y usa la otra herramienta solo para 
 - **Fichero**: `chrono add <fichero>`. Detecta JSONL/NDJSON, CSV, syslog/nginx y texto
   (`--as jsonl|csv|textlog|template` para forzarlo).
 - **Muchos ficheros**: `chrono add '<dir>/**/*.jsonl' --as jsonl --name <alias>` (entre comillas) es UNA
-  fuente; `sync` solo relee los ficheros nuevos o que crecieron, y `--source <alias>` filtra.
+  fuente; `sync` solo relee los ficheros nuevos o cambiados, y `--source <alias>` filtra.
   Sesiones de Claude Code: `chrono add '~/.claude/projects/**/*.jsonl' --as jsonl --name claude
   --preset claude-sessions` (una tool = un evento; entidad = la tool, ERROR si falló; sin el input
   ni el contenido, salvo la primera línea de los errores). Qué precede a un fallo:
@@ -49,7 +51,8 @@ cárgalo (sección 1) o, si no puedes, dilo y usa la otra herramienta solo para 
   `time_field`, `message_field`, `level_field`, `entity_field` (el servicio), `kind`, `id_field`,
   `links` (`commit=sha`), `explode`, `level_map` (`true=ERROR`), `where`, `attrs`, `dims` (attrs por los
   que se agrupa o filtra a menudo, p. ej. `host,container`: indexadas). `chrono config check`
-  valida `.chrono/config.json` y dice qué clave falla y por qué.
+  valida `.chrono/config.json` y dice qué clave falla y por qué. Cambiar dims u opciones reindexa la
+  fuente en el siguiente `sync`; una dim vale sin prefijo en `top` (`top host` = `top attr:host`).
 
 ## 2. Preguntar
 
@@ -78,6 +81,13 @@ En el CLI son `--since`, `--until`, `--level`… y siempre `--compact`.
 
 Patrones de trabajo:
 - **Cifras**: siempre de `top`/`patterns`/`timeline`, nunca contando líneas de `events` o de Loki.
+- **Vacíos con explicación**: lee `hints` (o las líneas `⚠` de la cabecera MCP) antes de concluir «no hay»:
+  dicen si la attr o el nivel no existen, si `stats` no tiene valores numéricos o si faltan eventos sin tiempo.
+- **`precede`**: `lift` > 1 es que el precursor aparece antes más de lo esperado en las ventanas con
+  actividad de su fuente (`active_episodes`); cerca de 1 o menos es ruido de fondo, aunque salga en muchos
+  episodios. Con `join` no hay lift. `anchors_without_key`/`anchors_without_time` dicen qué no formó episodio.
+- **`gaps`**: `missing` es el hueco; `from_without_key` (sin valor de la clave) y `units_without_time` (sin
+  tiempo para ordenar) quedan fuera de las dos cuentas: cítalos aparte si no son 0.
 - **Causa de una excepción**: `patterns` o `events` con level=ERROR para ubicarla, y después
   `events` del mismo servicio desde ese instante para leer la traza hasta la última línea
   (`AttributeError: …`) y la petición que falló (`DELETE /api/… 500`).
