@@ -172,7 +172,6 @@ const PIEZAS: &[&str] = &[
 ];
 
 #[test]
-#[ignore = "PEND"]
 fn templatize_idempotente_y_sin_panic() {
     let mut rng = Rng(0x5eed_0002);
     for _ in 0..30_000 {
