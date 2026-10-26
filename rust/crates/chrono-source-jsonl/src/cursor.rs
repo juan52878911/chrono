@@ -150,6 +150,15 @@ impl JsonlCursor {
         if n == 0 {
             return Ok(None);
         }
+        // Final sin `\n` que aún no es un objeto JSON: el escritor está a
+        // mitad de línea. No se consume (el watermark queda delante) y se
+        // relee entera en el sync siguiente; antes se saltaba y su resto
+        // llegaba suelto y se descartaba: la línea se perdía. Un final sin
+        // `\n` que ya es JSON completo sí entra (ficheros sin salto final).
+        if buf.last() != Some(&b'\n') && !serde_json::from_slice::<Value>(&buf).is_ok_and(|v| v.is_object()) {
+            self.reader.seek(SeekFrom::Start(self.bytes_read))?;
+            return Ok(None);
+        }
         self.bytes_read += n as u64;
         if buf.last() == Some(&b'\n') {
             buf.pop();
