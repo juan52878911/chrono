@@ -653,10 +653,30 @@ impl Store {
 /// v6 → v7: `links(event_rid, rel, target)` pasa a `link_targets` + `event_links`
 /// (cada target una vez, unido por entero) y `links` queda como vista. Es la
 /// única diferencia entre las dos versiones: no hace falta reindexar.
+///
+/// Dos procesos que abren a la vez el mismo índice v6 (los hooks de varios
+/// worktrees) leen los dos `6`: el segundo esperaba al primero en `BEGIN
+/// IMMEDIATE` y luego fallaba renombrando una `links` que ya era vista. Ahora la
+/// versión se relee dentro de la transacción (si otro ya migró, no hay nada que
+/// hacer) y la espera no corta a los 5 s del `busy_timeout`: copiar los links de
+/// un índice grande tarda más.
 fn migrate_v6_links(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "BEGIN IMMEDIATE;
-         ALTER TABLE links RENAME TO links_v6;
+    conn.busy_timeout(std::time::Duration::from_secs(600))?;
+    let r = migrate_v6_links_locked(conn);
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    r
+}
+
+fn migrate_v6_links_locked(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let version: Option<String> =
+        conn.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).optional()?;
+    if version.as_deref() != Some("6") {
+        conn.execute_batch("COMMIT")?;
+        return Ok(());
+    }
+    let r = conn.execute_batch(
+        "ALTER TABLE links RENAME TO links_v6;
          CREATE TABLE link_targets (
              id     INTEGER PRIMARY KEY,
              rel    TEXT NOT NULL,
@@ -679,8 +699,11 @@ fn migrate_v6_links(conn: &Connection) -> Result<()> {
          CREATE INDEX idx_link_targets_target ON link_targets(target);
          UPDATE meta SET value = '7' WHERE key = 'schema_version';
          COMMIT;",
-    )?;
-    Ok(())
+    );
+    if r.is_err() {
+        let _ = conn.execute_batch("ROLLBACK");
+    }
+    Ok(r?)
 }
 
 fn table_exists(conn: &Connection, name: &str) -> Result<bool> {

@@ -449,3 +449,40 @@ fn un_indice_v6_migra_sus_links_a_targets_internados() {
     // Reabrir no vuelve a migrar.
     Store::open(db.path()).unwrap();
 }
+
+/// Varios procesos (aquí hilos con su propia conexión) abren a la vez el mismo
+/// índice v6: uno migra y los demás esperan y siguen, sin error.
+#[test]
+fn la_migracion_v6_con_aperturas_simultaneas_no_falla() {
+    let db = TempDb::new("v6-a-la-vez");
+    {
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO meta VALUES ('schema_version', '6');
+             CREATE TABLE links(event_rid INTEGER NOT NULL, rel TEXT NOT NULL, target TEXT NOT NULL,
+                                PRIMARY KEY (event_rid, rel, target)) WITHOUT ROWID;
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200000)
+             INSERT INTO links SELECT i, 'file', 'f' || (i % 5000) FROM n;",
+        )
+        .unwrap();
+    }
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(6));
+    let handles: Vec<_> = (0..6)
+        .map(|_| {
+            let (path, barrier) = (db.path().to_path_buf(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                Store::open(&path).map(|_| ()).map_err(|e| e.to_string())
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap().expect("las aperturas que no migran esperan a la que migra y siguen");
+    }
+    let store = Store::open(db.path()).unwrap();
+    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("7"));
+    let n: i64 = store.conn().query_row("SELECT COUNT(*) FROM links", [], |r| r.get(0)).unwrap();
+    assert_eq!(n, 200_000);
+}
