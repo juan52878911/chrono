@@ -107,7 +107,7 @@ fn open_or_discover(db: Option<PathBuf>) -> Option<Store> {
 }
 
 /// Sube desde el cwd buscando `.chrono/index.db` (mismo algoritmo que
-/// `discoverDB` en `cmd/chrono/main.go`).
+/// `discoverDB` del binario Go v0.1.1).
 fn discover_db() -> Option<PathBuf> {
     let mut dir = std::env::current_dir().ok()?;
     loop {

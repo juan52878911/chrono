@@ -116,12 +116,12 @@ elif have curl || have wget; then
   rm -rf "$tmp"
 
 # --- 3) build from source ---------------------------------------------------
-elif have go; then
-  echo "No prebuilt binary and no downloader; building from source with Go..."
-  CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=${VERSION:-dev}" -trimpath \
-    -o "$PREFIX/chrono" ./cmd/chrono
+elif have cargo && [ -f rust/Cargo.toml ]; then
+  echo "No prebuilt binary and no downloader; building from source with cargo..."
+  (cd rust && cargo build --release --locked -q -p chrono-cli)
+  install -m755 rust/target/release/chrono "$PREFIX/chrono"
 else
-  echo "Need curl/wget (to download) or Go (to build). Aborting." >&2
+  echo "Need curl/wget (to download) or cargo in a checkout (to build). Aborting." >&2
   exit 1
 fi
 

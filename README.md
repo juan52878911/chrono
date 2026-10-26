@@ -22,7 +22,7 @@ $ chrono bugs            # where do fixes concentrate, and what kind?
 | --- | --- | --- |
 | **git** | Yes | reading history (you already have it if you have repos) |
 | **gh** ([cli.github.com](https://cli.github.com)) | Optional | reading GitHub PRs & issues (`chrono prs`, tickets) |
-| **Go 1.23+** | Build only | not needed if you use a prebuilt binary |
+| **Rust (cargo)** | Build only | not needed if you use a prebuilt binary |
 
 chrono needs **no database, no server, no network** (except `gh` for PRs). The index is a local file.
 
@@ -84,10 +84,10 @@ sudo install -m755 chrono-v0.1.0-linux-amd64/chrono /usr/local/bin/chrono
 
 From a checkout you can also just run `./install.sh` (same script, uses `./dist` if present).
 
-### Option C — From source (with Go)
+### Option C — From source (with Rust)
 ```bash
-make install     # installs to ~/go/bin
-# or:  go install github.com/juan52878911/chrono/cmd/chrono@latest
+make install     # installs to ~/.cargo/bin
+# or:  cargo install --git https://github.com/juan52878911/chrono chrono-cli --locked
 ```
 
 ### Option D — Nix

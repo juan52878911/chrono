@@ -22,7 +22,7 @@ $ chrono bugs            # ¿dónde se concentran los arreglos y de qué tipo?
 | --- | --- | --- |
 | **git** | Sí | leer el historial (ya lo tienes si tienes repos) |
 | **gh** ([cli.github.com](https://cli.github.com)) | Opcional | leer PRs e issues de GitHub (`chrono prs`, tickets) |
-| **Go 1.23+** | Solo para compilar | no hace falta si usas un binario precompilado |
+| **Rust (cargo)** | Solo para compilar | no hace falta si usas un binario precompilado |
 
 chrono **no** necesita base de datos, servidor ni conexión (salvo `gh` para PRs). El índice es un archivo local.
 
@@ -59,7 +59,7 @@ Detecta tu plataforma, descarga el binario correcto del último release, **verif
 curl -fsSL https://raw.githubusercontent.com/juan52878911/chrono/main/install.sh | sh
 ```
 
-Sin clonar, sin Go, sin compilador. Funciona en macOS (Apple Silicon e Intel) y Linux (x86-64 y arm64).
+Sin clonar, sin compilador. Funciona en macOS (Apple Silicon e Intel) y Linux (x86-64 y arm64).
 
 - Fijar una versión: `curl -fsSL https://raw.githubusercontent.com/juan52878911/chrono/main/install.sh | VERSION=v0.1.0 sh`
 - Elegir el directorio de instalación: `... | PREFIX="$HOME/.local/bin" sh`
@@ -85,9 +85,9 @@ sudo install -m755 chrono-v0.1.0-linux-amd64/chrono /usr/local/bin/chrono
 
 Desde un checkout también puedes ejecutar `./install.sh` (el mismo script; usa `./dist` si existe).
 
-### Opción C — Desde código (con Go)
+### Opción C — Desde código (con Rust)
 ```bash
-make install     # instala en ~/go/bin
+make install     # instala en ~/.cargo/bin
 ```
 
 ### Opción D — Nix

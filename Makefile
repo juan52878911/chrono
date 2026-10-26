@@ -1,34 +1,33 @@
-VERSION ?= v0.1.1
-LDFLAGS := -s -w -X main.version=$(VERSION)
-PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
+VERSION := $(shell sed -n 's/^version = "\(.*\)"/v\1/p' rust/Cargo.toml | head -n1)
 
-.PHONY: build install release clean tidy
+.PHONY: build install test bench release clean
 
 ## build: build the binary at ./chrono for your platform
 build:
-	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -trimpath -o chrono ./cmd/chrono
+	cd rust && cargo build --release --locked -q -p chrono-cli
+	cp rust/target/release/chrono ./chrono
 
-## install: install chrono into $GOBIN (~/go/bin by default)
+## install: install chrono into ~/.cargo/bin
 install:
-	CGO_ENABLED=0 go install -ldflags "$(LDFLAGS)" -trimpath ./cmd/chrono
+	cargo install --path rust/crates/chrono-cli --locked
 
-## release: compressed binaries + checksums in ./dist for all platforms
-release: clean
-	@mkdir -p dist
-	@for p in $(PLATFORMS); do \
-		os=$${p%/*}; arch=$${p#*/}; name=chrono-$(VERSION)-$$os-$$arch; \
-		echo "  -> $$name"; \
-		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -ldflags "$(LDFLAGS)" -trimpath -o dist/$$name/chrono ./cmd/chrono; \
-		cp README.md README.es.md dist/$$name/; \
-		tar -C dist -czf dist/$$name.tar.gz $$name; \
-		rm -rf dist/$$name; \
-	done
-	@cd dist && shasum -a 256 *.tar.gz > SHA256SUMS
-	@echo "Done. Artifacts in ./dist:"; ls -1 dist
+## test: unit tests + deterministic regression bench
+test:
+	cd rust && cargo test --locked -q && cargo build --locked -q -p chrono-cli
+	python3 -I bench/agentes/regresion/oro_chrono.py $(CURDIR)/rust/target/debug/chrono
 
-## tidy: resolve dependencies
-tidy:
-	go mod tidy
+## bench: scale bench at 1M events (compares with the committed baseline)
+bench: build
+	python3 -I bench/escala/medir.py ./chrono --out bench/escala/ultima.json --base bench/escala/base-0.2.7.json
+
+## release: compressed binary + checksum in ./dist for this platform (CI builds all four)
+release: clean build
+	@os=$$(uname -s | tr '[:upper:]' '[:lower:]'); arch=$$(uname -m); \
+	case $$arch in x86_64) arch=amd64;; aarch64) arch=arm64;; esac; \
+	name=chrono-$(VERSION)-$$os-$$arch; mkdir -p dist/$$name; \
+	cp chrono LICENSE README.md README.es.md dist/$$name/; \
+	tar -C dist -czf dist/$$name.tar.gz $$name; rm -rf dist/$$name; \
+	cd dist && shasum -a 256 *.tar.gz > SHA256SUMS && ls -1
 
 ## clean: remove build artifacts
 clean:
