@@ -17,6 +17,56 @@ Las cifras marcadas como *objetivo* son estimaciones que valida la fase correspo
 
 ## Estado (2026-10-26)
 
+**F2 hecha → 0.4.0.** Binario 2 244 368 → 2 311 152 B (+3 %), sin dependencias nuevas.
+- **Config:** `.chrono/config.json` con `version` (1) e `intermediario` dentro (el `intermediario.json`
+  antiguo se sigue leyendo). `chrono config check` da cada problema con la ruta de la clave
+  (`source_options["app.log"].tim_field … (¿time_field?)`) y valida las opciones de cada adaptador
+  (`Source::options()`/`validate()`). Antes, un tipo mal puesto tumbaba el fichero entero a los defaults en
+  silencio; ahora `load` lo avisa por stderr.
+- **Glob:** `chrono add '~/.claude/projects/**/*.jsonl' --as jsonl --name claude --preset claude-sessions`
+  es una fila en `sources`; el estado por fichero va en `meta` (415 KB para 1 926 ficheros) y en
+  `sources.watermark` un resumen. 2,7 GB → 30 s y 644 MB de RSS; índice de 376 MB (1 420 B/evento por las
+  attrs `cwd`/`sessionId` repetidas: candidato a `event_dims` en F3). `sync` sin cambios: 0,38 s.
+- **jsonl:** `explode_where` con `a|b`, `where` (filtro de la línea), `level_map`, `error_message_field`,
+  `attrs` (lista blanca), `entity_join` (el resultado hereda la tool de su uso, dentro del fichero),
+  `uid_field` (id global entre ficheros) y presets. Sin `message_field`, el título de un elemento expandido
+  es su tipo o sus claves, nunca sus valores.
+- **dir:** `chrono add <carpeta> --as dir`. `rust/target` (1,2 GB, 22 592 ficheros) en 3,7 s y 87 MB de
+  RSS, leyendo como mucho 512 B por fichero; un `touch` → `sync` de 0,57 s con 1 evento.
+- **Bench a 1M** (`bench/escala/f2-0.4.0.json` frente a `f1-0.3.0.json`): el `.db` sale idéntico byte a
+  byte y las respuestas MCP, iguales; los tiempos quedan dentro del ruido (el mismo binario 0.3.0 midió
+  ±15-20 % entre dos pasadas).
+
+Validación con las sesiones reales, por MCP y sin leer transcripciones: 132 208 usos de tool (Bash 94 682,
+Read 9 206, Edit 8 537, Write 5 660); 4 527 fallos (Bash 3 780, Edit 186, Read 82, Write 76); por tipo,
+«Exit code N» 2 286, el aislamiento de worktree de los agentes 760, «File has not been read yet» 98 y
+denegaciones (usuario 72, modo don't-ask 69, clasificador 67). Antes de un fallo de Bash, en 60 s
+(`precede … before_levels=*`, 1 756 episodios, 1,2 s): otro Bash en 1 590, Write 273, Read 222, Edit 190.
+
+Lo que salió al hacerlo:
+- Las líneas `api-request-blob` repiten la petición entera a la API sin `timestamp` (1 515 usos fantasma):
+  el preset filtra con `where=type=assistant|user`.
+- Una sesión reanudada o bifurcada copia el historial en otro fichero: 17 360 usos aparecían dos veces
+  (~15 % de inflado). `uid_field=id|tool_use_id` los cuenta una vez.
+- `add_event` añadía touches y links aunque el evento ya existiera: un duplicado con otra entidad lo contaba
+  dos veces. Ahora un evento ignorado no añade nada, y `add`/`sync` cuentan los guardados, no los leídos.
+- `precede` solo miraba precursores con nivel; con `before_levels=*` vale para fuentes sin nivel.
+- `stats` por MCP tomaba su `attr` numérico también como filtro `clave:valor` y no devolvía nada.
+
+Sin verificar o pendiente:
+- La carpeta real de 2,2 GB no se identificó (`~/archivo-pruebas-oriuno` pesa 279 MB y es de Trycore: no
+  se usó); `dir` se midió con `rust/target` y `~/.claude/projects`.
+- `correlate` entre sesiones y git (fila del preset) no se probó.
+- `precede` sigue topando en 50 episodios por defecto (P-MSR-3, F4); con `limit` alto y `depth=counts`
+  o `summary` las cifras salen completas.
+- La cabecera de `stats` por MCP dice `total=0` aunque haya grupos.
+- `entity_join` vive en el cursor: un resultado cuyo uso quedó antes del watermark (un `sync` a mitad de
+  un turno) se queda en `unknown`. En la ingesta completa hubo 0.
+- El cambio se detecta por tamaño + mtime: un fichero reescrito con el mismo tamaño y mtime no se relee.
+- Los títulos de error son el único contenido de las sesiones que entra en el índice: en los 1 075
+  distintos no hubo credenciales (un falso positivo `sk-…` dentro de una ruta). No hizo falta fixture real.
+- La cuenta de Trycore no tuvo cupo (0 hasta las 12:40); todo se hizo en esta sesión.
+
 **F0 y F1 hechas → 0.3.0.** Medido con `make bench` a 1M frente a 0.2.7:
 - RSS de las consultas −62 a −95 % (`patterns`, `precede`, `events`: ~450 → ~25 MB). `informe` +31 % de
   tiempo (8,8 → 11,6 s) hasta F3, que lo saca de recorrer `events`.
