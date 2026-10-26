@@ -343,8 +343,13 @@ pub struct Gaps {
     /// Las que tienen algún valor de `via` también en el lado `to` (por
     /// defecto, en un evento `to` en o después del primer `from` de la unidad).
     pub covered: i64,
-    /// `units - covered`: el hueco.
+    /// `units - covered - units_without_time`: el hueco.
     pub missing: i64,
+    /// Con orden (sin `any_order`): unidades sin ningún evento `from` con
+    /// tiempo. No se puede saber si un `to` va después: no cuentan ni como
+    /// cubiertas ni como hueco. Antes, un `from` sin tiempo (0) hacía que
+    /// cualquier `to` la cubriera.
+    pub units_without_time: i64,
     /// Valores distintos de `via` en el lado `to`.
     pub to_values: i64,
     /// Eventos del lado `from` (en la ventana) que no son unidad: sin valor de
@@ -413,32 +418,33 @@ pub fn gaps(conn: &Connection, from: &EventScope, to: &EventScope, via: &str, by
         None => String::new(),
     };
     let unit = if by.is_some() { "u.value" } else { "kv.value" };
-    // `f`: (unidad, valor, rid) del lado from; `fu`: primer `from` de cada
-    // unidad; `t`: valores del lado to con su último momento (hay un `to` en o
+    // `f`: (unidad, valor, rid) del lado from; `fu`: primer `from` CON TIEMPO
+    // de cada unidad (NULL si no tiene ninguno: con orden no se juzga); `t`: valores del lado to con su último momento (hay un `to` en o
     // después del primer `from` si el último lo está).
     let ctes = format!(
         "WITH f AS (SELECT {unit} AS unit, kv.value AS value, e.rid AS rid, e.at_epoch AS at_epoch
                     FROM events e JOIN ({vals}) kv ON kv.rid = e.rid {unit_join}
                     WHERE (?1 = 0 OR e.at_epoch >= ?1) {ff}),
-              fu AS (SELECT unit, MIN(at_epoch) AS first FROM f GROUP BY unit),
+              fu AS (SELECT unit, MIN(CASE WHEN at_epoch > 0 THEN at_epoch END) AS first FROM f GROUP BY unit),
               t AS (SELECT kv.value AS value, MAX(e.at_epoch) AS last
                     FROM events e JOIN ({vals}) kv ON kv.rid = e.rid
                     WHERE 1 {tf} GROUP BY kv.value),
               cov AS (SELECT DISTINCT f.unit FROM f JOIN t ON t.value = f.value JOIN fu ON fu.unit = f.unit
-                      WHERE ?2 OR t.last >= fu.first)"
+                      WHERE ?2 OR (fu.first IS NOT NULL AND t.last >= fu.first))"
     );
     let any_order = o.any_order as i64;
     let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&o.since_epoch, &any_order];
     for p in fp.iter().chain(&tp) {
         bound.push(p);
     }
-    let (units, covered, to_values, from_without_key): (i64, i64, i64, i64) = conn.query_row(
+    let (units, covered, to_values, from_without_key, units_without_time): (i64, i64, i64, i64, i64) = conn.query_row(
         &format!(
             "{ctes} SELECT (SELECT COUNT(DISTINCT unit) FROM f), (SELECT COUNT(*) FROM cov), (SELECT COUNT(*) FROM t),
-                    (SELECT COUNT(*) FROM events e WHERE (?1 = 0 OR e.at_epoch >= ?1) {ff} AND e.rid NOT IN (SELECT rid FROM f))"
+                    (SELECT COUNT(*) FROM events e WHERE (?1 = 0 OR e.at_epoch >= ?1) {ff} AND e.rid NOT IN (SELECT rid FROM f)),
+                    (SELECT COUNT(*) FROM fu WHERE first IS NULL AND NOT ?2)"
         ),
         rusqlite::params_from_iter(bound.iter()),
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
     let lim = o.limit as i64;
     let n = bound.len() + 1;
@@ -449,7 +455,7 @@ pub fn gaps(conn: &Connection, from: &EventScope, to: &EventScope, via: &str, by
     let mut stmt = conn.prepare(&format!(
         "{ctes}
          SELECT f.unit, COUNT(DISTINCT f.rid), {iso_min}, {iso_max} FROM f
-         WHERE f.unit NOT IN (SELECT unit FROM cov)
+         WHERE f.unit NOT IN (SELECT unit FROM cov) AND (?2 OR f.unit IN (SELECT unit FROM fu WHERE first IS NOT NULL))
          GROUP BY f.unit ORDER BY MAX(f.at_epoch) DESC, f.unit ASC LIMIT ?{n}"
     ))?;
     let sample: Vec<GapUnit> = stmt
@@ -457,7 +463,7 @@ pub fn gaps(conn: &Connection, from: &EventScope, to: &EventScope, via: &str, by
             Ok(GapUnit { unit: r.get(0)?, events: r.get(1)?, first_at: r.get(2)?, last_at: r.get(3)? })
         })?
         .collect::<std::result::Result<_, _>>()?;
-    Ok(Gaps { units, covered, missing: units - covered, to_values, from_without_key, sample })
+    Ok(Gaps { units, covered, missing: units - covered - units_without_time, units_without_time, to_values, from_without_key, sample })
 }
 
 /// Valores de una clave y en cuántas fuentes aparece cada uno: lo que lista

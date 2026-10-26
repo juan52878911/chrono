@@ -504,7 +504,7 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
             } else {
                 "cubierta si un evento de to con el valor está en o después del primer evento de from de la unidad"
             };
-            json!({"via": via, "by": by, "order": if any_order { "any" } else { "to_after_first_from" }, "criterion": criterion, "units": g.units, "covered": g.covered, "missing": g.missing, "to_values": g.to_values, "from_without_key": g.from_without_key, "missing_sample": sample})
+            json!({"via": via, "by": by, "order": if any_order { "any" } else { "to_after_first_from" }, "criterion": criterion, "units": g.units, "covered": g.covered, "missing": g.missing, "to_values": g.to_values, "from_without_key": g.from_without_key, "units_without_time": g.units_without_time, "missing_sample": sample})
         }
         "patterns" => {
             let limit = arg_i64(args, "limit", 25).max(1) as usize;

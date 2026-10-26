@@ -960,6 +960,7 @@ pub fn gaps(
         .set("missing", Json::Int(g.missing))
         .set("to_values", Json::Int(g.to_values))
         .set("from_without_key", Json::Int(g.from_without_key))
+        .set("units_without_time", Json::Int(g.units_without_time))
         .set("until", until.filter(|u| !u.is_empty()).map_or(Json::Null, Json::str))
         .set("missing_sample", Json::Arr(sample));
     envelope(store, "gaps", w, limit, n, result)

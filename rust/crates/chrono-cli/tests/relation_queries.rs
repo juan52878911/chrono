@@ -424,6 +424,44 @@ fn gaps_cuenta_los_eventos_de_from_sin_clave() {
     assert_eq!(v["result"]["units"], 2, "S3 sin ruta y d.rs sin sesión no son unidad: {v}");
 }
 
+#[test]
+fn gaps_un_from_sin_tiempo_no_deja_que_cualquier_to_cubra() {
+    let env = Env::new(
+        "gaps-sin-tiempo",
+        json!({"version": 2, "relations": {"ruta": [
+            {"source": "ediciones", "field": "ruta"},
+            {"source": "commits", "field": "ruta"}]}}),
+    );
+    // e.rs: solo una edición sin tiempo. f.rs: una sin tiempo y otra a las 10:30.
+    // Commits de los dos a las 10:00. Antes, el `from` sin tiempo (0) era el
+    // «primero» y los dos commits cubrían.
+    env.add_source(
+        "ediciones",
+        &[
+            json!({"msg": "edit e", "ruta": "e.rs"}),
+            json!({"msg": "edit f0", "ruta": "f.rs"}),
+            line("2026-01-01T10:30:00Z", "edit f1", json!({"ruta": "f.rs"})),
+        ],
+    );
+    env.add_source(
+        "commits",
+        &[line("2026-01-01T10:00:00Z", "commit-e", json!({"ruta": "e.rs"})), line("2026-01-01T10:00:00Z", "commit-f", json!({"ruta": "f.rs"}))],
+    );
+    let args = ["gaps", "--from", "ediciones", "--to", "commits", "--via", "ruta"];
+    let v = env.q(&args);
+    let r = &v["result"];
+    assert_eq!(
+        (r["units"].as_i64(), r["covered"].as_i64(), r["missing"].as_i64(), r["units_without_time"].as_i64()),
+        (Some(2), Some(0), Some(1), Some(1)),
+        "{v}"
+    );
+    assert_eq!(sample_units(&v), ["f.rs"], "e.rs no se puede juzgar por orden: {v}");
+    // Sin orden, el tiempo no importa: las dos cubiertas.
+    let v = env.q(&[&args[..], &["--any-order"]].concat());
+    let r = &v["result"];
+    assert_eq!((r["covered"].as_i64(), r["units_without_time"].as_i64()), (Some(2), Some(0)), "{v}");
+}
+
 // ───────────────────────── correlate --via ─────────────────────────
 
 /// Clave `ticket` (links) en dos fuentes; cada evento puede traer `ticket` y `ticket2`.
