@@ -70,21 +70,25 @@ fn attr_top_sql(scope: &crate::EventScope, since_epoch: i64) -> (String, Vec<Str
     // tienen en `attrs`. Un evento la lleva en un sitio o en el otro, nunca en los dos.
     let unfiltered = scope.is_empty() && since_epoch == 0;
     let from_dims = if unfiltered {
-        "SELECT v.value AS value FROM event_dims d JOIN dim_values v ON v.id = d.dim_id WHERE v.key = ?4".to_string()
+        // Cuenta por valor sobre la clave primaria de `event_dims` (dim_id, rid).
+        "SELECT v.value AS value, (SELECT COUNT(*) FROM event_dims d WHERE d.dim_id = v.id) AS n
+         FROM dim_values v WHERE v.key = ?4"
+            .to_string()
     } else {
         let (filters, _) = scope.sql_on("events", 5);
         format!(
-            "SELECT v.value AS value FROM event_dims d JOIN dim_values v ON v.id = d.dim_id
+            "SELECT v.value AS value, COUNT(*) AS n FROM dim_values v JOIN event_dims d ON d.dim_id = v.id
              JOIN events ON events.rid = d.event_rid
-             WHERE v.key = ?4 AND (?2 = 0 OR events.at_epoch >= ?2) {filters}"
+             WHERE v.key = ?4 AND (?2 = 0 OR events.at_epoch >= ?2) {filters}
+             GROUP BY v.id"
         )
     };
     let (filters, extra) = scope.sql_on("events", 5);
     let sql = format!(
-        "SELECT value, COUNT(*) AS count FROM (
+        "SELECT value, SUM(n) AS count FROM (
          {from_dims}
          UNION ALL
-         SELECT json_extract(events.attrs, ?1) AS value
+         SELECT json_extract(events.attrs, ?1) AS value, 1 AS n
          FROM events
          WHERE events.source_ref IN (SELECT source_ref FROM attr_keys WHERE key = ?4)
            AND (?2 = 0 OR events.at_epoch >= ?2)

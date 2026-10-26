@@ -20,7 +20,12 @@ a = ap.parse_args()
 BIN = os.path.abspath(a.bin)
 os.makedirs(a.dir, exist_ok=True)
 corpus = os.path.join(a.dir, f"events-{a.n}.jsonl")
-db = os.path.join(a.dir, "index.db")
+# El índice va en <dir>/.chrono para que lea <dir>/.chrono/config.json: `host`
+# como dim (v6, P-REL-1), que es lo que pregunta `top attr:host`.
+os.makedirs(os.path.join(a.dir, ".chrono"), exist_ok=True)
+db = os.path.join(a.dir, ".chrono", "index.db")
+with open(os.path.join(a.dir, ".chrono", "config.json"), "w") as f:
+    json.dump({"version": 1, "source_options": {os.path.basename(corpus): {"dims": "host"}}}, f)
 # ru_maxrss viene en bytes en macOS y en KB en Linux.
 RSS_UNIT = 1 if sys.platform == "darwin" else 1024
 
