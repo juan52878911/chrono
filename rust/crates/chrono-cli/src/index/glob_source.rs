@@ -66,6 +66,9 @@ struct FileState {
     ctime_ns: i128,
     /// Huella de los primeros y últimos `FINGERPRINT_SPAN` bytes ("" = sin calcular).
     fingerprint: String,
+    /// Sus ids de hash llevan la sal de la fuente y el fichero; `false` = se
+    /// empezó a leer antes (solo el fichero) y sigue así hasta releerse entero.
+    ids_v2: bool,
 }
 
 /// mtime y ctime de un fichero en ns (0 si el SO no los da).
@@ -232,15 +235,23 @@ impl GlobSource {
             // Ctime y huella van detrás: un estado de antes no los tiene.
             let ctime_ns = st.get(3).and_then(Value::as_str).and_then(|c| c.parse().ok()).unwrap_or(0);
             let fingerprint = st.get(4).and_then(Value::as_str).unwrap_or("").to_string();
-            out.insert(file.clone(), FileState { size, mtime_ns: mtime.parse().unwrap_or(0), watermark: wm.to_string(), ctime_ns, fingerprint });
+            // La versión de los ids, también detrás (sin ella, los de antes).
+            let ids_v2 = st.get(5).and_then(Value::as_u64) == Some(2);
+            out.insert(file.clone(), FileState { size, mtime_ns: mtime.parse().unwrap_or(0), watermark: wm.to_string(), ctime_ns, fingerprint, ids_v2 });
         }
         Ok(out)
     }
 
     /// Guarda el estado y devuelve su resumen para `sources.watermark`.
     fn save_state(&self, store: &Store, state: &BTreeMap<String, FileState>) -> Result<String> {
-        let obj: serde_json::Map<String, Value> =
-            state.iter().map(|(f, st)| (f.clone(), json!([st.size, st.mtime_ns.to_string(), st.watermark, st.ctime_ns.to_string(), st.fingerprint]))).collect();
+        let row = |st: &FileState| {
+            let mut v = json!([st.size, st.mtime_ns.to_string(), st.watermark, st.ctime_ns.to_string(), st.fingerprint]);
+            if st.ids_v2 {
+                v.as_array_mut().expect("es un array").push(json!(2));
+            }
+            v
+        };
+        let obj: serde_json::Map<String, Value> = state.iter().map(|(f, st)| (f.clone(), row(st))).collect();
         let raw = Value::Object(obj).to_string();
         store.set_meta(&self.state_key(), &raw)?;
         Ok(format!("glob:{}:{:08x}", state.len(), fnv1a32(raw.as_bytes())))
@@ -317,7 +328,9 @@ impl GlobSource {
                     fp_new = Some(fp_len.clone());
                 }
             }
-            let ctx = IngestCtx { options_keys: options_keys.clone(), preset: self.preset.as_deref(), group: Some((&self.id, &rel)) };
+            // Lo que no se relee entero sigue con los ids con que se empezó.
+            let legacy_ids = prev.as_ref().is_some_and(|p| !p.ids_v2) && !rewritten;
+            let mut ctx = IngestCtx { options_keys: options_keys.clone(), preset: self.preset.as_deref(), group: Some((&self.id, &rel)), legacy_ids };
             let wm = prev
                 .filter(|p| !p.watermark.is_empty() && !rewritten)
                 .map(|p| Watermark { kind: adapter.kind().to_string(), value: p.watermark });
@@ -330,6 +343,7 @@ impl GlobSource {
                 Err(IngestError::Diverged) => {
                     store.delete_source_file_events(&self.id, &rel)?;
                     out.diverged = true;
+                    ctx.legacy_ids = false;
                     let (n, w, _) = ingest_source(adapter, path, None, store, index_root, &ctx).map_err(|e| e.into_boxed())?;
                     (n, w)
                 }
@@ -343,7 +357,8 @@ impl GlobSource {
                 Some(fp) => fp,
                 None => fingerprints(path, &[len]).ok().and_then(|v| v.into_iter().next()).unwrap_or_default(),
             };
-            state.insert(rel, FileState { size: len, mtime_ns, watermark: new_wm.value, ctime_ns, fingerprint });
+            let ids_v2 = !ctx.legacy_ids;
+            state.insert(rel, FileState { size: len, mtime_ns, watermark: new_wm.value, ctime_ns, fingerprint, ids_v2 });
             out.events += n;
             out.files_read += 1;
             if out.files_read.is_multiple_of(SAVE_EVERY) {

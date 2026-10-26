@@ -34,8 +34,9 @@ pub struct SourceSummary {
 }
 
 /// `source_dims` guarda, junto a las dims, las firmas de `relations` (`rel:…`) y
-/// de las opciones de la fuente (`opt:…`): no son claves que se puedan consultar.
-pub(crate) const NOT_SIGNATURE: &str = "key NOT GLOB 'rel:*' AND key NOT GLOB 'opt:*'";
+/// de las opciones de la fuente (`opt:…`), y la marca de la versión de sus ids
+/// (`ids:…`): no son claves que se puedan consultar.
+pub(crate) const NOT_SIGNATURE: &str = "key NOT GLOB 'rel:*' AND key NOT GLOB 'opt:*' AND key NOT GLOB 'ids:*'";
 
 /// `(source_id, alias)` de las fuentes que tienen alias (el de una fuente glob,
 /// o `cmd:<nombre>` de una de comando), con el mismo criterio que [`sources`].
