@@ -173,7 +173,9 @@ pub fn line_to_events(
 /// Id desde `id_field`, si está configurado y resuelve. Lleva delante el nombre
 /// del fichero de la fuente (`runs.cmd.jsonl:38635246893`): el mismo número
 /// puede ser el id de una ejecución en una fuente y de un job en otra, y los ids
-/// de evento son únicos en todo el índice.
+/// de evento son únicos en todo el índice. Es el nombre, no la ruta: dos fuentes
+/// `a/runs.jsonl` y `b/runs.jsonl` con el mismo valor dan UN evento (lleva `:`,
+/// así que el CLI no le pone la sal de la fuente, como a `uid_field`).
 fn configured_id(scope: &Scope<'_>, ov: &JsonlOverrides, source_id: &str) -> Option<String> {
     let field = ov.id_field.as_deref()?;
     let v = field_value(scope, field);

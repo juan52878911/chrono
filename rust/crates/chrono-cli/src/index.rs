@@ -181,6 +181,7 @@ pub fn init(start: &Path, symbols: bool, as_kind: Option<&str>, db_override: Opt
         &manifest,
         &now_iso(),
     )?;
+    mark_ids(&store, src, &source_id)?;
     // El manifiesto también va a `meta` (compat con el envelope de las consultas,
     // que lee git_version/first_parent/…); `last_watermark` como respaldo legado.
     for (k, v) in &manifest {
@@ -277,6 +278,7 @@ pub fn add(db: &Path, start: &Path, symbols: bool, as_kind: Option<&str>, preset
         &manifest,
         &now_iso(),
     )?;
+    mark_ids(&store, src, &source_id)?;
 
     eprintln!("{}", t("  building search index…", "  construyendo índice de búsqueda…"));
     // Re-ingesta (already): se borraron filas con rowids arbitrarios, así que el
@@ -470,7 +472,7 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
         };
         if let Some(gs) = GlobSource::from_row(&s.id, &s.manifest_json) {
             let cfg = chrono_classify_rules::load(&index_root);
-            let ctx = IngestCtx { options_keys: gs.options_keys(), preset: gs.preset.as_deref(), group: Some((&s.id, "")) };
+            let ctx = IngestCtx { options_keys: gs.options_keys(), preset: gs.preset.as_deref(), group: Some((&s.id, "")), legacy_ids: false };
             let sides = relation_sides(&cfg, adapter, Path::new(&s.path), &ctx);
             let want = ingest_dims(adapter, &source_config(&cfg, Path::new(&s.path), &ctx), true, &sides);
             let changed = reset_if_dims_changed(store, &s.id, &want, &|st| gs.events_not_rereadable(st))?;
@@ -941,6 +943,56 @@ struct IngestCtx<'a> {
     preset: Option<&'a str>,
     /// `(source_id de la fuente glob, ruta del fichero relativa a su base)`.
     group: Option<(&'a str, &'a str)>,
+    /// En una glob, el fichero se empezó a leer con los ids de antes (sal solo
+    /// del fichero, sin la fuente): sus deltas siguen así hasta que se relea
+    /// entero, o el mismo evento entraría dos veces con dos ids.
+    legacy_ids: bool,
+}
+
+/// Marca de las fuentes de un fichero cuyos ids de hash llevan la sal de la
+/// fuente (ver [`id_salt`]). Va con las dims: una fuente indexada antes no la
+/// tiene y el primer `sync` la reindexa una vez (borrando antes sus eventos).
+const IDS_MARK: &str = "ids:2";
+
+/// ¿Llevan sal de la fuente sus ids de hash? Las de fichero. Git no: el id es el
+/// sha, y un commit es el mismo en cualquier clon o fork (ver [`id_salt`]).
+/// Tampoco nod (sus ids son `nod:<instancia>:<run>:<seq>`, nunca de hash: la
+/// marca solo costaría un reindex) ni oslog (no es un fichero: el log del
+/// sistema es uno, y su ventana no se puede releer para reindexar).
+fn salts_ids(source: &dyn Source) -> bool {
+    !matches!(source.kind(), "git" | "nod" | "oslog")
+}
+
+/// Sal de los ids de hash (los que no llevan `:`; uno declarado con `id_field` o
+/// `uid_field` ya es estable y puede repetirse a propósito): sin ella, dos
+/// ficheros con la misma línea en el mismo offset (la misma cabecera, dos
+/// réplicas del mismo log) darían el mismo id y el segundo evento se perdería
+/// (`INSERT OR IGNORE`). En una glob, la fuente y el fichero (solo el fichero
+/// si se empezó a leer con los ids de antes: dos globs con los mismos nombres
+/// relativos chocaban); en una fuente de un fichero, su id.
+///
+/// Git queda fuera a propósito: dos clones o un fork del mismo repo como
+/// fuentes comparten commits, y el commit es UN evento (el de la primera fuente
+/// que lo indexó); los links `commit=`, `explain` y la resolución por prefijo de
+/// sha dependen de que el id sea el sha.
+fn id_salt(source: &dyn Source, path: &Path, ctx: &IngestCtx<'_>) -> Option<String> {
+    let key = match ctx.group {
+        Some((_, file)) if ctx.legacy_ids => file.to_string(),
+        Some((id, file)) => format!("{id}\n{file}"),
+        None if salts_ids(source) => canonical_source_id(source.kind(), path),
+        None => return None,
+    };
+    Some(format!("{:08x}", fnv1a32(key.as_bytes())))
+}
+
+/// Deja la marca [`IDS_MARK`] en una fuente de un fichero recién leída entera
+/// (`init`, `add`). El writer la escribe con el primer evento; esto cubre la que
+/// no trajo ninguno, que si no se releería en el siguiente `sync`.
+fn mark_ids(store: &Store, source: &dyn Source, source_id: &str) -> Result<()> {
+    if salts_ids(source) {
+        store.add_source_dims(source_id, &[IDS_MARK.to_string()])?;
+    }
+    Ok(())
 }
 
 /// Valor de texto `key` del `manifest_json` de una fuente.
@@ -977,10 +1029,7 @@ fn ingest_source(
     let dims = ingest_dims(source, &source_cfg, ctx.group.is_some(), &sides);
     // Sin entidad propia, la del evento que comparte esta clave (`entity_via`).
     let entity_via = source.entity_via(&source_cfg);
-    // En una fuente glob, los ids de hash llevan delante un hash del fichero: dos ficheros
-    // con la misma línea en el mismo offset darían el mismo id y el segundo
-    // evento se perdería (`INSERT OR IGNORE`).
-    let group = ctx.group.map(|(id, file)| (id, file, format!("{:08x}", fnv1a32(file.as_bytes()))));
+    let salt = id_salt(source, path, ctx);
     // Caps de ingesta (0 = sin cap; por defecto no alteran nada → paridad).
     let body_max_bytes = cfg.body_max_bytes;
     let max_events = cfg.max_events_per_source;
@@ -1034,14 +1083,13 @@ fn ingest_source(
                     }
                     ev.body.truncate(cut);
                 }
-                if let Some((id, file, salt)) = &group {
+                if let Some((id, file)) = ctx.group {
                     ev.source_id = id.to_string();
-                    // Solo los ids de hash (sin `:`); uno declarado (`id_field`,
-                    // `uid_field`) ya es estable y puede repetirse a propósito.
-                    if !ev.id.contains(':') {
-                        ev.id = format!("{salt}.{}", ev.id);
-                    }
                     ev.attrs.insert("file".to_string(), file.to_string());
+                }
+                // Solo los ids de hash (sin `:`), ver [`id_salt`].
+                if let Some(salt) = salt.as_deref().filter(|_| !ev.id.contains(':')) {
+                    ev.id = format!("{salt}.{}", ev.id);
                 }
                 relations::apply(&sides, &mut ev);
                 if redact {
@@ -1120,6 +1168,11 @@ fn ingest_dims(source: &dyn Source, source_cfg: &SourceConfig, glob: bool, sides
     if glob && !dims.iter().any(|d| d == "file") {
         dims.push("file".to_string());
     }
+    // Una glob no la lleva: reindexarla entera cuesta (GB de sesiones) y a menudo
+    // no se puede (ficheros ya borrados); cambia de ids fichero a fichero.
+    if !glob && salts_ids(source) {
+        dims.push(IDS_MARK.to_string());
+    }
     dims.extend(relations::signature(sides));
     dims.push(options_signature(source, source_cfg));
     dims.sort();
@@ -1141,6 +1194,12 @@ fn options_signature(source: &dyn Source, source_cfg: &SourceConfig) -> String {
 /// una relectura entera de cada una).
 fn dims_changed(store: &Store, source_id: &str, want: &[String]) -> Result<bool> {
     let had = store.source_dims(source_id)?;
+    // Sin la marca de los ids por fuente se relee una vez, aunque no le quede
+    // ningún evento: una réplica exacta de otra fuente los perdió todos.
+    let mark = IDS_MARK.to_string();
+    if want.contains(&mark) && !had.contains(&mark) {
+        return Ok(true);
+    }
     if had == want || !store.source_has_events(source_id)? {
         return Ok(false);
     }
@@ -1225,11 +1284,24 @@ fn reset_if_dims_changed(
         return Ok(false);
     }
     let had = store.source_dims(source_id)?;
-    eprintln!("{}", t(
-        format!("  dims or options of {source_id} changed ({} → {}) — reindexing that source", had.join(","), want.join(",")),
-        format!("  las dims u opciones de {source_id} cambiaron ({} → {}) — se reindexa esa fuente", had.join(","), want.join(",")),
-    ));
+    let mark = IDS_MARK.to_string();
+    if want.contains(&mark) && !had.contains(&mark) {
+        eprintln!("{}", t(
+            format!("  {source_id} was indexed with ids that could collide with another source's — reindexing that source (once)"),
+            format!("  {source_id} se indexó con ids que podían chocar con los de otra fuente — se reindexa esa fuente (una vez)"),
+        ));
+    } else {
+        eprintln!("{}", t(
+            format!("  dims or options of {source_id} changed ({} → {}) — reindexing that source", had.join(","), want.join(",")),
+            format!("  las dims u opciones de {source_id} cambiaron ({} → {}) — se reindexa esa fuente", had.join(","), want.join(",")),
+        ));
+    }
     store.delete_source_events(source_id)?;
+    // La marca, aunque la relectura no traiga ningún evento (el writer solo
+    // escribe las dims con el primero): si no, se releería en cada `sync`.
+    if want.contains(&mark) {
+        store.add_source_dims(source_id, &[mark])?;
+    }
     Ok(true)
 }
 
@@ -1640,6 +1712,52 @@ mod tests {
         // Sin cambios: nada que leer.
         sync(&db, None).unwrap();
         assert_eq!(count(&db, "SELECT COUNT(*) FROM events"), 9);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Glob indexada antes de la sal con la fuente: no se reindexa; cada fichero
+    /// sigue con sus ids de antes mientras solo crece (un delta nunca repite un
+    /// evento con otro id) y pasa a los nuevos cuando se relee entero.
+    #[test]
+    fn una_glob_de_antes_cambia_de_ids_fichero_a_fichero() {
+        let dir = std::env::temp_dir().join(format!("chrono-glob-ids-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let line = |i: usize| format!("{{\"ts\":{},\"msg\":\"hola\"}}\n", 1_700_000_000 + i);
+        std::fs::create_dir_all(dir.join("datos")).unwrap();
+        std::fs::write(dir.join("datos/a.jsonl"), (0..3).map(line).collect::<String>()).unwrap();
+        let db = dir.join(".chrono/index.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let pattern = format!("{}/datos/*.jsonl", dir.display());
+        add_glob(&db, &pattern, Some("jsonl"), None, None).unwrap();
+        let id = format!("jsonl:{pattern}");
+        let old = format!("{:08x}", fnv1a32(b"a.jsonl"));
+        let new = format!("{:08x}", fnv1a32(format!("{id}\na.jsonl").as_bytes()));
+        let with = |salt: &str| count(&db, &format!("SELECT COUNT(*) FROM events WHERE id GLOB '{salt}.*'"));
+        assert_eq!(with(&new), 3);
+
+        // Como lo dejaba la versión de antes: sal solo del fichero y estado sin versión.
+        let store = Store::open(&db).unwrap();
+        store.conn().execute(&format!("UPDATE events SET id = '{old}' || substr(id, 9)"), []).unwrap();
+        store.conn().execute("UPDATE meta SET value = json_remove(value, '$.\"a.jsonl\"[5]') WHERE key GLOB 'glob_state:*'", []).unwrap();
+        drop(store);
+        assert_eq!(with(&old), 3);
+
+        // Crece: el delta sigue con la sal de antes y nada se relee.
+        let mut f = std::fs::OpenOptions::new().append(true).open(dir.join("datos/a.jsonl")).unwrap();
+        f.write_all(line(3).as_bytes()).unwrap();
+        drop(f);
+        sync(&db, None).unwrap();
+        assert_eq!((with(&old), with(&new)), (4, 0));
+
+        // Reescrito (más corto): se relee entero, ya con la sal de la fuente.
+        std::fs::write(dir.join("datos/a.jsonl"), (0..2).map(line).collect::<String>()).unwrap();
+        sync(&db, None).unwrap();
+        assert_eq!((with(&old), with(&new)), (0, 2));
+        let mut f = std::fs::OpenOptions::new().append(true).open(dir.join("datos/a.jsonl")).unwrap();
+        f.write_all(line(5).as_bytes()).unwrap();
+        drop(f);
+        sync(&db, None).unwrap();
+        assert_eq!((with(&old), with(&new)), (0, 3));
         std::fs::remove_dir_all(&dir).ok();
     }
 }
