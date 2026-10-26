@@ -43,6 +43,10 @@ Index:
   sync [path]          Process only the delta since the last watermark (all sources).
   reindex              Rebuild the index from scratch with the same sources (git, logs, globs,
                        commands), e.g. after a chrono upgrade that changes the index schema.
+                       Queries keep using the current index until the new one replaces it.
+                       A source that can't be read (its file is gone) is left out with a
+                       warning; the old index is kept as <db>.v<N>.bak and the exit code is 3
+                       (also when the new index has fewer events than the old one).
   config check         Validate .chrono/config.json: each problem with its key path.
 
 Queries (JSON with `schema_version`, `entity`/`id`; add --compact for a plain-text table of `result`
@@ -148,6 +152,10 @@ Uso:
   sync [ruta]          Procesa solo el delta desde la última marca (todas las fuentes).
   reindex              Reconstruye el índice desde cero con las mismas fuentes (git, logs, globs,
                        comandos), p. ej. tras actualizar chrono a una versión con otro esquema.
+                       Las consultas siguen con el índice actual hasta que el nuevo lo sustituye.
+                       Una fuente que no se puede leer (su fichero ya no está) queda fuera con
+                       un aviso; el índice viejo se conserva como <db>.v<N>.bak y sale con 3
+                       (también si el índice nuevo tiene menos eventos que el viejo).
   config check         Valida .chrono/config.json: cada problema con la ruta de su clave.
 
 Consulta (JSON con `schema_version`, `entity`/`id`; con --compact, una tabla de texto solo con
@@ -836,8 +844,11 @@ fn main() {
         return;
     }
     if cmd == "reindex" {
-        if let Err(e) = reindex::run(&db) {
-            fatal(e);
+        match reindex::run(&db) {
+            Ok(false) => {}
+            // Hecho, pero con menos que antes: la copia vieja queda y se dice.
+            Ok(true) => std::process::exit(3),
+            Err(e) => fatal(e),
         }
         return;
     }

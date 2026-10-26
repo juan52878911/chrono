@@ -76,9 +76,11 @@ pub fn is_corrupt(e: &(dyn std::error::Error + 'static)) -> bool {
     e.downcast_ref::<rusqlite::Error>().and_then(rusqlite::Error::sqlite_error_code).is_some_and(|c| matches!(c, NotADatabase | DatabaseCorrupt))
 }
 
-/// Marca de un `reindex` a medias: `<db>.reindexing`, con la ruta de la copia
-/// del índice viejo dentro. Se escribe antes de apartar el índice y se borra al
-/// acabar; si sigue ahí, el índice puede estar a medias y la copia es la buena.
+/// Marca de un `reindex` a medias de versiones anteriores: `<db>.reindexing`,
+/// con la ruta de la copia del índice viejo dentro. Aquel `reindex` apartaba el
+/// índice y lo reconstruía en su sitio; si la marca sigue ahí, el índice puede
+/// estar a medias y la copia es la buena. El de ahora construye aparte y no la
+/// escribe: solo se lee para reanudar uno de antes.
 pub fn reindex_marker(db: &Path) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("{}.reindexing", db.display()))
 }
@@ -120,6 +122,35 @@ pub fn read_meta_any_version(path: &Path, key: &str) -> Option<String> {
 pub fn count_events_any_version(path: &Path) -> Option<i64> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
     conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).ok()
+}
+
+/// Eventos de una fuente en un índice de cualquier versión (`source_ref` desde
+/// la v5, `source_id` antes); `None` si no se puede leer.
+pub fn count_source_events_any_version(path: &Path, source_id: &str) -> Option<i64> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    conn.query_row("SELECT COUNT(*) FROM events WHERE source_ref = (SELECT ref FROM sources WHERE id = ?1)", [source_id], |r| r.get(0))
+        .or_else(|_| conn.query_row("SELECT COUNT(*) FROM events WHERE source_id = ?1", [source_id], |r| r.get(0)))
+        .ok()
+}
+
+/// Vacía el WAL de `path` en el fichero principal y lo deja a 0 bytes
+/// (`wal_checkpoint(TRUNCATE)`), reintentando mientras un lector lo impida
+/// (hasta `wait`). Tras esto el `.db` solo, sin `-wal`, tiene todo el índice:
+/// se puede enlazar como copia o sustituir por otro en la misma ruta sin que un
+/// `-wal` con páginas suyas acabe aplicado al fichero nuevo.
+pub fn checkpoint_truncate(path: &Path, wait: std::time::Duration) -> Result<()> {
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(std::time::Duration::from_millis(200))?;
+    let start = std::time::Instant::now();
+    loop {
+        let r = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get::<_, i64>(0));
+        match r {
+            Ok(0) => return Ok(()),
+            Ok(_) | Err(_) if start.elapsed() < wait => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Ok(_) => return Err(format!("{}: los lectores no dejan vaciar el WAL", path.display()).into()),
+            Err(e) => return Err(e.into()),
+        }
+    }
 }
 
 #[cfg(test)]
