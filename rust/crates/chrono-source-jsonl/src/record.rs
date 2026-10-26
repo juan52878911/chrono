@@ -289,6 +289,14 @@ fn build_event(scope: &Scope<'_>, id: String, raw_line: &str, ov: &JsonlOverride
         .collect();
 
     let uid = ov.uid_field.iter().map(|f| field_value(scope, f)).find(|v| !v.is_empty());
+    // Lo que ya va en una columna (tiempo, título, nivel, entidad, kind, id) no
+    // se repite en `attrs` (P-ESC-2). El actor sí se queda: suele ser el host.
+    let mut attrs = if ov.attrs.is_empty() { scalar_attrs(scope) } else { listed_attrs(scope, &ov.attrs) };
+    let promoted = [&time_field, &message_field, &level_field, &entity_field];
+    let declared = ov.kind_field.iter().chain(&ov.id_field).chain(&ov.uid_field);
+    for k in promoted.into_iter().chain(declared) {
+        attrs.remove(k.as_str());
+    }
     Event {
         id: uid.map_or(id, |v| format!("{kind}:{v}")),
         source_id: source_id.to_string(),
@@ -299,7 +307,7 @@ fn build_event(scope: &Scope<'_>, id: String, raw_line: &str, ov: &JsonlOverride
         title,
         body: String::new(),
         level,
-        attrs: if ov.attrs.is_empty() { scalar_attrs(scope) } else { listed_attrs(scope, &ov.attrs) },
+        attrs,
         touches: vec![Touch { entity, entity_type: "log-source".to_string(), weight: 1, attrs: BTreeMap::new() }],
         links,
         simhash: hash,
@@ -455,7 +463,8 @@ mod tests {
         let evs = line_to_events(&sample, CLAUDE_LINE, 0, &claude_ov(), "jsonl:/tmp/a.log", &mut EntityMemo::default());
         assert_eq!(evs[0].attrs["type"], "tool_use", "gana el elemento a la raíz");
         assert_eq!(evs[0].attrs["id"], "toolu_1");
-        assert_eq!(evs[0].attrs["timestamp"], "2024-01-01T00:00:00.100Z", "escalar de la raíz sin choque");
+        // `timestamp` ya es `at`: no se repite en attrs (P-ESC-2), ni `name` (la entidad).
+        assert!(!evs[0].attrs.contains_key("timestamp") && !evs[0].attrs.contains_key("name"));
     }
 
     #[test]
@@ -549,7 +558,7 @@ mod tests {
         assert_eq!(evs[0].links, [Link { rel: "tool_use".into(), target: "toolu_9".into() }]);
         assert_eq!(evs[1].links, [Link { rel: "tool_use".into(), target: "toolu_9".into() }]);
         // Solo las attrs de la lista: ni `content` ni el input de la tool.
-        assert_eq!(evs[0].attrs.keys().map(String::as_str).collect::<Vec<_>>(), ["cwd", "id", "sessionId", "type"]);
+        assert_eq!(evs[0].attrs.keys().map(String::as_str).collect::<Vec<_>>(), ["cwd", "sessionId"], "type e id ya son kind e id");
         assert!(evs.iter().all(|e| !e.attrs.values().any(|v| v.contains("secreto") || v.contains("línea 1"))));
     }
 

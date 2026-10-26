@@ -80,6 +80,11 @@ impl GlobSource {
         m
     }
 
+    /// Claves de `source_options` de la fuente: su alias y su patrón.
+    pub fn options_keys(&self) -> Vec<String> {
+        self.alias.iter().cloned().chain([self.pattern.clone()]).collect()
+    }
+
     /// Directorio base: la parte del patrón antes del primer comodín.
     fn base(&self) -> PathBuf {
         let segs: Vec<&str> = self.pattern.split('/').collect();
@@ -125,8 +130,7 @@ impl GlobSource {
         let files = glob::expand(&self.pattern);
         let base = self.base();
         let mut state = self.load_state(store)?;
-        let mut options_keys: Vec<String> = self.alias.iter().cloned().collect();
-        options_keys.push(self.pattern.clone());
+        let options_keys = self.options_keys();
         let mut out = GlobSync { events: 0, files_read: 0, files_total: files.len(), diverged: false, watermark: String::new() };
         let mut stderr = std::io::stderr();
         let (files_word, events_word) = (t("files", "ficheros"), t("events", "eventos"));

@@ -20,4 +20,4 @@ pub use level::infer_level;
 pub use redact::{redact, redact_event};
 pub use domain::{Actor, Event, Label, Link, Touch};
 pub use error::{CoreError, Result};
-pub use source::{Cursor, Registry, Source, SourceConfig, Watermark};
+pub use source::{dims_option, Cursor, Registry, Source, SourceConfig, Watermark};

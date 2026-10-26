@@ -228,7 +228,28 @@ impl Store {
     /// re-ingesta tras divergencia. NO toca `entities`/`actors` (compartidos
     /// entre fuentes; sus flags se recalculan en el enriquecimiento).
     pub fn delete_source_events(&self, source_id: &str) -> Result<()> {
-        self.delete_events_where(source_id, None)
+        self.delete_events_where(source_id, None)?;
+        // La re-ingesta escribe las dims de la config de entonces.
+        self.conn.execute("DELETE FROM source_dims WHERE source_ref = (SELECT ref FROM sources WHERE id = ?1)", params![source_id])?;
+        Ok(())
+    }
+
+    /// Dims con que se ingirió la fuente (ordenadas; vacío si ninguna).
+    pub fn source_dims(&self, source_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.key FROM source_dims d JOIN sources s ON s.ref = d.source_ref WHERE s.id = ?1 ORDER BY d.key",
+        )?;
+        let rows = stmt.query_map(params![source_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// ¿Tiene la fuente algún evento en el índice?
+    pub fn source_has_events(&self, source_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM events WHERE source_ref = (SELECT ref FROM sources WHERE id = ?1))",
+            params![source_id],
+            |r| r.get(0),
+        )?)
     }
 
     /// Como [`Store::delete_source_events`], solo los eventos de UN fichero de

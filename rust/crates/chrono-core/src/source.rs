@@ -52,6 +52,21 @@ pub trait Source {
     fn validate(&self, _cfg: &SourceConfig) -> Result<()> {
         Ok(())
     }
+
+    /// Claves de `attrs` que el índice guarda como dims (`event_dims`): la opción
+    /// común `dims`, o la de un preset del adaptador.
+    fn dims(&self, cfg: &SourceConfig) -> Vec<String> {
+        dims_option(cfg)
+    }
+}
+
+/// La opción `dims` (`"host,container"`) como lista ordenada y sin repetidos.
+pub fn dims_option(cfg: &SourceConfig) -> Vec<String> {
+    let mut dims: Vec<String> =
+        cfg.options.get("dims").map(|s| s.split(',').map(str::trim).filter(|k| !k.is_empty()).map(str::to_string).collect()).unwrap_or_default();
+    dims.sort();
+    dims.dedup();
+    dims
 }
 
 /// Cursor de streaming sobre una fuente: entrega eventos uno a uno con RAM constante.

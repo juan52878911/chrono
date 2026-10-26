@@ -419,7 +419,14 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
             continue;
         };
         if let Some(gs) = GlobSource::from_row(&s.id, &s.manifest_json) {
-            let r = gs.sync(adapter, &mut store, &index_root)?;
+            let cfg = chrono_classify_rules::load(&index_root);
+            let ctx = IngestCtx { options_keys: gs.options_keys(), preset: gs.preset.as_deref(), group: Some((&s.id, "")) };
+            let changed = reset_if_dims_changed(&store, &s.id, &ingest_dims(adapter, &source_config(&cfg, Path::new(&s.path), &ctx), true))?;
+            if changed {
+                gs.clear_state(&store)?;
+            }
+            let mut r = gs.sync(adapter, &mut store, &index_root)?;
+            r.diverged |= changed;
             store.upsert_source(&s.id, &s.kind, &s.path, &r.watermark, &gs.manifest(r.files_total), &now)?;
             diverged_any |= r.diverged;
             synced_any |= r.events > 0 || r.diverged;
@@ -445,6 +452,9 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
 
         let preset = manifest_value(&s.manifest_json, "preset");
         let ctx = IngestCtx { preset: preset.as_deref(), ..Default::default() };
+        let cfg = chrono_classify_rules::load(&index_root);
+        let dims_changed = reset_if_dims_changed(&store, &s.id, &ingest_dims(adapter, &source_config(&cfg, &path, &ctx), false))?;
+        let wm = if dims_changed { None } else { wm };
         let (n, new_wm, diverged) = match ingest_source(adapter, &path, wm, &mut store, &index_root, &ctx) {
             Ok((n, new_wm, _manifest)) => (n, new_wm, false),
             Err(IngestError::Diverged) => {
@@ -460,6 +470,7 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
             }
             Err(e) => return Err(e.into_boxed()),
         };
+        let diverged = diverged || dims_changed;
         store.set_source_watermark(&s.id, &new_wm.value, &now)?;
         // Una divergencia borró y reingirió la fuente: el índice cambió aunque el
         // conteo neto sea 0 (p.ej. el fichero encogió), así que FTS debe
@@ -740,18 +751,8 @@ fn ingest_source(
     ctx: &IngestCtx<'_>,
 ) -> std::result::Result<(usize, Watermark, BTreeMap<String, String>), IngestError> {
     let cfg = chrono_classify_rules::load(repo_for_config);
-    // Opciones del adaptador desde .chrono/config.json (columnas CSV, preset/year
-    // de textlog…), resueltas por ruta/nombre de la fuente (o por alias/patrón en
-    // una fuente glob). Se toman antes de mover `cfg` al clasificador.
-    let mut options = ctx
-        .options_keys
-        .iter()
-        .find_map(|k| cfg.source_options.get(k).cloned())
-        .unwrap_or_else(|| if ctx.group.is_some() { BTreeMap::new() } else { cfg.source_options_for(path) });
-    if let Some(preset) = ctx.preset {
-        options.entry("preset".to_string()).or_insert_with(|| preset.to_string());
-    }
-    let source_cfg = SourceConfig { options };
+    let source_cfg = source_config(&cfg, path, ctx);
+    let dims = ingest_dims(source, &source_cfg, ctx.group.is_some());
     // En una fuente glob, los ids de hash llevan delante un hash del fichero: dos ficheros
     // con la misma línea en el mismo offset darían el mismo id y el segundo
     // evento se perdería (`INSERT OR IGNORE`).
@@ -787,7 +788,7 @@ fn ingest_source(
     // del .db y el caudal no se desplome a escala. El orden de inserción y los
     // rowids son idénticos a un único commit (determinismo intacto).
     {
-        let mut caches = chrono_store::WriterCaches::new();
+        let mut caches = chrono_store::WriterCaches::with_dims(dims);
         let mut done = false;
         while !done {
             let mut w = store.writer_seeded(std::mem::take(&mut caches))?;
@@ -859,6 +860,48 @@ fn ingest_source(
     let wm = cur.watermark();
     let manifest = cur.manifest();
     Ok((count, wm, manifest))
+}
+
+/// Opciones del adaptador desde .chrono/config.json (columnas CSV, preset/year
+/// de textlog…), resueltas por ruta/nombre de la fuente (o por alias/patrón en
+/// una fuente glob), con el preset de `add --preset` si la config no pone otro.
+fn source_config(cfg: &chrono_classify_rules::Config, path: &Path, ctx: &IngestCtx<'_>) -> SourceConfig {
+    let mut options = ctx
+        .options_keys
+        .iter()
+        .find_map(|k| cfg.source_options.get(k).cloned())
+        .unwrap_or_else(|| if ctx.group.is_some() { BTreeMap::new() } else { cfg.source_options_for(path) });
+    if let Some(preset) = ctx.preset {
+        options.entry("preset".to_string()).or_insert_with(|| preset.to_string());
+    }
+    SourceConfig { options }
+}
+
+/// Dims con que se ingiere una fuente: las de su config (o preset) y, en una
+/// fuente glob, `file` (cada evento lleva su fichero, y así se borra por fichero).
+fn ingest_dims(source: &dyn Source, source_cfg: &SourceConfig, glob: bool) -> Vec<String> {
+    let mut dims = source.dims(source_cfg);
+    if glob && !dims.iter().any(|d| d == "file") {
+        dims.push("file".to_string());
+        dims.sort();
+    }
+    dims
+}
+
+/// Si la fuente se ingirió con otras dims que las de la config de hoy, sus
+/// eventos se borran (la próxima ingesta la rehace entera): las claves que
+/// salieron de `attrs` no se pueden recuperar sin releer la fuente.
+fn reset_if_dims_changed(store: &Store, source_id: &str, want: &[String]) -> Result<bool> {
+    let had = store.source_dims(source_id)?;
+    if had == want || !store.source_has_events(source_id)? {
+        return Ok(false);
+    }
+    eprintln!("{}", t(
+        format!("  dims of {source_id} changed ({} → {}) — reindexing that source", had.join(","), want.join(",")),
+        format!("  las dims de {source_id} cambiaron ({} → {}) — se reindexa esa fuente", had.join(","), want.join(",")),
+    ));
+    store.delete_source_events(source_id)?;
+    Ok(true)
 }
 
 /// Enriquecimiento tras la ingesta (multi-fuente): exclusiones de ruido
@@ -1184,6 +1227,40 @@ mod tests {
     }
 
     #[test]
+    fn cambiar_las_dims_en_la_config_reindexa_esa_fuente_con_las_mismas_cifras() {
+        let dir = std::env::temp_dir().join(format!("chrono-dims-src-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("datos")).unwrap();
+        std::fs::create_dir_all(dir.join(".chrono")).unwrap();
+        let line = |i: usize| format!("{{\"ts\":{},\"msg\":\"hola {i}\",\"service\":\"api\",\"host\":\"h{}\"}}\n", 1_700_000_000 + i, i % 3);
+        std::fs::write(dir.join("datos/a.jsonl"), (0..9).map(line).collect::<String>()).unwrap();
+        let config = |dims: &str| {
+            std::fs::write(dir.join(".chrono/config.json"), format!("{{\"version\":1,\"source_options\":{{\"datos\":{{\"dims\":\"{dims}\"}}}}}}")).unwrap()
+        };
+        config("host");
+        let db = dir.join(".chrono/index.db");
+        add_glob(&db, &format!("{}/datos/*.jsonl", dir.display()), Some("jsonl"), Some("datos"), None).unwrap();
+        let host_dims = "SELECT COUNT(*) FROM event_dims d JOIN dim_values v ON v.id = d.dim_id WHERE v.key = 'host'";
+        assert_eq!(count(&db, host_dims), 9);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM events WHERE json_extract(attrs, '$.host') IS NOT NULL"), 0);
+        // `msg`, `ts` y `service` ya son título, tiempo y entidad: no se repiten en attrs.
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM events WHERE attrs <> '{}'"), 0);
+
+        // Sin `host` en las dims: el siguiente sync rehace la fuente con host en attrs.
+        config("");
+        sync(&db, None).unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM events"), 9);
+        assert_eq!(count(&db, host_dims), 0);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM events WHERE json_extract(attrs, '$.host') = 'h1'"), 3);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM dim_values WHERE key = 'file'"), 1);
+        // Igual que antes: nada que hacer.
+        sync(&db, None).unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM events"), 9);
+        assert_eq!(count(&db, "SELECT SUM(count) FROM dim_rollups"), 9);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn una_fuente_glob_es_una_fila_y_solo_relee_lo_que_crece() {
         let dir = std::env::temp_dir().join(format!("chrono-glob-src-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
@@ -1201,7 +1278,7 @@ mod tests {
         add_glob(&db, &pattern, Some("jsonl"), Some("datos"), None).unwrap();
         assert_eq!(count(&db, "SELECT COUNT(*) FROM sources"), 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM events"), 9);
-        assert_eq!(count(&db, "SELECT COUNT(DISTINCT json_extract(attrs, '$.file')) FROM events"), 3);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM dim_values WHERE key = 'file'"), 3);
 
         // Crece un fichero y aparece otro: solo entran sus líneas nuevas.
         let mut f = std::fs::OpenOptions::new().append(true).open(dir.join("datos/p1/a.jsonl")).unwrap();
@@ -1217,7 +1294,7 @@ mod tests {
         std::fs::write(dir.join("datos/p1/b.jsonl"), line(9)).unwrap();
         sync(&db, Some(Path::new("datos"))).unwrap();
         assert_eq!(count(&db, "SELECT COUNT(*) FROM events"), 9);
-        assert_eq!(count(&db, "SELECT COUNT(*) FROM events WHERE json_extract(attrs, '$.file') = 'p1/b.jsonl'"), 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM event_dims d JOIN dim_values v ON v.id = d.dim_id WHERE v.key = 'file' AND v.value = 'p1/b.jsonl'"), 1);
 
         // Sin cambios: nada que leer.
         sync(&db, None).unwrap();

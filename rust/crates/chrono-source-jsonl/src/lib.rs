@@ -99,6 +99,10 @@ impl Source for JsonlSource {
         config::validate_options(cfg)
     }
 
+    fn dims(&self, cfg: &SourceConfig) -> Vec<String> {
+        config::effective_options(cfg).map(|c| chrono_core::dims_option(&c)).unwrap_or_default()
+    }
+
     fn open(&self, path: &Path, watermark: Option<Watermark>, cfg: &SourceConfig) -> CoreResult<Box<dyn chrono_core::Cursor>> {
         let meta = fs::metadata(path).map_err(|e| CoreError::Other(format!("leyendo metadata de {}: {e}", path.display())))?;
         if !meta.is_file() {

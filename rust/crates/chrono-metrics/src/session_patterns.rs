@@ -293,7 +293,7 @@ const ATTR_KEYS: &[&str] = &[
 fn load_events(conn: &Connection, since_epoch: i64) -> Result<Vec<Ev>> {
     let cols: Vec<String> = ATTR_KEYS
         .iter()
-        .map(|k| format!("COALESCE(json_extract(attrs, '$.\"{k}\"'), '')"))
+        .map(|k| format!("COALESCE({}, '')", crate::timeline::attr_sql("events", k, &format!("'$.\"{k}\"'"))))
         .collect();
     let sql = format!(
         "SELECT id, kind, at_epoch, {} FROM events

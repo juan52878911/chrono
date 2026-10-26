@@ -25,6 +25,7 @@ pub struct Finding {
 const COMMON_OPTIONS: &[(&str, &str)] = &[
     ("adapter", "fuerza el adaptador (como --as)"),
     ("redact", "\"off\" desactiva la redacción de secretos"),
+    ("dims", "claves de attrs guardadas como dims indexadas, con comas (top attr:k y --attr k:v sin recorrer events)"),
 ];
 
 const TOP_KEYS: &[&str] = &[
@@ -249,6 +250,12 @@ impl Checker<'_> {
         };
         if let Some(r) = opts.get("redact").filter(|r| *r != "off" && *r != "on") {
             self.err(&child(path, "redact"), format!("{r:?}: only \"off\" or \"on\""), format!("{r:?}: solo \"off\" u \"on\""));
+        }
+        // Cada dim es una clave de attrs: los mismos caracteres que `top attr:<clave>`.
+        for d in opts.get("dims").map(|d| d.split(',').map(str::trim).collect::<Vec<_>>()).unwrap_or_default() {
+            if d.is_empty() || !d.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+                self.err(&child(path, "dims"), format!("{d:?}: a dim is an attrs key ([A-Za-z0-9_.-])"), format!("{d:?}: una dim es una clave de attrs ([A-Za-z0-9_.-])"));
+            }
         }
         match adapter {
             Some(a) => {
@@ -482,6 +489,10 @@ mod tests {
         assert_eq!(f, [(r#"source_options.x"#.to_string(), true)]);
         let f = findings(r#"{"version":1,"source_options":{"x":{"adapter":"nope"}}}"#);
         assert_eq!(f, [(r#"source_options.x.adapter"#.to_string(), true)]);
+        // `dims` es común a todos los adaptadores; cada una, una clave de attrs.
+        assert!(findings(r#"{"version":1,"source_options":{"x":{"adapter":"jsonl","dims":"host, container"}}}"#).is_empty());
+        let f = findings(r#"{"version":1,"source_options":{"x":{"adapter":"jsonl","dims":"host,$bad"}}}"#);
+        assert_eq!(f, [(r#"source_options.x.dims"#.to_string(), true)]);
     }
 
     #[test]

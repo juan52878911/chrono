@@ -79,7 +79,10 @@ pub const PRESETS: &[(&str, &[(&str, &str)])] = &[(
         ("level_field", "is_error"),
         ("level_map", "true=ERROR,false="),
         ("links", "tool_use=id,tool_use=tool_use_id,file=input.file_path,url=input.url"),
-        ("attrs", "type,is_error,cwd,gitBranch,sessionId,tool_use_id,id,isSidechain,version"),
+        // `type`, `is_error`, `id` y `tool_use_id` ya son kind, nivel e id del evento;
+        // las cinco que quedan se repiten en cada uso de la sesión: van como dims.
+        ("attrs", "cwd,gitBranch,sessionId,isSidechain,version"),
+        ("dims", "cwd,gitBranch,sessionId,isSidechain,version"),
     ],
 )];
 

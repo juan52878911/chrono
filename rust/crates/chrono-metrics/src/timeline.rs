@@ -152,6 +152,29 @@ pub(crate) fn level_expr(t: &str, infer: bool) -> String {
     }
 }
 
+/// Valor de la attr `key` del evento `t`: su dim si la fuente la declaró (v6,
+/// `event_dims`), si no el JSON con `json_path` (expresión SQL: un literal o un
+/// parámetro). `key` ya validada (`[A-Za-z0-9_.-]`).
+pub(crate) fn attr_sql(t: &str, key: &str, json_path: &str) -> String {
+    format!(
+        "COALESCE((SELECT v.value FROM event_dims d JOIN dim_values v ON v.id = d.dim_id
+                   WHERE d.event_rid = {t}.rid AND v.key = '{key}'), json_extract({t}.attrs, {json_path}))"
+    )
+}
+
+/// Rids de los eventos con la attr `key` igual a (o, con `like`, que empieza por)
+/// el parámetro `p`: por `event_dims`, más el JSON solo de las fuentes que tienen
+/// `key` en `attrs` (`attr_keys`). Sin ninguna, el JSON no se lee.
+pub(crate) fn attr_rids_sql(key: &str, p: &str, like: bool) -> String {
+    let op = if like { "LIKE" } else { "=" };
+    format!(
+        "SELECT d.event_rid FROM event_dims d JOIN dim_values v ON v.id = d.dim_id WHERE v.key = '{key}' AND v.value {op} {p}
+         UNION ALL
+         SELECT ea.rid FROM events ea WHERE ea.source_ref IN (SELECT source_ref FROM attr_keys WHERE key = '{key}')
+                                        AND json_extract(ea.attrs, '$.{key}') {op} {p}"
+    )
+}
+
 /// `,A,B,` en mayúsculas y sin espacios: el parámetro de una lista separada por
 /// comas, para casar con `instr(?, ',' || x || ',')`.
 pub(crate) fn comma_list(raw: &str, upper: bool) -> String {
@@ -232,12 +255,9 @@ impl EventScope<'_> {
             if k.is_empty() || !k.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
                 continue;
             }
-            let path = format!("$.{k}");
             match v.trim().strip_suffix('*') {
-                Some(prefix) => {
-                    push(&format!("json_extract($t.attrs, '{path}') LIKE ?N"), format!("{prefix}%"));
-                }
-                None => push(&format!("json_extract($t.attrs, '{path}') = ?N"), v.trim().to_string()),
+                Some(prefix) => push(&format!("$t.rid IN ({})", attr_rids_sql(k, "?N", true)), format!("{prefix}%")),
+                None => push(&format!("$t.rid IN ({})", attr_rids_sql(k, "?N", false)), v.trim().to_string()),
             }
         }
         if self.until_epoch > 0 {

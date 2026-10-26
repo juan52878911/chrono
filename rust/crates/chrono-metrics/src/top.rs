@@ -62,6 +62,42 @@ fn top_sql_with(from_clause: &str, value_expr: &str, filters: &str) -> String {
     )
 }
 
+/// SQL de `top attr:<clave>` (parámetros: ?1 path JSON, ?2 since, ?3 limit,
+/// ?4 clave, y los del alcance desde ?5).
+fn attr_top_sql(scope: &crate::EventScope, since_epoch: i64) -> (String, Vec<String>) {
+    // v6: los eventos con la clave como dim, por `event_dims` (sin filtros ni
+    // ventana, sin tocar `events`); el resto, del JSON de las fuentes que la
+    // tienen en `attrs`. Un evento la lleva en un sitio o en el otro, nunca en los dos.
+    let unfiltered = scope.is_empty() && since_epoch == 0;
+    let from_dims = if unfiltered {
+        "SELECT v.value AS value FROM event_dims d JOIN dim_values v ON v.id = d.dim_id WHERE v.key = ?4".to_string()
+    } else {
+        let (filters, _) = scope.sql_on("events", 5);
+        format!(
+            "SELECT v.value AS value FROM event_dims d JOIN dim_values v ON v.id = d.dim_id
+             JOIN events ON events.rid = d.event_rid
+             WHERE v.key = ?4 AND (?2 = 0 OR events.at_epoch >= ?2) {filters}"
+        )
+    };
+    let (filters, extra) = scope.sql_on("events", 5);
+    let sql = format!(
+        "SELECT value, COUNT(*) AS count FROM (
+         {from_dims}
+         UNION ALL
+         SELECT json_extract(events.attrs, ?1) AS value
+         FROM events
+         WHERE events.source_ref IN (SELECT source_ref FROM attr_keys WHERE key = ?4)
+           AND (?2 = 0 OR events.at_epoch >= ?2)
+           {filters}
+         )
+         WHERE value IS NOT NULL AND value != ''
+         GROUP BY value
+         ORDER BY count DESC, value ASC
+         LIMIT ?3"
+    );
+    (sql, extra)
+}
+
 /// Valores más frecuentes de la dimensión `dim`, por nº de eventos.
 ///
 /// Dimensiones soportadas:
@@ -69,8 +105,9 @@ fn top_sql_with(from_clause: &str, value_expr: &str, filters: &str) -> String {
 /// - `"actor"`: `actors.key` del evento (cuenta 1 por evento).
 /// - `"entity"`: `entities.key` vía `touches` (cuenta 1 por touch; en logs hay
 ///   un touch por evento, así que coincide con "por evento").
-/// - `"attr:<clave>"`: `json_extract(events.attrs, '$.<clave>')` (cuenta 1 por
-///   evento que tenga esa clave con valor no nulo).
+/// - `"attr:<clave>"`: la dim `<clave>` (`event_dims`) o, en las fuentes que no
+///   la declaran, `json_extract(events.attrs, '$.<clave>')` (cuenta 1 por evento
+///   que tenga esa clave con valor no nulo).
 ///
 /// `since_epoch`: 0 = sin límite. Los valores vacíos/NULL se descartan.
 /// Orden determinista: por `count` DESC, luego `value` ASC. Devuelve error si
@@ -117,20 +154,9 @@ pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilte
             return Err(format!("top: invalid attr key: {key:?}").into());
         }
         let path = format!("$.{key}");
-        let (filters, extra) = scope.sql_on("events", 4);
-        let sql = format!(
-            "SELECT value, COUNT(*) AS count FROM (
-                 SELECT json_extract(events.attrs, ?1) AS value
-                 FROM events
-                 WHERE (?2 = 0 OR events.at_epoch >= ?2)
-                   {filters}
-             )
-             WHERE value IS NOT NULL AND value != ''
-             GROUP BY value
-             ORDER BY count DESC, value ASC
-             LIMIT ?3"
-        );
-        let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&path, &since_epoch, &limit];
+        let (sql, extra) = attr_top_sql(&scope, since_epoch);
+        let key_s = key.to_string();
+        let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&path, &since_epoch, &limit, &key_s];
         for p in &extra {
             bound.push(p);
         }
@@ -527,4 +553,60 @@ mod tests_p3 {
         assert!(!windowed.iter().any(|v| v.value == "TRACE"), "con since>0 excluye TRACE: {windowed:?}");
     }
 
+    /// Dos índices con los mismos eventos: en uno `host` es dim de la fuente `a`
+    /// (y sigue en attrs en `b`); en el otro, attr en las dos. Mismas cifras.
+    #[test]
+    fn dims_y_attrs_dan_las_mismas_cifras_y_top_attr_no_recorre_events() {
+        fn build(name: &str, dims_a: bool) -> (TempDb, Store) {
+            let db = TempDb::new(name);
+            let mut store = Store::open(db.path()).unwrap();
+            for (src, dims) in [("jsonl:/a", dims_a), ("jsonl:/b", false)] {
+                let mut w = store.writer().unwrap();
+                if dims {
+                    w.set_dims(vec!["dur".into(), "host".into()]);
+                }
+                for i in 0..60i64 {
+                    let mut e = mk(&format!("{src}-{i}"), ["ERROR", "INFO", "WARN"][(i % 3) as usize], 1_000 + i * 7_000, "");
+                    e.source_id = src.to_string();
+                    e.attrs.insert("host".into(), format!("h{}", i % 4));
+                    e.attrs.insert("dur".into(), (i % 9).to_string());
+                    if i % 5 == 0 {
+                        e.attrs.insert("trace".into(), format!("t{i}"));
+                    }
+                    w.add_event(&e).unwrap();
+                }
+                w.commit().unwrap();
+            }
+            (db, store)
+        }
+        let (_d1, with_dims) = build("dims", true);
+        let (_d2, plain) = build("plain", false);
+        let q = |s: &Store| -> Vec<String> {
+            let c = s.conn();
+            let mut out = Vec::new();
+            for (since, level, attr) in [(0, None, None), (50_000, None, None), (0, Some("ERROR"), None), (0, None, Some("host:h1")), (0, Some("WARN"), Some("host:h*,dur:3"))] {
+                let f = TopFilter { level, attr, ..Default::default() };
+                for dim in ["attr:host", "attr:dur", "attr:trace", "attr:nada", "level"] {
+                    out.push(format!("{dim} {since} {level:?} {attr:?} {:?}", top_filtered(c, dim, since, &f, 20).unwrap()));
+                }
+                let sc = crate::EventScope { level, attr, ..Default::default() };
+                out.push(format!("stats {:?}", crate::stats(c, "dur", Some("attr:host"), since, &sc, 20).unwrap()));
+            }
+            out
+        };
+        assert_eq!(q(&with_dims), q(&plain));
+        // Las dims salen del JSON de la fuente que las declara, no de la otra.
+        let n: i64 = with_dims.conn().query_row("SELECT COUNT(*) FROM events WHERE attrs LIKE '%host%'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 60);
+        // `top attr:host` sin filtros: event_dims y solo las fuentes con `host` en attrs.
+        let (sql, _) = attr_top_sql(&crate::EventScope::default(), 0);
+        let eqp = format!("EXPLAIN QUERY PLAN {sql}");
+        let mut stmt = with_dims.conn().prepare(&eqp).unwrap();
+        let p: Vec<String> = stmt
+            .query_map(params!["$.host", 0_i64, 20_i64, "host"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(!p.iter().any(|l| l.contains("SCAN events")), "no debe recorrer events:\n{}", p.join("\n"));
+    }
 }

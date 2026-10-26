@@ -50,16 +50,19 @@ pub fn stats(
             "",
         ),
         Some(other) => match other.strip_prefix("attr:") {
-            Some(k) if valid_key(k) => (format!("COALESCE(json_extract(e.attrs, '$.{k}'), '')"), ""),
+            Some(k) if valid_key(k) => (format!("COALESCE({}, '')", crate::timeline::attr_sql("e", k, &format!("'$.{k}'"))), ""),
             _ => return Err(format!("stats: unsupported --by: {other}").into()),
         },
     };
     let (filters, extra) = scope.sql(3);
     let sql = format!(
-        "SELECT {group_expr} AS g, json_extract(e.attrs, ?1) AS v
-         FROM events e {join}
-         WHERE (?2 = 0 OR e.at_epoch >= ?2) AND json_extract(e.attrs, ?1) IS NOT NULL
-         {filters}"
+        "SELECT g, v FROM (
+             SELECT {group_expr} AS g, {value} AS v
+             FROM events e {join}
+             WHERE (?2 = 0 OR e.at_epoch >= ?2)
+             {filters})
+         WHERE v IS NOT NULL",
+        value = crate::timeline::attr_sql("e", attr, "?1")
     );
     let path = format!("$.{attr}");
     let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&path, &since_epoch];

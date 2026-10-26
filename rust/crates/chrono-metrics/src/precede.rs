@@ -90,10 +90,16 @@ impl Default for PrecedeOpts<'_> {
 
 /// Dónde pasó: el contenedor/host/pod si el evento lo trae (separa un preflight
 /// del servicio principal), si no la entidad (el servicio, el fichero).
-const ENTITY_SQL: &str = "COALESCE(json_extract(e.attrs, '$.container'), json_extract(e.attrs, '$.pod'),
-                                   json_extract(e.attrs, '$.host'),
-                                   (SELECT en.key FROM touches t JOIN entities en ON en.id = t.entity_id
-                                    WHERE t.event_rid = e.rid ORDER BY en.key LIMIT 1), '')";
+fn entity_sql() -> String {
+    let a = |k: &str| crate::timeline::attr_sql("e", k, &format!("'$.{k}'"));
+    format!(
+        "COALESCE({}, {}, {}, (SELECT en.key FROM touches t JOIN entities en ON en.id = t.entity_id
+                                WHERE t.event_rid = e.rid ORDER BY en.key LIMIT 1), '')",
+        a("container"),
+        a("pod"),
+        a("host")
+    )
+}
 
 fn severity(level: &str) -> u8 {
     match level.to_ascii_uppercase().as_str() {
@@ -110,9 +116,10 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<(Vec<Episode>, Vec<
     // 1. Anclas en orden temporal.
     let (filters, extra) = o.anchor.sql(2);
     let sql = format!(
-        "SELECT e.id, e.at, e.at_epoch, {ENTITY_SQL} FROM events e
+        "SELECT e.id, e.at, e.at_epoch, {entity} FROM events e
          WHERE e.at_epoch > 0 AND (?1 = 0 OR e.at_epoch >= ?1) {filters}
-         ORDER BY e.at_epoch ASC, e.id ASC"
+         ORDER BY e.at_epoch ASC, e.id ASC",
+        entity = entity_sql()
     );
     let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&o.since_epoch];
     for p in &extra {
@@ -161,9 +168,10 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<(Vec<Episode>, Vec<
     let (pf, pextra) = pre_scope.sql(3);
     let level_sql = crate::timeline::level_expr("e", true);
     let pre_sql = format!(
-        "SELECT e.id, e.at_epoch, e.title, {level_sql}, {ENTITY_SQL} FROM events e
+        "SELECT e.id, e.at_epoch, e.title, {level_sql}, {entity} FROM events e
          WHERE e.at_epoch >= ?1 AND e.at_epoch < ?2 {pf}
-         ORDER BY e.at_epoch ASC, e.id ASC"
+         ORDER BY e.at_epoch ASC, e.id ASC",
+        entity = entity_sql()
     );
     let mut pre = conn.prepare(&pre_sql)?;
     let mut common: BTreeMap<(String, String), i64> = BTreeMap::new();
