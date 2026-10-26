@@ -37,13 +37,33 @@ impl Window {
     }
 }
 
-/// Arma el envelope común leyendo el manifiesto del store.
+/// Arma el envelope común leyendo el manifiesto del store. `truncated` si se
+/// devolvió el tope entero (puede haber más).
 fn envelope(
     store: &Store,
     question: &str,
     window: &Window,
     max_items: usize,
     returned: usize,
+    result: Json,
+) -> Result<Json> {
+    envelope_with(store, question, window, max_items, returned, returned >= max_items, result)
+}
+
+/// Envelope de una respuesta que va siempre entera (un inventario, una ficha):
+/// `max_items = returned` y nunca `truncated` (antes `sources` daba n+1 para
+/// esquivarlo y `phases`/`tickets`/`show` salían como truncadas).
+fn envelope_complete(store: &Store, question: &str, window: &Window, returned: usize, result: Json) -> Result<Json> {
+    envelope_with(store, question, window, returned, returned, false, result)
+}
+
+fn envelope_with(
+    store: &Store,
+    question: &str,
+    window: &Window,
+    max_items: usize,
+    returned: usize,
+    truncated: bool,
     result: Json,
 ) -> Result<Json> {
     let mut manifest = Json::obj();
@@ -67,7 +87,7 @@ fn envelope(
             Json::obj()
                 .set("max_items", Json::Int(max_items as i64))
                 .set("returned", Json::Int(returned as i64))
-                .set("truncated", Json::Bool(returned >= max_items)),
+                .set("truncated", Json::Bool(truncated)),
         )
         .set("result", result))
 }
@@ -249,7 +269,7 @@ pub fn ticket(store: &Store, id: &str) -> Result<Json> {
         .set("commits", Json::Arr(t.commits.iter().map(|s| Json::str(s)).collect()))
         .set("files", Json::Arr(t.files.iter().map(|s| Json::str(s)).collect()))
         .set("prs", Json::Arr(t.prs.iter().map(|n| Json::Int(*n)).collect()));
-    envelope(store, "tickets", &w, 1, 1, result)
+    envelope_complete(store, "tickets", &w, 1, result)
 }
 
 /// `prs`: PRs del forge (tabla `issues`), los más recientes primero.
@@ -303,7 +323,7 @@ pub fn phases(store: &Store) -> Result<Json> {
         .map(|p| Json::obj().set("name", Json::str(&p.name)).set("date", Json::str(&p.date)))
         .collect();
     let n = items.len();
-    envelope(store, "phases", &w, n, n, Json::obj().set("phases", Json::Arr(items)))
+    envelope_complete(store, "phases", &w, n, Json::obj().set("phases", Json::Arr(items)))
 }
 
 /// `sources`: qué hay indexado (por fuente: eventos, ventana, niveles, entidades).
@@ -327,7 +347,7 @@ pub fn sources(store: &Store) -> Result<Json> {
         })
         .collect();
     let n = items.len();
-    envelope(store, "sources", &w, n + 1, n, Json::obj().set("sources", Json::Arr(items)))
+    envelope_complete(store, "sources", &w, n, Json::obj().set("sources", Json::Arr(items)))
 }
 
 /// Ruta del repo git del índice, para `branches` (que lee git en vivo). Primero
@@ -410,7 +430,7 @@ pub fn bench(store: &Store, db_path: &Path) -> Result<Json> {
         .set("templates", Json::Int(templates))
         .set("db_bytes", Json::Int(db_bytes));
     let result = Json::obj().set("stats", stats).set("timings", Json::Arr(timings));
-    envelope(store, "bench", &w, 1, 1, result)
+    envelope_complete(store, "bench", &w, 1, result)
 }
 
 /// `trace <id>`: sigue la cadena de `links` desde un evento (reverts, mismo
@@ -546,7 +566,7 @@ pub fn show(store: &Store, id: &str, entity: Option<&str>) -> Result<Json> {
         .set("truncated", Json::Bool(s.truncated))
         .set("total_bytes", Json::Int(s.total_bytes as i64))
         .set("diff", Json::str(&s.text));
-    envelope(store, "show", &w, 1, 1, result)
+    envelope_complete(store, "show", &w, 1, result)
 }
 
 /// `timeline`: conteo de eventos por bucket temporal. `--bucket` (duración, por

@@ -68,6 +68,18 @@ fn flags_que_se_ignoraban() {
 }
 
 #[test]
+fn sources_y_phases_no_se_dan_por_truncadas() {
+    let d = indice("sources");
+    for cmd in ["sources", "phases"] {
+        let (ok, out, err) = run(&d.0, &[cmd]);
+        assert!(ok, "{err}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let tb = &v["token_budget"];
+        assert_eq!((tb["max_items"].clone(), tb["truncated"].clone()), (tb["returned"].clone(), false.into()), "{cmd}: {tb}");
+    }
+}
+
+#[test]
 fn errores_de_gaps_en_el_idioma_pedido() {
     let d = indice("gaps-lang");
     let args = ["gaps", "--from", "app.jsonl", "--to", "app.jsonl", "--via", "tikcet"];
