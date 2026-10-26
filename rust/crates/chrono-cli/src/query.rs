@@ -322,6 +322,7 @@ pub fn sources(store: &Store) -> Result<Json> {
                 .set("levels", Json::str(&pairs(&s.levels)))
                 .set("unlabeled_inferred", Json::str(&pairs(&s.inferred_levels)))
                 .set("top_entities", Json::str(&pairs(&s.top_entities)))
+                .set("dims", Json::str(&s.dims.join(" ")))
         })
         .collect();
     let n = items.len();

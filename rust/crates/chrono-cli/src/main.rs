@@ -73,7 +73,8 @@ Log-native (multi-source). timeline, stats, top, patterns and events share the s
   stats <attr>         min/p50/p95/max/sum of a numeric attribute per group
                        (--by level|kind|entity|attr:<k>).
   top <dim>            Exact counts of the most frequent values of a dimension
-                       (level|kind|actor|entity|attr:<k>), e.g. top entity --level FATAL.
+                       (level|kind|actor|entity|attr:<k>; a dim declared by a source also
+                       works bare: top cwd = top attr:cwd), e.g. top entity --level FATAL.
   patterns             Most frequent log templates (Drain-light clustering),
                        e.g. patterns --level FATAL,ERROR,CRITICAL --limit 3.
   trace <id>           Follow an event's links chain (reverts, same ticket/PR, vcs.commit ↔ commit).
@@ -166,7 +167,8 @@ Log-native (multi-fuente). timeline, stats, top, patterns y events comparten fil
   stats <attr>         min/p50/p95/max/suma de un atributo numérico por grupo
                        (--by level|kind|entity|attr:<c>).
   top <dim>            Recuento exacto de los valores más frecuentes de una dimensión
-                       (level|kind|actor|entity|attr:<c>), p.ej. top entity --level FATAL.
+                       (level|kind|actor|entity|attr:<c>; una dim declarada por la fuente vale
+                       sin prefijo: top cwd = top attr:cwd), p.ej. top entity --level FATAL.
   patterns             Plantillas de log más frecuentes (clustering Drain-light),
                        p.ej. patterns --level FATAL,ERROR,CRITICAL --limit 3.
   trace <id>           Sigue la cadena de links de un evento (reverts, mismo ticket/PR, vcs.commit ↔ commit).

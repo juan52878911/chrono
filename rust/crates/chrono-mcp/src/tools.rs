@@ -156,7 +156,7 @@ pub fn tool_defs() -> Vec<Value> {
             "top",
             "Recuento EXACTO de los valores más frecuentes de una dimensión sobre todo el índice (sin tope de líneas): cuántos eventos por nivel, en qué servicios caen los FATAL (dim=entity, level=FATAL), qué tipos dominan.",
             with_scope(json!({
-                "dim": str_prop("Dimensión: level | kind | actor | entity | attr:<clave>"),
+                "dim": str_prop("Dimensión: level | kind | actor | entity | attr:<clave> (una dim declarada por la fuente vale sin prefijo: cwd = attr:cwd; sources las lista)"),
                 "limit": json!({"type": "integer", "description": "Máximo de valores (por defecto 25)"})
             })),
             &["dim"],
@@ -599,7 +599,7 @@ fn sources(conn: &Connection) -> Result<Value> {
             json!({
                 "source": s.source, "alias": s.alias, "kind": s.kind, "events": s.events,
                 "first": s.first, "last": s.last,
-                "levels": vc(&s.levels), "inferred_levels_unlabeled": vc(&s.inferred_levels), "kinds": vc(&s.kinds), "top_entities": vc(&s.top_entities),
+                "levels": vc(&s.levels), "inferred_levels_unlabeled": vc(&s.inferred_levels), "kinds": vc(&s.kinds), "top_entities": vc(&s.top_entities), "dims": s.dims,
             })
         })
         .collect();
