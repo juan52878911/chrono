@@ -72,6 +72,13 @@ pub struct Preceded {
     pub common: Vec<Common>,
     /// Con `join`: anclas sin ningún valor de la clave (no forman episodio).
     pub anchors_without_key: usize,
+    /// Anclas sin tiempo (`at_epoch` 0): no se pueden ordenar ni mirar qué las
+    /// precede, así que no forman episodio. Solo sin `since` (con él no entran).
+    pub anchors_without_time: usize,
+    /// Precursores distintos (nivel + plantilla) vistos antes de algún episodio:
+    /// `common` trae los 10 primeros de los que preceden a 2 o más (o a todos si
+    /// hay uno solo); el resto queda fuera.
+    pub precursors_total: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -170,8 +177,14 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
     }
     let mut stmt = conn.prepare(&sql)?;
     let anchors: Vec<(String, String, i64, String, Option<String>)> = stmt
-        .query_map(rusqlite::params_from_iter(bound), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+        .query_map(rusqlite::params_from_iter(&bound), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
         .collect::<std::result::Result<_, _>>()?;
+    // Las que se quedan fuera por no tener tiempo, para decirlo.
+    let anchors_without_time: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM events e WHERE e.at_epoch <= 0 AND ?1 = 0 {filters}"),
+        rusqlite::params_from_iter(&bound),
+        |r| r.get(0),
+    )?;
 
     // 2. Episodios por hueco (por valor de la clave o por origen si se pide;
     // si no, todos juntos). Con clave, un ancla sin ella no forma episodio (se
@@ -295,6 +308,7 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
         list.truncate(o.per_episode);
         ep.preceding = list;
     }
+    let precursors_total = common.len();
     let candidates: Vec<((String, String), i64)> = common.into_iter().filter(|(_, n)| *n >= 2 || episodes_total == 1).collect();
     let templates: Vec<&str> = candidates.iter().map(|((_, t), _)| t.as_str()).collect();
     // Con clave, la base temporal de todo el índice no es la de dentro de una
@@ -306,7 +320,8 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
             let base = rates.get(&template).filter(|b| b.rate > 0.0);
             // Lo esperado se compara con los episodios cuya ventana previa fue
             // activa para la fuente de la plantilla (en los demás no podía estar).
-            let active = base.map(|b| episodes.iter().filter(|(ep, _)| b.is_active(ep.start_epoch)).count().max(n as usize) as i64);
+            // Una ventana con la plantilla es activa por construcción: active >= n.
+            let active = base.map(|b| episodes.iter().filter(|(ep, _)| b.is_active(ep.start_epoch)).count() as i64);
             let base_rate = base.map(|b| b.rate);
             let expected = base_rate.zip(active).map(|(r, a)| r * a as f64);
             let lift = base_rate.zip(active).map(|(r, a)| (n as f64 / a as f64) / r);
@@ -327,7 +342,7 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
     });
     commons.truncate(10);
     let episodes: Vec<Episode> = episodes.into_iter().take(o.max_episodes).map(|(e, _)| e).collect();
-    Ok(Preceded { episodes, episodes_total, common: commons, anchors_without_key })
+    Ok(Preceded { episodes, episodes_total, common: commons, anchors_without_key, anchors_without_time: anchors_without_time as usize, precursors_total })
 }
 
 /// Frecuencia base de una plantilla (P-MSR-3) y dónde vale.
@@ -398,7 +413,11 @@ fn base_rates(conn: &Connection, templates: &[&str], window_ms: i64, since: i64,
         .unwrap_or(60_000);
     let (lo, hi): (Option<i64>, Option<i64>) =
         conn.query_row("SELECT MIN(at_epoch), MAX(at_epoch) FROM events WHERE at_epoch > 0", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    let (Some(mut lo), Some(mut hi)) = (lo, hi) else { return Ok(out) };
+    let (Some(mut lo), Some(hi)) = (lo, hi) else { return Ok(out) };
+    // `hi` es exclusivo y un episodio puede empezar en el último evento del
+    // índice: sin el +1, su ventana no salía activa (active < episodios con la
+    // plantilla, que antes tapaba un `.max`).
+    let mut hi = hi + 1;
     if since > 0 {
         lo = lo.max(since);
     }
@@ -651,6 +670,43 @@ mod tests {
         let pre: Vec<&str> = r.episodes.iter().map(|e| e.preceding[0].template.as_str()).collect();
         assert_eq!(pre, ["WARNING: cola llena", "WARNING: disco lento"], "{:?}", r.episodes);
         assert_eq!(r.anchors_without_key, 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn un_episodio_en_el_ultimo_evento_cuenta_como_activo_y_se_dice_lo_que_queda_fuera() {
+        let (path, mut store) = temp_store("activo");
+        {
+            let mut w = store.writer().unwrap();
+            // Tres caídas cada hora; `disk full` 20 s antes de las dos primeras y
+            // `rara` antes de la segunda. La tercera es el último evento del
+            // índice: su ventana es activa (hay eventos de la fuente en ella).
+            for i in 0..3i64 {
+                let t = 3600 * (i + 1);
+                w.add_event(&ev(&format!("a{i}"), t, "FATAL", "db", "FATAL: shutting down")).unwrap();
+                w.add_event(&ev(&format!("n{i}"), t - 30, "INFO", "db", "INFO: tick")).unwrap();
+                if i < 2 {
+                    w.add_event(&ev(&format!("d{i}"), t - 20, "WARNING", "disk", "WARNING: disk full")).unwrap();
+                }
+            }
+            w.add_event(&ev("r1", 7200 - 10, "WARNING", "disk", "WARNING: rara")).unwrap();
+            // Un ancla sin tiempo: no forma episodio, pero se cuenta.
+            let mut sin = ev("a-sin", 0, "FATAL", "db", "FATAL: shutting down");
+            sin.at = String::new();
+            w.add_event(&sin).unwrap();
+            w.commit().unwrap();
+        }
+        store.build_rollups(60_000).unwrap();
+        store.set_meta("rollup_bucket_ms", "60000").unwrap();
+        let o = PrecedeOpts { anchor: EventScope { level: Some("FATAL"), ..Default::default() }, ..Default::default() };
+        let r = precede(store.conn(), &o).unwrap();
+        assert_eq!(r.episodes_total, 3);
+        let disk = r.common.iter().find(|c| c.template.contains("disk full")).unwrap();
+        // Antes: 2 (la ventana del último no salía activa y el `.max` lo tapaba).
+        assert_eq!((disk.episodes, disk.active_episodes), (2, Some(3)), "{disk:?}");
+        assert_eq!(r.anchors_without_time, 1);
+        // `disk full` y `rara` (en un solo episodio: fuera de `common`).
+        assert_eq!((r.precursors_total, r.common.len()), (2, 1), "{:?}", r.common);
         let _ = std::fs::remove_file(&path);
     }
 }

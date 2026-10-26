@@ -428,7 +428,10 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
                 })
                 .collect();
             let commons: Vec<Value> = r.common.iter().map(|c| common_json(c, n)).collect();
-            let mut out = json!({"episodes_total": n, "episodes_returned": r.episodes.len(), "common_precursors": commons, "episodes": episodes});
+            let mut out = json!({"episodes_total": n, "episodes_returned": r.episodes.len(), "precursors_total": r.precursors_total, "common_precursors": commons, "episodes": episodes});
+            if r.anchors_without_time > 0 {
+                out["anchors_without_time"] = json!(r.anchors_without_time);
+            }
             if o.join.is_some() {
                 out["anchors_without_key"] = json!(r.anchors_without_key);
             }

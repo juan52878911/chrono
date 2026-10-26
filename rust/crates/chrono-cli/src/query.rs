@@ -804,7 +804,12 @@ pub fn precede(
     if o.join.is_some() {
         result = result.set("anchors_without_key", Json::Int(r.anchors_without_key as i64));
     }
+    // Solo si los hay: anclas sin tiempo (no forman episodio).
+    if r.anchors_without_time > 0 {
+        result = result.set("anchors_without_time", Json::Int(r.anchors_without_time as i64));
+    }
     let result = result
+        .set("precursors_total", Json::Int(r.precursors_total as i64))
         .set("gap_ms", Json::Int(o.gap_ms))
         .set("window_ms", Json::Int(o.window_ms))
         .set("common_precursors", Json::Arr(commons))
