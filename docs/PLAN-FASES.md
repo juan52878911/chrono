@@ -21,7 +21,7 @@ Las cifras marcadas como *objetivo* son estimaciones que valida la fase correspo
 - RSS de las consultas −62 a −95 % (`patterns`, `precede`, `events`: ~450 → ~25 MB). `informe` +31 % de
   tiempo (8,8 → 11,6 s) hasta F3, que lo saca de recorrer `events`.
 - Plantillas 68 → 15. Respuestas MCP: `precede` 20 KB → 1,9 KB, `events` 29 KB → 7,4 KB.
-- Ingesta +8 % por la redacción de secretos (era +23 % antes de la comprobación previa sin reservas).
+- Ingesta +8 % en mediciones alternas con el binario previo (+15 % en la pasada del bench, con la máquina cargada) por la redacción de secretos; era +23 % antes de la comprobación previa sin reservas.
 
 Lo que salió al hacerlo y corrige la propuesta:
 - `busy_timeout` ya estaba (5 s en toda apertura); faltaba el cerrojo. Sin él, dos `sync` simultáneos
