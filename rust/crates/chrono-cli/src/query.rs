@@ -314,7 +314,7 @@ pub fn sources(store: &Store) -> Result<Json> {
     let items: Vec<Json> = rows
         .iter()
         .map(|s| {
-            Json::obj()
+            let o = Json::obj()
                 .set("source", Json::str(s.alias.as_deref().unwrap_or(&s.source)))
                 .set("kind", Json::str(&s.kind))
                 .set("events", Json::Int(s.events))
@@ -323,7 +323,9 @@ pub fn sources(store: &Store) -> Result<Json> {
                 .set("levels", Json::str(&pairs(&s.levels)))
                 .set("unlabeled_inferred", Json::str(&pairs(&s.inferred_levels)))
                 .set("top_entities", Json::str(&pairs(&s.top_entities)))
-                .set("dims", Json::str(&s.dims.join(" ")))
+                .set("dims", Json::str(&s.dims.join(" ")));
+            // Solo si los hay: eventos con las dims u opciones de antes de un cambio sin reindexar.
+            if s.stale_dims_events > 0 { o.set("stale_dims_events", Json::Int(s.stale_dims_events)) } else { o }
         })
         .collect();
     let n = items.len();

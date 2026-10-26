@@ -442,7 +442,8 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
             let cfg = chrono_classify_rules::load(&index_root);
             let ctx = IngestCtx { options_keys: gs.options_keys(), preset: gs.preset.as_deref(), group: Some((&s.id, "")) };
             let sides = relation_sides(&cfg, adapter, Path::new(&s.path), &ctx);
-            let changed = reset_if_dims_changed(store, &s.id, &ingest_dims(adapter, &source_config(&cfg, Path::new(&s.path), &ctx), true, &sides))?;
+            let want = ingest_dims(adapter, &source_config(&cfg, Path::new(&s.path), &ctx), true, &sides);
+            let changed = reset_if_dims_changed(store, &s.id, &want, &|st| gs.events_not_rereadable(st))?;
             if changed {
                 gs.clear_state(store)?;
             }
@@ -475,7 +476,10 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
         let ctx = IngestCtx { preset: preset.as_deref(), ..Default::default() };
         let cfg = chrono_classify_rules::load(&index_root);
         let sides = relation_sides(&cfg, adapter, &path, &ctx);
-        let dims_changed = reset_if_dims_changed(store, &s.id, &ingest_dims(adapter, &source_config(&cfg, &path, &ctx), false, &sides))?;
+        let want = ingest_dims(adapter, &source_config(&cfg, &path, &ctx), false, &sides);
+        // Un fichero que ya no está (o no se puede abrir) solo vive en el índice.
+        let gone = |st: &Store| if s.kind != "git" && std::fs::File::open(&path).is_err() { st.count_source_events(&s.id, None) } else { Ok(0) };
+        let dims_changed = reset_if_dims_changed(store, &s.id, &want, &gone)?;
         let wm = if dims_changed { None } else { wm };
         let (n, new_wm, diverged) = match ingest_source(adapter, &path, wm, store, &index_root, &ctx) {
             Ok((n, new_wm, _manifest)) => (n, new_wm, false),
@@ -951,8 +955,37 @@ fn inherit_entity(w: &mut chrono_store::Writer<'_>, rel: &str, ev: &mut chrono_c
 /// Si la fuente se ingirió con otras dims que las de la config de hoy, sus
 /// eventos se borran (la próxima ingesta la rehace entera): las claves que
 /// salieron de `attrs` no se pueden recuperar sin releer la fuente.
-fn reset_if_dims_changed(store: &Store, source_id: &str, want: &[String]) -> Result<bool> {
+///
+/// Salvo si parte de la fuente ya no se puede releer (`not_rereadable`: un
+/// fichero de la glob borrado, el fichero de la fuente desaparecido): borrarla
+/// perdería esos eventos para siempre. Entonces no se reindexa: las dims u
+/// opciones de hoy valen para lo nuevo, lo ya indexado conserva las de antes
+/// (`sources` lo cuenta) y el aviso dice cuántos eventos se habrían perdido.
+fn reset_if_dims_changed(
+    store: &Store,
+    source_id: &str,
+    want: &[String],
+    not_rereadable: &dyn Fn(&Store) -> Result<usize>,
+) -> Result<bool> {
     if !dims_changed(store, source_id, want)? {
+        return Ok(false);
+    }
+    let lost = not_rereadable(store)?;
+    if lost > 0 {
+        let kept = store.count_source_events(source_id, None)?;
+        eprintln!("{}", t(
+            format!(
+                "  dims or options of {source_id} changed, but {lost} of its events can no longer be reread (deleted or unreadable files): \
+                 not reindexing. New events get the new ones; the {kept} already indexed keep the old ones (see `sources`). \
+                 To reindex anyway, losing those {lost}: chrono add <source> again"
+            ),
+            format!(
+                "  las dims u opciones de {source_id} cambiaron, pero {lost} de sus eventos ya no se pueden releer (ficheros borrados o ilegibles): \
+                 no se reindexa. Lo nuevo entra con las de hoy; los {kept} ya indexados conservan las de antes (ver `sources`). \
+                 Para reindexar igualmente, perdiendo esos {lost}: chrono add <fuente> otra vez"
+            ),
+        ));
+        store.set_source_dims(source_id, want)?;
         return Ok(false);
     }
     let had = store.source_dims(source_id)?;

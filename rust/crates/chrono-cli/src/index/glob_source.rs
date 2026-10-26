@@ -172,6 +172,19 @@ impl GlobSource {
         Ok(format!("glob:{}:{:08x}", state.len(), fnv1a32(raw.as_bytes())))
     }
 
+    /// Eventos de los ficheros leídos que ya no están (o no son legibles): solo
+    /// viven en el índice y una relectura entera de la fuente los perdería.
+    pub fn events_not_rereadable(&self, store: &Store) -> Result<usize> {
+        let base = self.base();
+        let mut n = 0;
+        for rel in self.load_state(store)?.keys() {
+            if std::fs::File::open(base.join(rel)).is_err() {
+                n += store.count_source_events(&self.id, Some(rel))?;
+            }
+        }
+        Ok(n)
+    }
+
     /// Olvida el estado (re-ingesta completa en `add`).
     pub fn clear_state(&self, store: &Store) -> Result<()> {
         store.conn().execute("DELETE FROM meta WHERE key = ?1", [self.state_key()])?;

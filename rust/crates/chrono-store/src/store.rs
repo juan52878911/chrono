@@ -26,6 +26,13 @@ pub struct SourceRow {
     pub manifest_json: String,
 }
 
+/// Eventos de la fuente `?1` y, si `?2` no es NULL, solo los del fichero `?2`
+/// de una fuente glob (dim `file`; sin ella, attrs).
+const SELECTED_EVENTS: &str = "source_ref = (SELECT ref FROM sources WHERE id = ?1)
+    AND (?2 IS NULL OR rid IN (SELECT d.event_rid FROM event_dims d JOIN dim_values v ON v.id = d.dim_id
+                               WHERE v.key = 'file' AND v.value = ?2)
+                    OR json_extract(attrs, '$.file') = ?2)";
+
 impl Store {
     /// Abre (o crea) el índice en `path`.
     ///
@@ -228,7 +235,34 @@ impl Store {
         self.delete_events_where(source_id, None)?;
         // La re-ingesta escribe las dims de la config de entonces.
         self.conn.execute("DELETE FROM source_dims WHERE source_ref = (SELECT ref FROM sources WHERE id = ?1)", params![source_id])?;
+        // Ya no queda ningún evento con las dims de antes (ver `set_source_dims`).
+        self.conn.execute("DELETE FROM meta WHERE key = ?1", params![format!("stale_dims:{source_id}")])?;
         Ok(())
+    }
+
+    /// Cambia las dims con que se ingiere la fuente SIN reindexarla (no se puede
+    /// releer entera): lo nuevo entra con `keys` y los eventos que ya estaban
+    /// (rid hasta el máximo de hoy) conservan las de antes. Eso queda en
+    /// `meta.stale_dims:<fuente>` (el rid tope) para que `sources` lo cuente.
+    pub fn set_source_dims(&self, source_id: &str, keys: &[String]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM source_dims WHERE source_ref = (SELECT ref FROM sources WHERE id = ?1)", params![source_id])?;
+        for key in keys {
+            tx.execute("INSERT OR IGNORE INTO source_dims(source_ref, key) SELECT ref, ?2 FROM sources WHERE id = ?1", params![source_id, key])?;
+        }
+        tx.execute(
+            "INSERT INTO meta(key, value) SELECT ?1, COALESCE(MAX(rid), 0) FROM events WHERE source_ref = (SELECT ref FROM sources WHERE id = ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![format!("stale_dims:{source_id}"), source_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Eventos de la fuente (o, con `file`, de ese fichero de una fuente glob).
+    pub fn count_source_events(&self, source_id: &str, file: Option<&str>) -> Result<usize> {
+        let n: i64 = self.conn.query_row(&format!("SELECT COUNT(*) FROM events WHERE {SELECTED_EVENTS}"), params![source_id, file], |r| r.get(0))?;
+        Ok(n as usize)
     }
 
     /// Segunda pasada de `entity_via`, al acabar una ingesta: los eventos que
@@ -299,10 +333,7 @@ impl Store {
         // `source_ref = NULL` no casa nada (no-op, igual que antes). NO se borra
         // la fila de `sources`: su `ref` se conserva para la re-ingesta.
         // v6: `file` es una dim de la fuente glob (ver el CLI); sin ella, attrs.
-        let selected = "source_ref = (SELECT ref FROM sources WHERE id = ?1)
-                        AND (?2 IS NULL OR rid IN (SELECT d.event_rid FROM event_dims d JOIN dim_values v ON v.id = d.dim_id
-                                                   WHERE v.key = 'file' AND v.value = ?2)
-                                        OR json_extract(attrs, '$.file') = ?2)";
+        let selected = SELECTED_EVENTS;
         // Los rids primero: la selección por fichero lee `event_dims`, que se borra.
         tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS del_rids(rid INTEGER PRIMARY KEY); DELETE FROM del_rids;")?;
         tx.execute(&format!("INSERT INTO del_rids SELECT rid FROM events WHERE {selected}"), params![source_id, file])?;

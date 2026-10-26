@@ -25,6 +25,9 @@ pub struct SourceSummary {
     pub top_entities: Vec<(String, i64)>,
     /// Dims que declara la fuente: valen en `top <dim>`, `--attr k:v` y `--join`.
     pub dims: Vec<String>,
+    /// Eventos que conservan las dims u opciones de antes: cambiaron cuando parte
+    /// de la fuente ya no se podía releer y no se reindexó (ver el CLI).
+    pub stale_dims_events: i64,
 }
 
 /// Una fila por fuente, orden estable por id.
@@ -33,12 +36,14 @@ pub fn sources(conn: &Connection) -> Result<Vec<SourceSummary>> {
         "SELECT s.ref, s.id, s.kind, (SELECT COUNT(*) FROM events WHERE source_ref = s.ref),
                 json_extract(s.manifest_json, '$.alias'),
                 (SELECT at FROM events WHERE source_ref = s.ref AND at_epoch > 0 ORDER BY at_epoch ASC LIMIT 1),
-                (SELECT at FROM events WHERE source_ref = s.ref AND at_epoch > 0 ORDER BY at_epoch DESC LIMIT 1)
+                (SELECT at FROM events WHERE source_ref = s.ref AND at_epoch > 0 ORDER BY at_epoch DESC LIMIT 1),
+                (SELECT COUNT(*) FROM events WHERE source_ref = s.ref
+                    AND rid <= CAST((SELECT value FROM meta WHERE key = 'stale_dims:' || s.id) AS INTEGER))
          FROM sources s ORDER BY s.id",
     )?;
-    type Row = (i64, String, String, i64, Option<String>, Option<String>, Option<String>);
+    type Row = (i64, String, String, i64, Option<String>, Option<String>, Option<String>, i64);
     let rows: Vec<Row> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)))?
         .collect::<std::result::Result<_, _>>()?;
     let counts = |sql: &str, sref: i64| -> Result<Vec<(String, i64)>> {
         let mut st = conn.prepare(sql)?;
@@ -52,7 +57,7 @@ pub fn sources(conn: &Connection) -> Result<Vec<SourceSummary>> {
     // fuente tiene varios touches.
     let cube = crate::cube::fresh(conn)?.is_some();
     let mut out = Vec::new();
-    for (sref, id, kind, events, glob_alias, first, last) in rows {
+    for (sref, id, kind, events, glob_alias, first, last, stale_dims_events) in rows {
         // Las fuentes de comando se guardan como jsonl de su caché
         // (`…/cmd/<nombre>.cmd.jsonl`); el alias es lo que acepta `--source`.
         // Una fuente glob lleva el suyo (`add --name`) en el manifiesto.
@@ -100,6 +105,7 @@ pub fn sources(conn: &Connection) -> Result<Vec<SourceSummary>> {
             alias,
             kind,
             events,
+            stale_dims_events,
             first,
             last,
         });

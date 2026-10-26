@@ -165,6 +165,37 @@ fn un_fichero_reescrito_con_el_mismo_tamano_y_mtime_se_relee() {
     assert!(out.contains("0 new events"), "{out}");
 }
 
+#[test]
+fn cambiar_las_dims_con_un_fichero_borrado_no_pierde_sus_eventos() {
+    let cfg = |dims: &str| format!(r#"{{"version":2,"source_options":{{"logs":{{{dims}}}}}}}"#);
+    let env = Env::new("dims-borrado", &cfg(""));
+    let d = env.dir().join("datos");
+    let line = |host: &str| format!("{{\"ts\":\"2024-01-01T00:00:00Z\",\"msg\":\"hola\",\"host\":\"{host}\"}}\n");
+    write(&d, "a.jsonl", &line("h1"));
+    write(&d, "b.jsonl", &line("h2"));
+    env.ok(&["add", &path_s(&d.join("*.jsonl")), "--as", "jsonl", "--name", "logs"]);
+    std::fs::remove_file(d.join("b.jsonl")).unwrap();
+    env.ok(&["sync"]);
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["2"], "un fichero borrado conserva sus eventos");
+
+    env.set_config(&cfg(r#""dims":"host""#));
+    let out = env.ok(&["sync"]);
+    assert!(out.contains("1 of its events can no longer be reread") && out.contains("not reindexing"), "{out}");
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["2"], "{out}");
+    let src = env.ok(&["sources"]);
+    assert!(src.contains("stale_dims_events"), "{src}");
+    // Lo nuevo entra con la dim; el aviso no se repite.
+    write(&d, "c.jsonl", &line("h3"));
+    let out = env.ok(&["sync"]);
+    assert!(!out.contains("reread") && !out.contains("reindexing"), "{out}");
+    assert_eq!(env.sql("SELECT v.value FROM event_dims e JOIN dim_values v ON v.id = e.dim_id WHERE v.key = 'host'"), ["h3"]);
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["3"]);
+    // Reindexar a mano (add otra vez) sí lo rehace todo con lo que queda y quita la marca.
+    env.ok(&["add", &path_s(&d.join("*.jsonl")), "--as", "jsonl", "--name", "logs"]);
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["2"]);
+    assert!(!env.ok(&["sources"]).contains("stale_dims_events"));
+}
+
 /// `tail` durante un ciclo y se mata (no termina solo).
 fn tail_once(env: &Env, then: impl FnOnce()) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_chrono"))
