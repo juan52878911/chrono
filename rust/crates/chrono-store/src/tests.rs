@@ -183,6 +183,19 @@ fn add_event_es_idempotente_en_reingesta() {
 }
 
 #[test]
+fn un_evento_repetido_con_otra_entidad_no_suma_touches() {
+    let db = TempDb::new("repetido");
+    let mut store = Store::open(db.path()).unwrap();
+    let mut w = store.writer().unwrap();
+    assert!(w.add_event(&sample_event("tool_use:toolu_1", &["Bash"], "a")).unwrap());
+    // La misma llamada copiada en otro fichero, sin su uso previo: otra entidad.
+    assert!(!w.add_event(&sample_event("tool_use:toolu_1", &["unknown"], "a")).unwrap());
+    w.commit().unwrap();
+    let touches: i64 = store.conn().query_row("SELECT count(*) FROM touches", [], |r| r.get(0)).unwrap();
+    assert_eq!(touches, 1);
+}
+
+#[test]
 fn writer_sin_commit_revierte_al_hacer_drop() {
     let db = TempDb::new("rollback");
     let mut store = Store::open(db.path()).unwrap();
