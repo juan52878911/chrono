@@ -85,3 +85,30 @@ fn esquema_viejo_dice_el_comando_y_reindex_recupera_todas_las_fuentes() {
     assert!(restos.is_empty(), "{restos:?}");
     assert!(run(root, &["sources"]).status.success());
 }
+
+#[test]
+fn reindex_con_menos_eventos_avisa_y_conserva_la_copia() {
+    let tmp = std::env::temp_dir().join(format!("chrono-reindex-menos-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let dir = TempDir(std::fs::canonicalize(&tmp).unwrap());
+    let root = &dir.0;
+    let db = root.join(".chrono/index.db");
+    let db_s = db.to_string_lossy().into_owned();
+    write(&root.join("logs/app.jsonl"), LINEAS);
+    let out = run(root, &["add", "logs/app.jsonl", "--db", &db_s]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(sql(&db, "SELECT COUNT(*) FROM events"), ["2"]);
+
+    // El log se truncó (rotado) desde la última ingesta.
+    write(&root.join("logs/app.jsonl"), LINEAS.lines().next().unwrap());
+    sql(&db, "UPDATE meta SET value = '5' WHERE key = 'schema_version'");
+    let out = run(root, &["reindex"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("fewer events than before (2 → 1)"), "{err}");
+    assert_eq!(sql(&db, "SELECT COUNT(*) FROM events"), ["1"]);
+    let bak = root.join(".chrono/index.db.v5.bak");
+    assert!(bak.exists(), "la copia con los 2 eventos debe quedarse");
+    assert_eq!(sql(&bak, "SELECT COUNT(*) FROM events"), ["2"]);
+}

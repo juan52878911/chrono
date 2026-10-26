@@ -44,6 +44,7 @@ pub fn run(db: &Path) -> Result<()> {
     let symbols = chrono_store::read_meta_any_version(db, "symbols").as_deref() == Some("1");
     let version = chrono_store::read_meta_any_version(db, "schema_version").unwrap_or_else(|| "0".into());
     let backup = backup_path(db, &version);
+    let before = chrono_store::count_events_any_version(db);
     move_db(db, &backup)?;
     eprintln!("{}", t(
         format!("chrono: reindexing {} sources (old index kept at {} until it finishes)", sources.len(), backup.display()),
@@ -87,12 +88,38 @@ pub fn run(db: &Path) -> Result<()> {
         )
         .into());
     }
+    // Que todas las fuentes se añadan no basta: un fichero truncado o rotado
+    // desde la última ingesta deja menos eventos. Entonces se avisa con las
+    // cifras y se conserva la copia, que es lo único que los tiene.
+    let after = chrono_store::count_events_any_version(db);
+    let counts = match (before, after) {
+        (Some(b), Some(a)) => format!("{b} → {a}"),
+        (_, Some(a)) => format!("? → {a}"),
+        _ => "?".into(),
+    };
+    if let (Some(b), Some(a)) = (before, after) {
+        if a < b {
+            eprintln!("{}", t(
+                format!(
+                    "chrono: reindexed {} sources, but with fewer events than before ({counts}): some source no longer has all its data. The old index stays at {}; delete it once you've checked.",
+                    sources.len(),
+                    backup.display()
+                ),
+                format!(
+                    "chrono: reindexadas {} fuentes, pero con menos eventos que antes ({counts}): alguna fuente ya no tiene todos sus datos. El índice viejo sigue en {}; bórralo cuando lo hayas comprobado.",
+                    sources.len(),
+                    backup.display()
+                ),
+            ));
+            return Ok(());
+        }
+    }
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", backup.display()));
     }
     eprintln!("{}", t(
-        format!("chrono: reindex done ({} sources).", sources.len()),
-        format!("chrono: reindexado ({} fuentes).", sources.len()),
+        format!("chrono: reindex done ({} sources, events {counts}).", sources.len()),
+        format!("chrono: reindexado ({} fuentes, eventos {counts}).", sources.len()),
     ));
     Ok(())
 }

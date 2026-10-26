@@ -76,6 +76,13 @@ pub fn read_meta_any_version(path: &Path, key: &str) -> Option<String> {
     conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0)).ok()
 }
 
+/// Eventos de un índice de cualquier versión (para comparar antes y después
+/// de reindexar); `None` si no se puede leer.
+pub fn count_events_any_version(path: &Path) -> Option<i64> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
