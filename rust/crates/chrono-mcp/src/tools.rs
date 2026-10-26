@@ -47,6 +47,7 @@ fn with_scope(own: Value) -> Value {
         "grep": str_prop("Subcadena del mensaje/título (opcional)"),
         "infer_level": json!({"type": "boolean", "description": "Incluir las líneas SIN nivel de la fuente cuyo texto lo dice (FATAL:, ERROR:…). Para ENCONTRAR, no para contar: las cifras por nivel se dan sin esto (por defecto false)"}),
         "format": str_prop("text (por defecto: tabla compacta con cabecera total/coverage/truncated/index/q) | json"),
+        "depth": str_prop("counts (solo cifras) | summary (sin sub-tablas por fila) | full. Por defecto summary en precede, full en el resto"),
         "attr": str_prop("Atributo clave:valor, p. ej. container:crm_aura_sandbox_postgres (valor con * = prefijo; varios con coma) (opcional)")
     });
     if let (Some(p), Some(o)) = (props.as_object_mut(), own.as_object()) {
@@ -193,7 +194,7 @@ pub fn tool_defs() -> Vec<Value> {
             "events",
             "Los eventos en orden cronológico con todos los filtros: leer los mensajes reales de una ventana (p.ej. lo que pasó justo antes de un reinicio, o una traza completa de product_service).",
             with_scope(json!({
-                "limit": json!({"type": "integer", "description": "Máximo de eventos (por defecto 100)"})
+                "limit": json!({"type": "integer", "description": "Máximo de eventos (por defecto 25; la cabecera dice el total)"})
             })),
             &[],
         ),
@@ -427,7 +428,7 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
             trace(conn, id, depth, limit)?
         }
         "events" => {
-            let limit = arg_i64(args, "limit", 100).max(1) as usize;
+            let limit = arg_i64(args, "limit", 25).max(1) as usize;
             let sc = scope_from(args);
             let filter = chrono_metrics::EventFilter {
                 since_epoch,
@@ -459,6 +460,8 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
         let mut result = result;
         let (head, meta) = crate::contract::header(conn, name, args, &result);
         crate::contract::enrich(name, &mut result, meta["total"].as_i64().unwrap_or(0));
+        let depth = args.get("depth").and_then(Value::as_str).unwrap_or(crate::contract::default_depth(name));
+        crate::contract::apply_depth(&mut result, depth);
         if args.get("format").and_then(Value::as_str) == Some("json") {
             if let Some(o) = result.as_object_mut() {
                 o.insert("meta".into(), meta);

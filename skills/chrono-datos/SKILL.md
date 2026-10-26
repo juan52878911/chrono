@@ -71,7 +71,9 @@ Patrones de trabajo:
   - infer_level=true sirve para ENCONTRAR (¿hubo un error antes de X?, `events`, `precede` ya lo usa):
     nunca niegues un error solo porque `level` no lo encuentra.
 - **Reinicios/caídas**: primero `precede` con el mensaje de apagado y el contenedor; si un episodio trae
-  dos `origins` (p. ej. un preflight y el principal), sepáralos con `attr=container:<nombre>`. A mano:
+  dos `origins` (p. ej. un preflight y el principal), sepáralos con `attr=container:<nombre>`. Por defecto
+  `precede` da los precursores comunes y la lista de episodios (depth=summary); el detalle de lo que
+  precedió a cada episodio, con depth=full y, si son muchos, limit o since/until. A mano:
   `timeline` con grep del mensaje de apagado exacto (en Postgres,
   `received fast shutdown request`; de arranque, `database system is ready to accept connections`),
   entity del servicio y bucket_secs=60: cada bucket es un reinicio con su hora. Para lo que lo

@@ -21,7 +21,7 @@ pub fn main_list(tool: &str) -> Option<(&'static str, i64)> {
     Some(match tool {
         "top" => ("top", 25),
         "patterns" => ("patterns", 25),
-        "events" => ("events", 100),
+        "events" => ("events", 25),
         "timeline" => ("buckets", 500),
         "stats" => ("groups", 25),
         "precede" => ("episodes", 50),
@@ -171,6 +171,39 @@ pub fn header(conn: &Connection, tool: &str, args: &Value, result: &Value) -> (S
     (text, meta)
 }
 
+/// Nivel de detalle de la respuesta (`depth`): `counts` deja solo las cifras
+/// (cada lista se cambia por su longitud), `summary` quita las sub-tablas de
+/// cada fila (los `preceding` de cada episodio de `precede`) y `full` lo deja
+/// todo. Se aplica DESPUÉS de la cabecera, así que `total` y `truncated`
+/// siguen hablando del resultado completo.
+pub fn apply_depth(result: &mut Value, depth: &str) {
+    let Some(o) = result.as_object_mut() else { return };
+    match depth {
+        "counts" => {
+            for v in o.values_mut() {
+                if let Some(a) = v.as_array() {
+                    *v = json!(a.len());
+                }
+            }
+        }
+        "summary" => {
+            for v in o.values_mut() {
+                for row in v.as_array_mut().into_iter().flatten() {
+                    if let Some(r) = row.as_object_mut() {
+                        r.retain(|_, c| !c.is_array() && !c.is_object());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `depth` por defecto: `summary` donde las filas llevan sub-tablas, `full` en el resto.
+pub fn default_depth(tool: &str) -> &'static str {
+    if tool == "precede" { "summary" } else { "full" }
+}
+
 /// Ajustes por herramienta sobre el resultado antes de pintarlo.
 pub fn enrich(tool: &str, result: &mut Value, total: i64) {
     match tool {
@@ -308,6 +341,20 @@ fn render_table(k: &str, rows: &[Value], indent: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn depth_recorta_sin_tocar_las_cifras() {
+        let full = json!({"episodes_total": 2, "episodes": [{"start": "a", "preceding": [{"x": 1}]}, {"start": "b", "preceding": []}]});
+        let mut s = full.clone();
+        apply_depth(&mut s, "summary");
+        assert_eq!(s, json!({"episodes_total": 2, "episodes": [{"start": "a"}, {"start": "b"}]}));
+        let mut c = full.clone();
+        apply_depth(&mut c, "counts");
+        assert_eq!(c, json!({"episodes_total": 2, "episodes": 2}));
+        let mut f = full.clone();
+        apply_depth(&mut f, "full");
+        assert_eq!(f, full);
+    }
 
     #[test]
     fn consulta_canonica_ordenada_y_sin_format() {
