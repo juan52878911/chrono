@@ -41,8 +41,14 @@ Index:
                        --as <kind> forces the adapter (e.g. --as template, config-defined;
                        --as nod for a Nod event file that is still empty).
   sync [path]          Process only the delta since the last watermark (all sources).
+  remove <source>      Remove a source and its events from the index (by id, alias, path or
+                       cmd:<name>), e.g. a log file that no longer exists.
   reindex              Rebuild the index from scratch with the same sources (git, logs, globs,
                        commands), e.g. after a chrono upgrade that changes the index schema.
+                       Queries keep using the current index until the new one replaces it.
+                       A source that can't be read (its file is gone) is left out with a
+                       warning; the old index is kept as <db>.v<N>.bak and the exit code is 3
+                       (also when the new index has fewer events than the old one).
   config check         Validate .chrono/config.json: each problem with its key path.
 
 Queries (JSON with `schema_version`, `entity`/`id`; add --compact for a plain-text table of `result`
@@ -146,8 +152,14 @@ Uso:
                        --as <kind> fuerza el adaptador (p.ej. --as template, definido por config;
                        --as nod para un fichero de eventos de Nod aún vacío).
   sync [ruta]          Procesa solo el delta desde la última marca (todas las fuentes).
+  remove <fuente>      Quita una fuente y sus eventos del índice (por id, alias, ruta o
+                       cmd:<nombre>), p. ej. un fichero de log que ya no existe.
   reindex              Reconstruye el índice desde cero con las mismas fuentes (git, logs, globs,
                        comandos), p. ej. tras actualizar chrono a una versión con otro esquema.
+                       Las consultas siguen con el índice actual hasta que el nuevo lo sustituye.
+                       Una fuente que no se puede leer (su fichero ya no está) queda fuera con
+                       un aviso; el índice viejo se conserva como <db>.v<N>.bak y sale con 3
+                       (también si el índice nuevo tiene menos eventos que el viejo).
   config check         Valida .chrono/config.json: cada problema con la ruta de su clave.
 
 Consulta (JSON con `schema_version`, `entity`/`id`; con --compact, una tabla de texto solo con
@@ -593,7 +605,7 @@ fn check_source(store: &chrono_store::Store, s: &str, arg: &str) {
 
 /// Subcomandos que entiende `main` (los que no abren índice y las consultas).
 const COMMANDS: &[&str] = &[
-    "version", "help", "config", "init", "hook", "mcp", "sync", "reindex", "add", "tail", "hotspots", "coupling", "owners",
+    "version", "help", "config", "init", "hook", "mcp", "sync", "reindex", "add", "remove", "tail", "hotspots", "coupling", "owners",
     "bugs", "churn", "tickets", "prs", "branches", "phases", "sources", "search", "similar", "timeline", "stats", "top",
     "patterns", "events", "bench", "explain", "informe", "precede", "correlate", "gaps", "trace", "session_patterns", "show",
 ];
@@ -813,6 +825,11 @@ fn main() {
         let abs = std::fs::canonicalize(&cache).unwrap_or(cache);
         f.source = Some(format!("jsonl:{}", abs.display()));
     }
+    // `sync`, `tail` y `remove` no crean el índice (antes `Store::open` dejaba uno
+    // vacío en una ruta equivocada): el mismo error que las consultas. `add` sí.
+    if matches!(cmd, "sync" | "tail" | "remove") && !db.is_file() {
+        fatal_open(Box::new(chrono_store::NoIndex { path: db.clone() }), &db, &f);
+    }
     if cmd == "sync" {
         // Las fuentes de comando se refrescan ANTES del sync: vuelven a
         // ejecutarse y añaden a su caché lo nuevo, que el sync procesa como el
@@ -836,8 +853,18 @@ fn main() {
         return;
     }
     if cmd == "reindex" {
-        if let Err(e) = reindex::run(&db) {
-            fatal(e);
+        match reindex::run(&db) {
+            Ok(false) => {}
+            // Hecho, pero con menos que antes: la copia vieja queda y se dice.
+            Ok(true) => std::process::exit(3),
+            Err(e) => fatal(e),
+        }
+        return;
+    }
+    if cmd == "remove" {
+        let arg = require_pos(&f, "remove needs a <source> (its id, alias or path; see chrono sources)", "remove necesita una <fuente> (su id, alias o ruta; ver chrono sources)");
+        if let Err(e) = index::remove(&db, &arg) {
+            fatal_open(e, &db, &f);
         }
         return;
     }

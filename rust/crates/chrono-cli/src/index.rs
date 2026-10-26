@@ -371,10 +371,59 @@ pub fn add_glob(db: &Path, pattern: &str, as_kind: Option<&str>, alias: Option<&
     Ok(())
 }
 
+/// `chrono remove <fuente>`: quita una fuente y sus eventos del índice. La
+/// fuente se nombra por su id (`jsonl:/ruta`), su alias (`--name`), su ruta o
+/// patrón tal como se añadió, o `cmd:<nombre>`. Es la salida para una fuente
+/// que ya no existe y no se quiere seguir viendo en `sources` ni en `sync`.
+pub fn remove(db: &Path, arg: &str) -> Result<()> {
+    // Sin índice, el mismo error que las consultas (y no se crea uno vacío).
+    if !db.is_file() {
+        return Err(chrono_store::NoIndex { path: db.to_path_buf() }.into());
+    }
+    let _lock = lock_ingest(db)?;
+    let store = Store::open(db)?;
+    let sources = store.list_sources()?;
+    let path = match arg.strip_prefix(crate::command::PREFIX) {
+        Some(name) => crate::command::cache_path(db, name),
+        None => PathBuf::from(arg),
+    };
+    let abs = std::fs::canonicalize(&path).map(|p| p.to_string_lossy().into_owned());
+    let pattern = glob_source::absolutize(arg);
+    let alias = |s: &chrono_store::SourceRow| manifest_value(&s.manifest_json, "alias");
+    let found = sources.iter().find(|s| {
+        s.id == arg
+            || alias(s).as_deref() == Some(arg)
+            || abs.as_deref().is_ok_and(|a| a == s.path)
+            || (s.path == pattern && GlobSource::from_row(&s.id, &s.manifest_json).is_some())
+            // Un fichero que ya no está no se puede canonicalizar: su ruta absoluta.
+            || std::path::absolute(&path).is_ok_and(|p| p.to_string_lossy() == s.path)
+    });
+    let Some(s) = found else {
+        let names: Vec<String> = sources.iter().map(|s| alias(s).unwrap_or_else(|| s.id.clone())).collect();
+        return Err(t(
+            format!("no source matches {arg:?}. Sources: {} (see chrono sources)", names.join(", ")),
+            format!("ninguna fuente casa con {arg:?}. Fuentes: {} (ver chrono sources)", names.join(", ")),
+        )
+        .into());
+    };
+    let n = store.remove_source(&s.id)?;
+    store.rebuild_fts()?;
+    finalize(&index_root_of(db), &store, &[], false, false)?;
+    let total = store.list_sources()?.len();
+    eprintln!("{}", t(
+        format!("chrono: removed {} ({n} events). Index now has {total} sources.", s.id),
+        format!("chrono: quitada {} ({n} eventos). El índice tiene ya {total} fuentes.", s.id),
+    ));
+    Ok(())
+}
+
 /// `chrono sync [path]`: sincroniza TODAS las fuentes registradas (o solo la de
 /// `path`, si se pasa), ingiriendo el delta desde el watermark de cada una. Si
 /// una fuente diverge (rebase/force-push, log rotado), reindexa SOLO esa fuente.
 pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
+    if !db.is_file() {
+        return Err(chrono_store::NoIndex { path: db.to_path_buf() }.into());
+    }
     let _lock = lock_ingest(db)?;
     let mut store = Store::open(db)?;
     sync_store(&mut store, &index_root_of(db), source_arg, false)
@@ -422,6 +471,9 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
     let symbols_enabled = store.meta("symbols")?.as_deref() == Some("1");
     let now = now_iso();
     let mut total = 0usize;
+    // De `total`, los que sustituyen a eventos borrados (relecturas de ficheros
+    // reescritos, divergencias y cambios de dims): no son nuevos.
+    let mut reread = 0usize;
     let mut synced_any = false;
     let mut matched_any = false;
     let mut diverged_any = false;
@@ -475,7 +527,8 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
             let ctx = IngestCtx { options_keys: gs.options_keys(), preset: gs.preset.as_deref(), group: Some((&s.id, "")), legacy_ids: false };
             let sides = relation_sides(&cfg, adapter, Path::new(&s.path), &ctx);
             let want = ingest_dims(adapter, &source_config(&cfg, Path::new(&s.path), &ctx), true, &sides);
-            let changed = reset_if_dims_changed(store, &s.id, &want, &|st| gs.events_not_rereadable(st))?;
+            let reset = reset_if_dims_changed(store, &s.id, &want, &|st| gs.events_not_rereadable(st))?;
+            let changed = reset.is_some();
             if changed {
                 gs.clear_state(store)?;
             }
@@ -488,10 +541,17 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
             };
             r.diverged |= changed;
             store.upsert_source(&s.id, &s.kind, &s.path, &r.watermark, &gs.manifest(r.files_total), &now)?;
-            store.delete_meta(&format!("sync_error:{}", s.id))?;
+            if r.errors.is_empty() {
+                store.delete_meta(&format!("sync_error:{}", s.id))?;
+            } else {
+                let e = r.errors.join("; ");
+                store.set_meta(&format!("sync_error:{}", s.id), &format!("{} {e}", now_iso()))?;
+                failed.push(format!("{} ({e})", s.id));
+            }
             diverged_any |= r.diverged;
             synced_any |= r.events > 0 || r.diverged;
             total += r.events;
+            reread += r.reread + reset.map_or(0, |d| d.min(r.events - r.reread));
             continue;
         }
         let path = PathBuf::from(&s.path);
@@ -500,6 +560,8 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
         if s.kind == "git" {
             if let Ok(head) = chrono_source_git::head_sha(&path) {
                 if s.watermark == format!("sha:{head}") {
+                    // Se leyó bien: un error de un sync anterior ya no vale.
+                    store.delete_meta(&format!("sync_error:{}", s.id))?;
                     continue;
                 }
             }
@@ -518,11 +580,14 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
         let want = ingest_dims(adapter, &source_config(&cfg, &path, &ctx), false, &sides);
         // Un fichero que ya no está (o no se puede abrir) solo vive en el índice.
         let gone = |st: &Store| if s.kind != "git" && std::fs::File::open(&path).is_err() { st.count_source_events(&s.id, None) } else { Ok(0) };
-        let dims_changed = reset_if_dims_changed(store, &s.id, &want, &gone)?;
+        let reset = reset_if_dims_changed(store, &s.id, &want, &gone)?;
+        let dims_changed = reset.is_some();
+        let mut deleted = reset.unwrap_or(0);
         let wm = if dims_changed { None } else { wm };
         let (n, new_wm, diverged) = match ingest_source(adapter, &path, wm, store, &index_root, &ctx) {
             Ok((n, new_wm, _manifest)) => (n, new_wm, false),
             Err(IngestError::Diverged) => {
+                deleted = store.count_source_events(&s.id, None)?;
                 eprintln!("{}", t(
                     format!("  divergence in {} — reindexing that source", s.id),
                     format!("  divergencia en {} — se reindexa esa fuente", s.id),
@@ -559,6 +624,7 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
             }
         }
         total += n;
+        reread += n.min(deleted);
     }
 
     if filter_id.is_some() && !matched_any {
@@ -575,8 +641,8 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
             return Ok(());
         }
         Err(t(
-            format!("sync: {} source(s) could not be read: {} (their events are kept; see `sources`)", failed.len(), failed.join(", ")),
-            format!("sync: {} fuente(s) no se pudieron leer: {} (sus eventos se conservan; ver `sources`)", failed.len(), failed.join(", ")),
+            format!("sync: {} source(s) could not be read: {} (their events are kept; see `sources`; chrono remove <source> drops one for good)", failed.len(), failed.join(", ")),
+            format!("sync: {} fuente(s) no se pudieron leer: {} (sus eventos se conservan; ver `sources`; chrono remove <fuente> quita una del todo)", failed.len(), failed.join(", ")),
         )
         .into())
     };
@@ -597,7 +663,11 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
         store.fts_sync()?;
     }
     finalize(&index_root, store, &changed_git_paths, !diverged_any, light)?;
-    say(t(format!("sync: {total} new events"), format!("sync: {total} eventos nuevos")));
+    say(if reread > 0 {
+        t(format!("sync: {} new events, {reread} reread", total - reread), format!("sync: {} eventos nuevos, {reread} releídos", total - reread))
+    } else {
+        t(format!("sync: {total} new events"), format!("sync: {total} eventos nuevos"))
+    });
     result()
 }
 
@@ -638,6 +708,15 @@ pub fn tail(
     let mut stdout = std::io::stdout();
     loop {
         {
+            // El índice desapareció (borrado o movido): antes `Store::open` creaba
+            // uno vacío en su sitio y el `tail` seguía sobre él.
+            if !db.is_file() {
+                return Err(t(
+                    format!("the index {} is gone (deleted or moved); tail stops", db.display()),
+                    format!("el índice {} ya no está (borrado o movido); tail se para", db.display()),
+                )
+                .into());
+            }
             // Por vuelta, no durante todo el `tail`: un `sync` de un hook no espera horas.
             let _lock = lock_ingest(db)?;
             // Un `reindex` aparta el índice y crea otro en la misma ruta: con la
@@ -1256,14 +1335,17 @@ fn inherit_entity(w: &mut chrono_store::Writer<'_>, rel: &str, ev: &mut chrono_c
 /// perdería esos eventos para siempre. Entonces no se reindexa: las dims u
 /// opciones de hoy valen para lo nuevo, lo ya indexado conserva las de antes
 /// (`sources` lo cuenta) y el aviso dice cuántos eventos se habrían perdido.
+///
+/// Devuelve cuántos eventos se borraron (`None` si no se borró nada), para
+/// contar como releídos y no como nuevos los que los sustituyan.
 fn reset_if_dims_changed(
     store: &Store,
     source_id: &str,
     want: &[String],
     not_rereadable: &dyn Fn(&Store) -> Result<usize>,
-) -> Result<bool> {
+) -> Result<Option<usize>> {
     if !dims_changed(store, source_id, want)? {
-        return Ok(false);
+        return Ok(None);
     }
     let lost = not_rereadable(store)?;
     if lost > 0 {
@@ -1281,7 +1363,7 @@ fn reset_if_dims_changed(
             ),
         ));
         store.set_source_dims(source_id, want)?;
-        return Ok(false);
+        return Ok(None);
     }
     let had = store.source_dims(source_id)?;
     let mark = IDS_MARK.to_string();
@@ -1296,13 +1378,14 @@ fn reset_if_dims_changed(
             format!("  las dims u opciones de {source_id} cambiaron ({} → {}) — se reindexa esa fuente", had.join(","), want.join(",")),
         ));
     }
+    let deleted = store.count_source_events(source_id, None)?;
     store.delete_source_events(source_id)?;
     // La marca, aunque la relectura no traiga ningún evento (el writer solo
     // escribe las dims con el primero): si no, se releería en cada `sync`.
     if want.contains(&mark) {
         store.add_source_dims(source_id, &[mark])?;
     }
-    Ok(true)
+    Ok(Some(deleted))
 }
 
 /// Enriquecimiento tras la ingesta (multi-fuente): exclusiones de ruido

@@ -105,7 +105,8 @@ fn reindex_con_menos_eventos_avisa_y_conserva_la_copia() {
     sql(&db, "UPDATE meta SET value = '5' WHERE key = 'schema_version'");
     let out = run(root, &["reindex"]);
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "{err}");
+    // Antes salía con 0 y solo lo decía por stderr.
+    assert_eq!(out.status.code(), Some(3), "{err}");
     assert!(err.contains("fewer events than before (2 → 1)"), "{err}");
     assert_eq!(sql(&db, "SELECT COUNT(*) FROM events"), ["1"]);
     let bak = root.join(".chrono/index.db.v5.bak");
@@ -217,6 +218,165 @@ fn una_consulta_sobre_una_ruta_sin_indice_no_crea_uno_vacio() {
     let db = dir.0.join("nada.db");
     let out = run(&dir.0, &["top", "level", "--db", &db.to_string_lossy()]);
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("chrono init"), "{}", String::from_utf8_lossy(&out.stderr));
+    let err = String::from_utf8_lossy(&out.stderr);
+    // En inglés con CHRONO_LANG=en (antes salía en español).
+    assert!(err.contains("no index at") && err.contains("chrono init"), "{err}");
     assert!(!db.exists(), "antes quedaba un .db vacío");
+    // sync y tail tampoco lo crean (antes, sí); add sí.
+    for cmd in [&["sync"][..], &["tail", "--interval", "1s"]] {
+        let mut a = cmd.to_vec();
+        let db_s = db.to_string_lossy().into_owned();
+        a.extend(["--db", &db_s]);
+        let out = run(&dir.0, &a);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success() && err.contains("no index at"), "{cmd:?}: {err}");
+        assert!(!db.exists() && !PathBuf::from(format!("{db_s}.lock")).exists(), "{cmd:?} creó el índice");
+    }
+}
+
+#[test]
+fn tail_se_para_si_el_indice_desaparece() {
+    let (dir, db) = dos_fuentes("tail-borrado", 10);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_chrono"))
+        .args(["tail", "--interval", "1s", "--db", &db.to_string_lossy()])
+        .current_dir(&dir.0)
+        .env("CHRONO_LANG", "en")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    for s in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{s}", db.display()));
+    }
+    let start = std::time::Instant::now();
+    while child.try_wait().unwrap().is_none() && start.elapsed() < std::time::Duration::from_secs(5) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let out = child.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    // Antes: creaba un índice vacío en su sitio y seguía.
+    assert!(!out.status.success() && err.contains("is gone"), "{err}");
+    assert!(!db.exists(), "tail recreó el índice");
+}
+
+#[test]
+fn una_fuente_que_ya_no_existe_no_bloquea_el_reindex_ni_la_ingesta() {
+    let (dir, db) = dos_fuentes("fuente-borrada", 10);
+    let root = &dir.0;
+    let db_s = db.to_string_lossy().into_owned();
+    let n_antes = sql(&db, "SELECT COUNT(*) FROM events")[0].parse::<i64>().unwrap();
+    std::fs::remove_file(root.join("logs/app.jsonl")).unwrap();
+
+    let out = run(root, &["reindex", "--db", &db_s]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    // Queda fuera, con sus cifras, y la copia vieja (que la tiene) se conserva.
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(err.contains("Left out because they could not be read") && err.contains("app.jsonl (2 events)"), "{err}");
+    assert_eq!(baks(&db), ["index.db.v7.bak"], "sin marca .reindexing");
+    let bak = root.join(".chrono/index.db.v7.bak");
+    assert_eq!(sql(&bak, "SELECT COUNT(*) FROM events"), [n_antes.to_string()]);
+    assert_eq!(sql(&db, "SELECT COUNT(*) FROM sources"), ["1"]);
+    assert_eq!(sql(&db, "SELECT COUNT(*) FROM events"), [(n_antes - 2).to_string()]);
+
+    // Antes: «a reindex … did not finish» en sync, add y reindex, para siempre.
+    let out = run(root, &["sync", "--db", &db_s]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    write(&root.join("logs/otro.jsonl"), LINEAS);
+    let out = run(root, &["add", "logs/otro.jsonl", "--db", &db_s]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = run(root, &["reindex", "--db", &db_s]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(sql(&db, "SELECT COUNT(*) FROM sources"), ["2"]);
+}
+
+#[test]
+fn un_indice_atascado_por_un_reindex_parcial_de_antes_se_recupera() {
+    // El estado que dejaba el reindex de antes: marca, copia buena e índice a medias.
+    let (dir, db) = dos_fuentes("atascado", 10);
+    let root = &dir.0;
+    let db_s = db.to_string_lossy().into_owned();
+    let copia = PathBuf::from(format!("{db_s}.v7.bak"));
+    std::fs::copy(&db, &copia).unwrap();
+    sql(&db, "DELETE FROM events WHERE source_ref = (SELECT ref FROM sources WHERE id LIKE '%app.jsonl')");
+    sql(&db, "DELETE FROM sources WHERE id LIKE '%app.jsonl'");
+    std::fs::write(format!("{db_s}.reindexing"), copia.to_string_lossy().as_bytes()).unwrap();
+    std::fs::remove_file(root.join("logs/app.jsonl")).unwrap();
+
+    let out = run(root, &["reindex", "--db", &db_s]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(err.contains("resuming") && err.contains("app.jsonl (2 events)"), "{err}");
+    assert!(!PathBuf::from(format!("{db_s}.reindexing")).exists());
+    let out = run(root, &["sync", "--db", &db_s]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn las_consultas_no_fallan_mientras_corre_un_reindex() {
+    let (dir, db) = dos_fuentes("lector", 60_000);
+    let db_s = db.to_string_lossy().into_owned();
+    let mut reindex = Command::new(env!("CARGO_BIN_EXE_chrono"))
+        .args(["reindex", "--db", &db_s])
+        .current_dir(&dir.0)
+        .env("CHRONO_LANG", "en")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Antes: el índice desaparecía un rato («no hay índice…», en español),
+    // renombrar sus -wal/-shm en uso daba «disk I/O error» y, mientras se
+    // reconstruía en su sitio, las consultas veían un índice a medias.
+    let mut lecturas = 0;
+    let mut fallos = Vec::new();
+    loop {
+        let done = reindex.try_wait().unwrap().is_some();
+        let out = run(&dir.0, &["sources", "--db", &db_s]);
+        lecturas += 1;
+        let text = String::from_utf8_lossy(&out.stdout);
+        // Y siempre el índice entero (antes, durante el reindex, uno a medias).
+        if !out.status.success() || !text.contains("grande.jsonl") || !text.contains("app.jsonl") {
+            fallos.push(format!("{text}{}", String::from_utf8_lossy(&out.stderr)));
+        }
+        if done {
+            break;
+        }
+    }
+    let out = reindex.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(fallos.is_empty(), "{} de {lecturas} lecturas fallaron: {:?}", fallos.len(), &fallos[..fallos.len().min(3)]);
+    assert!(lecturas > 3, "el reindex fue demasiado rápido para probar nada ({lecturas})");
+    assert!(baks(&db).is_empty(), "{:?}", baks(&db));
+    assert!(!PathBuf::from(format!("{db_s}.new")).exists());
+}
+
+#[test]
+fn remove_quita_una_fuente_que_ya_no_existe() {
+    let (dir, db) = dos_fuentes("remove", 10);
+    let root = &dir.0;
+    let db_s = db.to_string_lossy().into_owned();
+    std::fs::remove_file(root.join("logs/app.jsonl")).unwrap();
+    // Un nombre que no casa: error con las fuentes que hay.
+    let out = run(root, &["remove", "nada.jsonl", "--db", &db_s]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && err.contains("no source matches") && err.contains("app.jsonl"), "{err}");
+    // Por su ruta, aunque el fichero ya no esté.
+    let out = run(root, &["remove", "logs/app.jsonl", "--db", &db_s]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("removed jsonl:") && err.contains("(2 events)") && err.contains("now has 1 sources"), "{err}");
+    assert_eq!(sql(&db, "SELECT COUNT(*) FROM sources"), ["1"]);
+    assert_eq!(sql(&db, "SELECT COUNT(*) FROM events WHERE title IN ('falla A', 'va bien')"), ["0"]);
+    assert_eq!(sql(&db, "SELECT COUNT(*) FROM events_fts WHERE events_fts MATCH 'falla'"), ["0"]);
+    let total = sql(&db, "SELECT COUNT(*) FROM events");
+    assert_eq!(sql(&db, "SELECT SUM(count) FROM dim_rollups"), total);
+    // sync ya no la echa de menos y reindex sale bien.
+    let out = run(root, &["sync", "--db", &db_s]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = run(root, &["reindex", "--db", &db_s]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // Sin índice, el error de las consultas y no se crea uno.
+    let nada = root.join("nada.db");
+    let out = run(root, &["remove", "x", "--db", &nada.to_string_lossy()]);
+    assert!(!out.status.success() && !nada.exists());
 }

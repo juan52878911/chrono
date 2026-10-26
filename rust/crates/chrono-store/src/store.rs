@@ -33,6 +33,16 @@ const SELECTED_EVENTS: &str = "source_ref = (SELECT ref FROM sources WHERE id = 
                                WHERE v.key = 'file' AND v.value = ?2)
                     OR json_extract(attrs, '$.file') = ?2)";
 
+/// Antes de borrar eventos, el `rid` más alto que ha existido queda en
+/// `meta.rid_hwm` (solo sube). `events.rid` es `INTEGER PRIMARY KEY` sin
+/// AUTOINCREMENT: SQLite daría a lo nuevo los rid de lo borrado si eran los más
+/// altos, y quien sigue el índice por rid (`tail`, la marca `stale_dims`, los
+/// watermarks de FTS y rollups) se saltaba esos eventos o los contaba mal. El
+/// `Writer` numera por encima de este suelo (ver `Writer::add_event`).
+pub(crate) const BUMP_RID_HWM: &str = "INSERT INTO meta(key, value)
+    SELECT 'rid_hwm', (SELECT MAX(rid) FROM events) WHERE EXISTS (SELECT 1 FROM events)
+    ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER))";
+
 impl Store {
     /// Abre (o crea) el índice en `path`.
     ///
@@ -66,7 +76,7 @@ impl Store {
         } else {
             // Una consulta sobre una ruta sin índice no deja un `.db` vacío.
             if !path.is_file() {
-                return Err(format!("no hay índice en {} (créalo con chrono init)", path.display()).into());
+                return Err(crate::NoIndex { path: path.to_path_buf() }.into());
             }
             use rusqlite::OpenFlags;
             Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX)?
@@ -298,6 +308,29 @@ impl Store {
         Ok(())
     }
 
+    /// Quita una fuente del índice: sus eventos (con touches, labels, links y
+    /// dims), su fila de `sources` y lo que cuelga de ella (rollups, plantillas,
+    /// claves de attrs, marcadores y sus `meta`). Actores y entidades se quedan:
+    /// son compartidos. Devuelve cuántos eventos tenía. FTS y rollups quedan por
+    /// reconstruir (lo hace quien llama).
+    pub fn remove_source(&self, source_id: &str) -> Result<usize> {
+        let n = self.count_source_events(source_id, None)?;
+        self.delete_source_events(source_id)?;
+        let tx = self.conn.unchecked_transaction()?;
+        for table in ["rollups", "dim_rollups", "attr_keys", "source_dims"] {
+            tx.execute(&format!("DELETE FROM {table} WHERE source_ref = (SELECT ref FROM sources WHERE id = ?1)"), params![source_id])?;
+        }
+        for table in ["templates", "markers"] {
+            tx.execute(&format!("DELETE FROM {table} WHERE source_id = ?1"), params![source_id])?;
+        }
+        for key in ["sync_error", "stale_dims", "glob_state"] {
+            tx.execute("DELETE FROM meta WHERE key = ?1", params![format!("{key}:{source_id}")])?;
+        }
+        tx.execute("DELETE FROM sources WHERE id = ?1", params![source_id])?;
+        tx.commit()?;
+        Ok(n)
+    }
+
     /// Cambia las dims con que se ingiere la fuente SIN reindexarla (no se puede
     /// releer entera): lo nuevo entra con `keys` y los eventos que ya estaban
     /// (rid hasta el máximo de hoy) conservan las de antes. Eso queda en
@@ -408,6 +441,7 @@ impl Store {
         // Los rids primero: la selección por fichero lee `event_dims`, que se borra.
         tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS del_rids(rid INTEGER PRIMARY KEY); DELETE FROM del_rids;")?;
         tx.execute(&format!("INSERT INTO del_rids SELECT rid FROM events WHERE {selected}"), params![source_id, file])?;
+        tx.execute(BUMP_RID_HWM, [])?;
         for child in ["touches", "labels", "event_links", "event_dims"] {
             tx.execute(&format!("DELETE FROM {child} WHERE event_rid IN (SELECT rid FROM del_rids)"), [])?;
         }
@@ -424,6 +458,7 @@ impl Store {
     /// El orden de borrado respeta las claves foráneas: hijos antes que padres.
     pub fn reset(&mut self) -> Result<()> {
         let tx = self.conn.transaction()?;
+        tx.execute(BUMP_RID_HWM, [])?;
         for table in [
             "touches",
             "event_links",
@@ -450,8 +485,8 @@ impl Store {
         // events_fts es de contenido externo: hay que vaciarlo explícitamente.
         tx.execute("INSERT INTO events_fts(events_fts) VALUES ('delete-all')", [])?;
         // Los watermarks incrementales (FTS/rollups) apuntan a rowids que ya no
-        // existen; al vaciar `events` los rowids reinician en 1, así que se
-        // borran para que el próximo build completo los recalcule desde 0.
+        // existen: se borran para que el próximo build completo los recalcule
+        // desde 0. Los rid nuevos siguen por encima de `rid_hwm`, no desde 1.
         tx.execute("DELETE FROM meta WHERE key IN ('fts_max_rowid', 'rollup_max_rowid')", [])?;
         tx.commit()?;
         Ok(())

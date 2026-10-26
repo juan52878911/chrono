@@ -538,3 +538,71 @@ fn open_read_sin_indice_no_crea_nada() {
     assert!(err.contains("no hay índice"), "{err}");
     assert!(!db.path().exists());
 }
+
+/// Eventos de log de `src`, uno por id, con la dim `file`. Devuelve sus rid.
+fn add_logs(store: &mut Store, src: &str, file: &str, ids: &[&str]) -> Vec<i64> {
+    let mut w = store.writer().unwrap();
+    w.set_dims(vec!["file".to_string()]);
+    for id in ids {
+        let ev = Event {
+            source_id: src.to_string(),
+            kind: "log".to_string(),
+            attrs: attrs(&[("file", file)]),
+            touches: vec![],
+            links: vec![],
+            ..sample_event(id, &[], "")
+        };
+        assert!(w.add_event(&ev).unwrap());
+    }
+    w.commit().unwrap();
+    ids.iter().map(|id| store.conn().query_row("SELECT rid FROM events WHERE id = ?1", [id], |r| r.get(0)).unwrap()).collect()
+}
+
+#[test]
+fn los_rid_de_lo_borrado_no_se_reutilizan() {
+    let db = TempDb::new("rid-hwm");
+    let mut store = Store::open(db.path()).unwrap();
+    assert_eq!(add_logs(&mut store, "jsonl:/a", "a", &["a1", "a2", "a3"]), [1, 2, 3]);
+    // Borrar los rid más altos (relectura de una fuente): antes lo nuevo volvía a
+    // tener 1, 2, 3 y quien sigue por rid (`tail`) no lo veía.
+    store.delete_source_events("jsonl:/a").unwrap();
+    assert_eq!(add_logs(&mut store, "jsonl:/a", "a", &["b1", "b2"]), [4, 5]);
+    // Igual con un fichero de una glob y tras `reset`.
+    store.delete_source_file_events("jsonl:/a", "a").unwrap();
+    assert_eq!(add_logs(&mut store, "jsonl:/a", "a", &["c1"]), [6]);
+    store.reset().unwrap();
+    assert_eq!(add_logs(&mut store, "jsonl:/a", "a", &["d1"]), [7]);
+    // Un índice sin la marca (de antes) sigue por encima de su máximo.
+    store.conn().execute("DELETE FROM meta WHERE key = 'rid_hwm'", []).unwrap();
+    assert_eq!(add_logs(&mut store, "jsonl:/a", "a", &["e1"]), [8]);
+    // Un evento repetido no gasta rid.
+    let mut w = store.writer().unwrap();
+    let dup = Event { source_id: "jsonl:/a".into(), kind: "log".into(), touches: vec![], links: vec![], ..sample_event("e1", &[], "") };
+    assert!(!w.add_event(&dup).unwrap());
+    w.commit().unwrap();
+    assert_eq!(add_logs(&mut store, "jsonl:/a", "a", &["f1"]), [9]);
+}
+
+#[test]
+fn la_marca_stale_dims_no_cuenta_lo_que_entra_tras_un_borrado() {
+    let db = TempDb::new("stale-dims-rid");
+    let mut store = Store::open(db.path()).unwrap();
+    add_logs(&mut store, "jsonl:/g", "viejo", &["v1"]);
+    add_logs(&mut store, "jsonl:/g", "b", &["b1", "b2"]);
+    // Cambian las dims sin poder releer: lo que hay hasta hoy queda con las de antes.
+    store.set_source_dims("jsonl:/g", &["file".to_string()]).unwrap();
+    // b se relee (sus rid, los más altos, se borran) y entra con las dims nuevas.
+    store.delete_source_file_events("jsonl:/g", "b").unwrap();
+    add_logs(&mut store, "jsonl:/g", "b", &["b1", "b2"]);
+    let stale: i64 = store
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE source_ref = (SELECT ref FROM sources WHERE id = ?1)
+               AND rid <= CAST((SELECT value FROM meta WHERE key = 'stale_dims:' || ?1) AS INTEGER)",
+            ["jsonl:/g"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    // Antes: 3 (los b releídos reutilizaban los rid 2 y 3, bajo la marca).
+    assert_eq!(stale, 1);
+}
