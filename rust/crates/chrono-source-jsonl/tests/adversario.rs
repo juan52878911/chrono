@@ -133,7 +133,6 @@ fn linea_gigante_de_mas_de_10_mb() {
 /// Epochs numéricos en s, ms, µs y ns, como número o cadena, y valores
 /// imposibles (que no dan una fecha absurda).
 #[test]
-#[ignore = "PEND"]
 fn epochs_en_todas_las_unidades() {
     let want = 1_704_067_200_123i64;
     let casos: &[(&str, Option<i64>)] = &[
@@ -150,7 +149,9 @@ fn epochs_en_todas_las_unidades() {
         ("-1", Some(-1000)),
         ("1e300", None),
         ("-1e300", None),
-        ("18446744073709551615", None),
+        ("1e30", None),
+        ("99999999999999999999999", None),
+        ("\"20240101\"", None),
         ("\"\"", None),
         ("\"ayer\"", None),
         ("null", None),

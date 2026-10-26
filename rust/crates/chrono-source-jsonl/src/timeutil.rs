@@ -131,23 +131,62 @@ pub fn parse_rfc3339(s: &str) -> Option<i64> {
     Some((local_secs - offset_secs) * 1000 + frac_ms)
 }
 
-/// Epoch en MILISEGUNDOS a partir de un número JSON: si |valor| > 1e12 se asume
-/// ya en ms (tal cual); si no, se asume en segundos y se pasa a ms (×1000).
+/// 0000-01-01 y 9999-12-31T23:59:59.999 en ms: fuera, la unidad no era esa.
+const MIN_MS: i64 = -62_167_219_200_000;
+const MAX_MS: i64 = 253_402_300_799_999;
+
+/// Epoch en MILISEGUNDOS a partir de un número JSON. La unidad sale de la
+/// magnitud (hoy: s ≈ 1.7e9, ms ≈ 1.7e12, µs ≈ 1.7e15, ns ≈ 1.7e18); antes
+/// todo lo que pasaba de 1e12 se tomaba por ms y un epoch en µs o ns daba el
+/// año 55 969. Un valor fuera de los años 0000–9999 es `None`, no una fecha
+/// absurda.
 fn epoch_from_number(n: &serde_json::Number) -> Option<i64> {
-    let raw = n.as_f64()?;
-    let ms = if raw.abs() > 1e12 { raw } else { raw * 1000.0 };
-    Some(ms as i64)
+    let ms = match n.as_i64() {
+        // Enteros sin pasar por f64: un epoch en ns no cabe exacto en él.
+        Some(i) => match i.unsigned_abs() {
+            a if a > 100_000_000_000_000_000 => i / 1_000_000,
+            a if a > 100_000_000_000_000 => i / 1_000,
+            a if a > 1_000_000_000_000 => i,
+            _ => i * 1000,
+        },
+        None => {
+            let raw = n.as_f64().filter(|f| f.is_finite())?;
+            let ms = match raw.abs() {
+                a if a > 1e17 => raw / 1e6,
+                a if a > 1e14 => raw / 1e3,
+                a if a > 1e12 => raw,
+                _ => raw * 1000.0,
+            };
+            // `as` satura: lo enorme cae fuera del rango de abajo.
+            ms.round() as i64
+        }
+    };
+    (MIN_MS..=MAX_MS).contains(&ms).then_some(ms)
 }
 
 /// Extrae el epoch UTC en MILISEGUNDOS de un valor JSON de tiempo: número
-/// (epoch-seg o epoch-ms) o string RFC3339/ISO-8601. `None` si no reconoce el
-/// valor (el evento entra igual, con `at_epoch=0` y `at=""`, ver `record.rs`).
+/// (epoch en s, ms, µs o ns, también como cadena de cifras) o string
+/// RFC3339/ISO-8601. `None` si no reconoce el valor (el evento entra igual,
+/// con `at_epoch=0` y `at=""`, ver `record.rs`).
 pub fn parse_time_value(v: &Value) -> Option<i64> {
     match v {
         Value::Number(n) => epoch_from_number(n),
-        Value::String(s) => parse_rfc3339(s),
+        Value::String(s) => parse_rfc3339(s).or_else(|| epoch_from_digits(s)),
         _ => None,
     }
+}
+
+/// `"1704067200"`, `"1704067200.123"`: un epoch escrito como cadena. Al
+/// menos 9 cifras enteras (de 1973 en adelante en segundos) para no leer como
+/// epoch una fecha compacta (`"20240101"`) ni un número cualquiera.
+fn epoch_from_digits(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let int = s.split_once('.').map_or(s, |(i, _)| i);
+    let int = int.strip_prefix('-').unwrap_or(int);
+    if int.len() < 9 || !s.bytes().all(|b| b.is_ascii_digit() || b == b'.' || b == b'-') {
+        return None;
+    }
+    epoch_from_number(&s.parse().ok()?)
 }
 
 #[cfg(test)]
