@@ -197,6 +197,12 @@ pub fn init(start: &Path, symbols: bool, as_kind: Option<&str>, db_override: Opt
         ingest_symbols(&ingest_path, &store, None)?;
     }
 
+    if src.kind() == "git" && chrono_source_git::head_is_unborn(&ingest_path) {
+        eprintln!("{}", t(
+            "chrono: the repo has no commits yet; `chrono sync` will read them once there are",
+            "chrono: el repo aún no tiene commits; `chrono sync` los leerá cuando los haya",
+        ));
+    }
     let unit = if src.kind() == "git" { ("commits", "commits") } else { ("events", "eventos") };
     eprintln!("{}", t(
         format!("chrono: index ready at {} ({n} {}).", db.display(), unit.0),
@@ -979,7 +985,9 @@ fn finalize(
     rollups_incremental: bool,
     light: bool,
 ) -> Result<()> {
-    for path in git_paths {
+    // Un repo sin commits no tiene árbol, tags ni forge que mirar.
+    let git_paths: Vec<&String> = git_paths.iter().filter(|p| !chrono_source_git::head_is_unborn(Path::new(p))).collect();
+    for path in &git_paths {
         finalize_git_sizes_and_deletions(Path::new(path), store)?;
         finalize_git_tags(Path::new(path), store)?;
     }
@@ -1013,7 +1021,7 @@ fn finalize(
 
     if !git_paths.is_empty() {
         let cfg = chrono_classify_rules::load(index_root);
-        for path in git_paths {
+        for path in &git_paths {
             finalize_git_forge(Path::new(path), store, &cfg.bug_labels)?;
         }
     }

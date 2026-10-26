@@ -407,17 +407,38 @@ impl Cursor for GitCursor {
     }
 
     fn manifest(&self) -> BTreeMap<String, String> {
-        let mut m = BTreeMap::new();
-        m.insert(
-            "git_version".to_string(),
-            gitutil::git_version().unwrap_or_default(),
-        );
-        m.insert("first_parent".to_string(), "false".to_string());
-        m.insert("no_merges".to_string(), "true".to_string());
-        m.insert("mailmap_used".to_string(), "true".to_string());
-        m.insert("bulk_threshold".to_string(), BULK_THRESHOLD.to_string());
-        m
+        git_manifest()
     }
+}
+
+/// Cursor de un repo sin commits: no da eventos y su watermark es vacío.
+pub(crate) struct EmptyCursor;
+
+impl Cursor for EmptyCursor {
+    fn next(&mut self) -> CoreResult<Option<Event>> {
+        Ok(None)
+    }
+
+    fn watermark(&self) -> Watermark {
+        Watermark { kind: "git".to_string(), value: String::new() }
+    }
+
+    fn manifest(&self) -> BTreeMap<String, String> {
+        git_manifest()
+    }
+}
+
+fn git_manifest() -> BTreeMap<String, String> {
+    let mut m = BTreeMap::new();
+    m.insert(
+        "git_version".to_string(),
+        gitutil::git_version().unwrap_or_default(),
+    );
+    m.insert("first_parent".to_string(), "false".to_string());
+    m.insert("no_merges".to_string(), "true".to_string());
+    m.insert("mailmap_used".to_string(), "true".to_string());
+    m.insert("bulk_threshold".to_string(), BULK_THRESHOLD.to_string());
+    m
 }
 
 #[cfg(test)]

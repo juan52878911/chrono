@@ -113,6 +113,32 @@ fn activar_entity_via_a_mano_reindexa_la_fuente() {
     assert_eq!(env.sql("SELECT COUNT(*) FROM source_dims WHERE key LIKE 'opt:%'"), ["1"]);
 }
 
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=Prueba", "-c", "user.email=p@x", "-c", "commit.gpgsign=false"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn init_en_un_repo_sin_commits_y_add_y_sync_despues() {
+    let env = Env::new("sin-commits", r#"{"version":2}"#);
+    git(env.dir(), &["init", "-q"]);
+    let out = env.ok(&["init"]);
+    assert!(out.contains("0 commits"), "{out}");
+    write(env.dir(), "app.jsonl", "{\"ts\":\"2024-01-01T00:00:00Z\",\"msg\":\"hola\"}\n");
+    env.ok(&["add", &path_s(&env.dir().join("app.jsonl"))]);
+    env.ok(&["sync"]);
+    git(env.dir(), &["commit", "-q", "--allow-empty", "-m", "primero"]);
+    let out = env.ok(&["sync"]);
+    assert!(out.contains("1 new events"), "{out}");
+    assert_eq!(env.sql("SELECT kind, COUNT(*) FROM events GROUP BY kind ORDER BY kind"), ["commit|1", "log|1"]);
+}
+
 /// `tail` durante un ciclo y se mata (no termina solo).
 fn tail_once(env: &Env, then: impl FnOnce()) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_chrono"))

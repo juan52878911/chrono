@@ -24,6 +24,22 @@ pub fn head_sha(repo: &Path) -> Result<String> {
     run(repo, &["rev-parse", "HEAD"])
 }
 
+/// `true` si HEAD apunta a una rama que aún no tiene commits (`git init` recién
+/// hecho): `rev-parse HEAD` falla ahí, pero el repo es válido y está vacío.
+pub fn head_is_unborn(repo: &Path) -> bool {
+    let ok = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    ok(&["symbolic-ref", "-q", "HEAD"]) && !ok(&["rev-parse", "--verify", "-q", "HEAD"])
+}
+
 /// Sha del commit al que apunta `rev` (rama, tag, `origin/dev`…).
 pub fn rev_sha(repo: &Path, rev: &str) -> Result<String> {
     run(repo, &["rev-parse", "--verify", &format!("{rev}^{{commit}}")])
