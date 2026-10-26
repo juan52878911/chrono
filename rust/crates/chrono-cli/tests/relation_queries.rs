@@ -536,13 +536,12 @@ fn correlate_via_con_kind_y_limit() {
 }
 
 #[test]
-fn correlate_via_un_ancla_sin_la_clave_no_tiene_relacionados() {
+fn correlate_via_con_una_clave_que_no_es_relacion_falla() {
     let env = tickets_env("corr-sin");
-    // `ticket2` no es una relación: el evento a2 no tiene valores de `ticket2`.
+    // `ticket2` no es una relación (es un campo de `ticket`): antes daba vacío.
     let anchor = env.id_of("ev-a2");
-    let v = env.q(&["correlate", &anchor, "--via", "ticket2"]);
-    assert_eq!(v["result"]["values"], json!([]), "{v}");
-    assert_eq!(v["result"]["related_total"], 0);
+    let t = env.fail(&["correlate", &anchor, "--via", "ticket2"]);
+    assert!(t.contains("clave de relación desconocida"), "{t}");
     // Y un id inexistente o una clave inválida fallan con mensaje.
     let t = env.fail(&["correlate", "no-existe", "--via", "ticket"]);
     assert!(t.contains("not found"), "{t}");
@@ -623,16 +622,25 @@ fn top_y_timeline_con_join_cuentan_lo_mismo_que_events() {
 }
 
 #[test]
-fn join_con_clave_invalida_no_devuelve_nada_y_no_falla() {
+fn join_con_clave_invalida_o_desconocida_da_error_como_gaps_via_y_precede() {
     let env = tickets_env("join-mala");
-    for join in ["a b=1", "a'b=1", "=1", "ticket x=AB-1"] {
-        let v = env.q(&["events", "--join", join]);
-        assert!(titles(&v).is_empty(), "--join {join:?}: {v}");
-        let top = env.q(&["top", "kind", "--join", join]);
-        assert!(top_map(&top).is_empty(), "--join {join:?}: {top}");
-        let tl = env.q(&["timeline", "--join", join]);
-        assert!(tl["result"]["buckets"].as_array().unwrap().is_empty(), "--join {join:?}: {tl}");
+    for join in ["a b=1", "a'b=1", "=1", "ticket x=AB-1", "tikcet=AB-1", "tikcet"] {
+        for cmd in [&["events"][..], &["top", "kind"], &["timeline"], &["precede", "--level", "ERROR"]] {
+            let t = env.fail(&[cmd, &["--join", join]].concat());
+            assert!(t.contains("clave de relación"), "{cmd:?} --join {join:?}: {t}");
+        }
     }
+    // El mismo error en --via de correlate y gaps, y en el join de un lado de gaps.
+    let id = env.id_of("a1");
+    let t = env.fail(&["correlate", &id, "--via", "tikcet"]);
+    assert!(t.contains("clave de relación desconocida") && t.contains("tikcet"), "{t}");
+    let t = env.fail(&["gaps", "--from", "tickets", "--to", "commits", "--via", "tikcet"]);
+    assert!(t.contains("clave de relación desconocida"), "{t}");
+    let t = env.fail(&["gaps", "--from", "tickets join=tikcet=AB-1", "--to", "commits", "--via", "ticket"]);
+    assert!(t.contains("clave de relación desconocida"), "{t}");
+    // Una clave que existe con un valor que no: vacío, sin error.
+    let v = env.q(&["events", "--join", "ticket=ZZ-0"]);
+    assert!(titles(&v).is_empty(), "{v}");
 }
 
 // ───────────────────────── dim y link a la vez ─────────────────────────

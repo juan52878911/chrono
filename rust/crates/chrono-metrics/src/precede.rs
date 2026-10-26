@@ -142,11 +142,8 @@ fn severity(level: &str) -> u8 {
 /// episodios; `max_episodes` solo acota los que se devuelven.
 pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
     let join = o.join.map(str::trim).filter(|k| !k.is_empty());
-    if let Some(k) = join {
-        if !crate::relate::valid_key(k) {
-            return Err(format!("precede: clave de relación no válida: {k:?}").into());
-        }
-    }
+    crate::relate::check_join(conn, join).map_err(|e| format!("precede: {e}"))?;
+    crate::relate::check_join(conn, o.anchor.join)?;
     // 1. Anclas en orden temporal (con sus valores de la clave, si se pide,
     // separados por \x1f: un ancla con varios cuenta en cada uno).
     let (filters, extra) = o.anchor.sql(2);

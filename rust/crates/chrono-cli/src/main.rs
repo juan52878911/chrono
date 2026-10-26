@@ -631,6 +631,10 @@ fn main() {
         infer_level: f.infer_level,
         until_epoch: 0,
     };
+    // Una clave de `--join` que no existe no casaría nada: error, no vacío.
+    if let Err(e) = chrono_metrics::check_join(store.conn(), scope.join) {
+        fatal(e);
+    }
     let out = match cmd {
         "hotspots" => query::hotspots(&store, &window, symbols_only),
         "coupling" => {

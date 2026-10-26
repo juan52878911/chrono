@@ -309,6 +309,8 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
     let conn = store.conn();
     let since = args.get("since").and_then(Value::as_str).unwrap_or("");
     let since_epoch = since_to_epoch(since);
+    // Una clave de `join` que no existe no casaría nada: error, no vacío.
+    chrono_metrics::check_join(conn, args.get("join").and_then(Value::as_str))?;
 
     let result = match name {
         "hotspots" => hotspots(conn, since_epoch)?,

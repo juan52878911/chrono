@@ -20,11 +20,34 @@ pub fn valid_key(k: &str) -> bool {
     !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
 
-fn check_key(k: &str) -> Result<()> {
-    if valid_key(k) {
+/// La clave es válida y existe en el índice (algún link con `rel = k` o
+/// alguna dim `k`): una que no existe no casaría nada y se leería como «no
+/// hay ninguno» (un typo en `--join`, `--via`, `--by`).
+fn check_key(conn: &Connection, k: &str) -> Result<()> {
+    if !valid_key(k) {
+        return Err(format!("clave de relación no válida: {k:?} (usa [A-Za-z0-9_.-])").into());
+    }
+    let known: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM link_targets WHERE rel = ?1) OR EXISTS(SELECT 1 FROM dim_values WHERE key = ?1)",
+        params![k],
+        |r| r.get(0),
+    )?;
+    if known {
         Ok(())
     } else {
-        Err(format!("clave de relación no válida: {k:?} (usa [A-Za-z0-9_.-])").into())
+        Err(format!("clave de relación desconocida: {k:?} (ningún link ni dim se llama así; mira `chrono sources`)").into())
+    }
+}
+
+/// Valida la clave de un filtro `join` (`K=v`, `K=v*`, `K=@id` o `K`) como
+/// [`check_key`]. Sin `join`, nada.
+pub fn check_join(conn: &Connection, join: Option<&str>) -> Result<()> {
+    match join.map(str::trim).filter(|j| !j.is_empty()) {
+        Some(raw) => {
+            let k = raw.split_once('=').or_else(|| raw.split_once(':')).map_or(raw, |(k, _)| k);
+            check_key(conn, k.trim())
+        }
+        None => Ok(()),
     }
 }
 
@@ -100,7 +123,7 @@ pub struct Via {
 /// `correlate <id> --via K`: los eventos de cualquier fuente que comparten
 /// algún valor de `K` con `id`. `kinds` filtra como en `correlate_kinds`.
 pub fn correlate_via(conn: &Connection, event_id: &str, key: &str, kinds: &[String], limit: usize) -> Result<Via> {
-    check_key(key)?;
+    check_key(conn, key)?;
     let anchor = conn
         .query_row(
             "SELECT e.id, s.id, e.kind, e.at, e.at_epoch, e.level, e.title
@@ -351,10 +374,12 @@ pub struct GapsOpts {
 /// `until` acota los dos. Un evento de `from` sin valor de `via` o de `by` no
 /// es unidad: se cuenta aparte (`from_without_key`).
 pub fn gaps(conn: &Connection, from: &EventScope, to: &EventScope, via: &str, by: Option<&str>, o: &GapsOpts) -> Result<Gaps> {
-    check_key(via)?;
+    check_key(conn, via)?;
     if let Some(b) = by {
-        check_key(b)?;
+        check_key(conn, b)?;
     }
+    check_join(conn, from.join)?;
+    check_join(conn, to.join)?;
     // Una fuente que no existe daría «todo es hueco» sin avisar.
     for (side, sc) in [("from", from), ("to", to)] {
         if let Some(src) = sc.source.filter(|s| !s.is_empty()) {
