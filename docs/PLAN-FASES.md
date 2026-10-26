@@ -17,6 +17,42 @@ Las cifras marcadas como *objetivo* son estimaciones que valida la fase correspo
 
 ## Estado (2026-10-26)
 
+**F3 hecha → 0.5.0 (esquema v6, reindex avisado).** Binario 2 311 152 → 2 361 120 B (+2 %), sin dependencias
+nuevas. Detalle en la decisión 29 de `DECISIONS.md`.
+- **P-ESC-3** `events.rid` entero es la clave de `touches`, `labels` y `links` (`WITHOUT ROWID`); `rollups` por
+  `source_ref`. **P-ESC-2** `at` es columna virtual de `at_epoch` (0 diferencias de formato en tres índices reales);
+  `jsonl` no copia a `attrs` tiempo, título, nivel, entidad, kind ni ids. **P-ESC-4** índice de actor y bandas
+  SimHash parciales, sin `idx_events_kind`.
+- **P-REL-1** `dims` en `source_options` (o en el preset; `config check` las valida): `event_dims(dim_id,
+  event_rid)` + `dim_values(key, value)`; `file` es dim en las fuentes glob; `attr_keys` dice qué fuentes guardan
+  cada clave en el JSON. Cambiar las dims reindexa esa fuente en el siguiente `sync`. `top attr:host` sin filtros:
+  `SEARCH d USING PRIMARY KEY` + subconsulta correlacionada, sin `SCAN events` (test con `EXPLAIN QUERY PLAN`).
+- **P-ESC-1** `dim_rollups` (fuente × plantilla × kind × nivel × nivel deducido × entidad × 10 min), en la misma
+  pasada y con el mismo watermark que `rollups` (dentro de `lock_ingest`; el test de dos `sync` simultáneos sigue
+  verde). Lo leen `top level|kind|entity`, `patterns`, `timeline`, `sources`, la cabecera `total` del MCP y por
+  tanto `informe`. Exacto o nada: con `grep`/`attr`, rollups atrasados o un evento multi-touch en una consulta por
+  entidad cae a `events`; una ventana sin alinear toma los extremos de `events`. Un test compara 330 consultas por
+  los dos caminos. Borrar eventos invalida el watermark.
+- **Bench a 1M** (`bench/escala/f3-0.5.0.json` frente a `f2-0.4.0.json`, con `host` como dim y la máquina cargada,
+  load 7): `.db` 584 → **321 MB** (−45 %; `events` 266 → 122 MB); `informe` 10,7 s / 77 MB → **0,77 s / 32 MB**;
+  `top attr:host` 1,04 → 0,03 s; `top entity` 0,54 → 0,02 s; `patterns --entity` 1,36 → 0,01 s; `timeline --by
+  level` 0,56 → 0,06 s. Salidas byte a byte iguales a 0.4.0 en 18 consultas (incluido `informe`) salvo el
+  `example_id` de `patterns`, que ahora es el último evento ingerido de la plantilla (lo que decía su doc), no el
+  mayor id alfabético.
+  La ingesta del bench marcó +14 % (24,9 → 28,5 s) con load 7; alternando los dos binarios con la misma carga,
+  0.4.0 tardó 38,7 y 33,4 s y 0.5.0 24,4 y 23,3 s (la primera de 0.4.0 coincidió con una compilación): no empeora.
+- **Sesiones de Claude** (copia congelada de `~/.claude/projects`, 1 927 ficheros, 264 642 eventos): índice
+  395 → **207 MB** (1 492 → 782 B/evento; `events` 159 → 26 MB), ingesta 31 → 26 s y 645 → 424 MB de RSS. Usos y
+  fallos por tool, kinds, niveles, `top attr:cwd|gitBranch|sessionId`, `--attr cwd:…`, `timeline` y `sources`:
+  idénticos a 0.4.0.
+
+Sin verificar o pendiente:
+- Los tiempos son de una máquina con load 4-7 (otras sesiones): repetir `make bench` en frío para cifras finas.
+- `top attr:k` con filtros (p. ej. `--level ERROR`) une `event_dims` con `events` por rid: 0,5 s a 1M, sin cubo.
+- `links` sigue en texto (54 MB de 207 en las sesiones): candidato a internar targets en F4 junto a `relations`.
+- `correlate` entre sesiones y git sigue sin probar (venía de F2).
+- La cuenta de Trycore no tuvo cupo (tope de 5 h a 0); todo se hizo en esta sesión.
+
 **F2 hecha → 0.4.0.** Binario 2 244 368 → 2 311 152 B (+3 %), sin dependencias nuevas.
 - **Config:** `.chrono/config.json` con `version` (1) e `intermediario` dentro (el `intermediario.json`
   antiguo se sigue leyendo). `chrono config check` da cada problema con la ruta de la clave
@@ -149,7 +185,7 @@ Todo lo que cambia el esquema entra junto, para reindexar una sola vez.
 | **P-ESC-4** Índices parciales: `actor`, `kind` y SimHash solo donde se usan (~90 MB inútiles a 1M) | Medido con `dbstat` |
 | **P-ESC-1** `dim_rollups` (fuente × plantilla × nivel × entidad × bucket); `informe` lee de rollups | *Objetivo* `informe` a 1M < 1 s y < 100 MB RSS |
 
-Cierre: migración con aviso de reindex (como en las versiones 3 y 4 del esquema), versión 0.4.0, eval y bench.
+Cierre: migración con aviso de reindex (como en las versiones 3 y 4 del esquema), versión 0.5.0, eval y bench.
 
 ## Fase 4 · Relaciones por clave entre fuentes
 
