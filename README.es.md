@@ -121,7 +121,8 @@ El índice se **auto-descubre** subiendo desde el directorio actual, como git co
 | Comando | Responde |
 | --- | --- |
 | `init [repo]` | Prepara el índice (crea `.chrono/`) e ingiere todo. |
-| `sync [repo]` | Procesa solo el delta desde la última vez. |
+| `sync [repo]` | Procesa solo el delta desde la última vez. Una fuente que no se puede leer no para las demás; `sources` enseña su `sync_error`. |
+| `reindex` | Rehace el índice desde cero con las mismas fuentes (git, logs, globs, comandos), p. ej. tras una versión que cambia el esquema. Si se corta, se vuelve a lanzar: reanuda desde la copia, que se conserva. |
 | `hotspots` | ¿Qué es peligroso tocar? (frecuencia × tamaño) |
 | `coupling <fichero>` | ¿Qué se rompe si toco esto? (acoplamiento temporal) |
 | `owners <ruta>` | Propiedad por autor y **bus factor**. |
@@ -134,9 +135,12 @@ El índice se **auto-descubre** subiendo desde el directorio actual, como git co
 | `search <texto>` | Busca commits por significado (texto completo). |
 | `similar <sha>` | Commits casi-duplicados (por huella SimHash). |
 | `explain <fichero>[:A-B]` | ¿Por qué este código está así? Commits que escribieron esas líneas (`git blame` en la revisión indexada), certeza de arreglo (`yes`/`maybe`), tickets/PRs, autores y qué cambia con esas líneas (también funciones con `init --symbols`). Determinista. |
+| `top <dim>` | Recuento exacto de los valores más frecuentes: `level`, `kind`, `actor`, `entity`, `attr:<k>`; una dim declarada por una fuente vale sin prefijo (`top cwd` = `top attr:cwd`). |
+| `events` | Stream cronológico de todas las fuentes; `--order desc` para lo más reciente primero. |
+| `gaps --from A --to B --via K [--by U]` | «X sin Y» con cifras exactas. Solo cubre un B en o después del primer A de la unidad (`--any-order` para cualquiera); `--until` acota los dos lados. |
 | `mcp` | Servidor MCP por stdio (para una IA). |
 
-Opciones: `--db RUTA`, `--since FECHA`, `--lang en|es`.
+Opciones: `--db RUTA`, `--since FECHA`, `--lang en|es`. `chrono <comando> --help` da las flags de cada comando; `chrono help`, todas.
 
 ---
 
@@ -184,8 +188,9 @@ cual: `"source_options": {"app.log": {"redact": "off"}}`.
 
 Los atributos por los que más se agrupa o filtra (`host`, `container`, `cwd`…) se pueden declarar como dims:
 `"source_options": {"app.log": {"dims": "host,container"}}`. Cada valor se guarda una vez y queda indexado, así
-`top attr:host` y `--attr host:x` no recorren los eventos. Cambiar las dims de una fuente la reindexa en el
-siguiente `sync`.
+`top attr:host` y `--attr host:x` no recorren los eventos (también vale `top host`). Cambiar las dims o las
+opciones de una fuente (`entity_via`, `explode`, `attrs`…) la reindexa en el siguiente `sync`, salvo que parte de
+ella ya no se pueda releer: entonces avisa de cuántos eventos se perderían y los conserva.
 
 ---
 

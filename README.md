@@ -132,7 +132,8 @@ Every query accepts `--json` (default) and `--since DATE`. The index is
 | Command | Answers |
 | --- | --- |
 | `init [repo]` | Build the index (creates `.chrono/`) and ingest everything. |
-| `sync [repo]` | Process only the delta since last time. |
+| `sync [repo]` | Process only the delta since last time. A source that can't be read doesn't stop the others; `sources` shows its `sync_error`. |
+| `reindex` | Rebuild the index from scratch with the same sources (git, logs, globs, commands), e.g. after an upgrade that changes the schema. If it is interrupted, run it again: it resumes from the kept copy. |
 | `hotspots` | What's dangerous to touch? (frequency × size) |
 | `coupling <file>` | What breaks if I touch this? (temporal coupling) |
 | `owners <path>` | Ownership by author and **bus factor**. |
@@ -145,9 +146,12 @@ Every query accepts `--json` (default) and `--since DATE`. The index is
 | `search <text>` | Search commits by meaning (full-text). |
 | `similar <sha>` | Near-duplicate commits (by SimHash fingerprint). |
 | `explain <file>[:A-B]` | Why is this code like this? Commits that wrote those lines (`git blame` at the indexed revision), fix certainty (`yes`/`maybe`), tickets/PRs, authors, and what changes with those lines (functions too with `init --symbols`). Deterministic. |
+| `top <dim>` | Exact counts of the most frequent values: `level`, `kind`, `actor`, `entity`, `attr:<k>`; a dim declared by a source works bare (`top cwd` = `top attr:cwd`). |
+| `events` | Chronological stream across sources; `--order desc` for newest first. |
+| `gaps --from A --to B --via K [--by U]` | «X without Y» with exact counts. Only a B at or after the unit's first A covers it (`--any-order` for any); `--until` bounds both sides. |
 | `mcp` | MCP server over stdio (for an AI). |
 
-Options: `--db PATH`, `--since DATE`, `--lang en|es`.
+Options: `--db PATH`, `--since DATE`, `--lang en|es`. `chrono <command> --help` shows the flags of each command; `chrono help` lists them all.
 
 ---
 
@@ -211,7 +215,7 @@ replaced by `<SECRET>` before anything reaches the index; `sources` reports how 
 
 Attributes you rank or filter by often (`host`, `container`, `cwd`…) can be declared as dims:
 `"source_options": {"app.log": {"dims": "host,container"}}`. Each value is stored once and indexed, so
-`top attr:host` and `--attr host:x` don't scan the events. Changing a source's dims reindexes it on the next `sync`.
+`top attr:host` and `--attr host:x` don't scan the events (`top host` works too). Changing a source's dims or options (`entity_via`, `explode`, `attrs`…) reindexes it on the next `sync`, unless part of it can no longer be re-read: then it warns how many events would be lost and keeps them.
 
 ---
 
