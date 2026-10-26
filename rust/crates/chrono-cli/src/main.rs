@@ -968,7 +968,11 @@ fn main() {
         other => unknown_command(other),
     };
     match out {
-        Ok(j) if f.compact => print!("{}", j.compact()),
+        Ok(j) if f.compact => {
+            // En la tabla, el alias de la fuente (`claude`) en vez de su id acortado.
+            let aliases = chrono_metrics::source_aliases(store.conn()).unwrap_or_default();
+            print!("{}", j.with_source_aliases(&aliases).compact())
+        }
         Ok(j) => print!("{}", j.pretty()),
         Err(e) => fatal(localized(e)),
     }

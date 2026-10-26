@@ -49,7 +49,7 @@ pub use session_patterns::{
     ToolCount, Tokens,
 };
 pub use similar::{similar, SimilarRow};
-pub use sources::{sources, SourceSummary};
+pub use sources::{source_aliases, sources, SourceSummary};
 pub use ticket::{ticket, Ticket};
 pub use stats::{stats, StatRow};
 pub use timeline::{timeline, timeline_scoped, EventScope, TimelineBucket};
