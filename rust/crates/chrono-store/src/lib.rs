@@ -5,9 +5,11 @@
 //! `docs/DESIGN-GENERAL-CORE.md §4`.
 
 mod json;
+mod legacy;
 mod store;
 mod writer;
 
+pub use legacy::{read_meta_any_version, read_sources_any_version, SchemaMismatch};
 pub use store::{SourceRow, Store};
 pub use writer::{Writer, WriterCaches};
 

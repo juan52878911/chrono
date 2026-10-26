@@ -51,7 +51,7 @@ pub fn stats(
         ),
         Some(other) => match other.strip_prefix("attr:") {
             Some(k) if valid_key(k) => (format!("COALESCE({}, '')", crate::timeline::attr_sql("e", k, &format!("'$.{k}'"))), ""),
-            _ => return Err(format!("stats: unsupported --by: {other}").into()),
+            _ => return Err(format!("stats: unsupported --by {other:?} (use level, kind, entity or attr:<key>)").into()),
         },
     };
     let (filters, extra) = scope.sql(3);

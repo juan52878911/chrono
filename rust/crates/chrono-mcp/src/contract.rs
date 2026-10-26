@@ -107,11 +107,29 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// Argumentos con los que se cuenta el `total`. En `stats`, `attr` es el
+/// atributo numérico y no el filtro `clave:valor` (que no casaba nada y daba
+/// `total=0` con grupos): cuenta los eventos que tienen ese atributo.
+fn count_args(tool: &str, args: &Value) -> Value {
+    let mut a = args.clone();
+    if tool == "stats" {
+        if let Some(o) = a.as_object_mut() {
+            if let Some(k) = o.get("attr").and_then(Value::as_str).map(str::to_string) {
+                o.insert("attr".into(), json!(format!("{k}:*")));
+            }
+        }
+    }
+    a
+}
+
 /// Cabecera (texto y objeto `meta`) de una respuesta.
 pub fn header(conn: &Connection, tool: &str, args: &Value, result: &Value) -> (String, Value) {
     let since = args.get("since").and_then(Value::as_str).unwrap_or("");
     let until = args.get("until").and_then(Value::as_str).unwrap_or("");
     let since_epoch = since_to_epoch(since);
+    let count_args = count_args(tool, args);
+    let args_q = args;
+    let args = &count_args;
     let (total, cov) = coverage(conn, args, since_epoch);
     let (list, default_limit) = main_list(tool).unwrap_or(("", 0));
     let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(default_limit);
@@ -152,7 +170,7 @@ pub fn header(conn: &Connection, tool: &str, args: &Value, result: &Value) -> (S
         ));
     }
     let idx = index_hash(conn);
-    let q = canonical(tool, args);
+    let q = canonical(tool, args_q);
     let cov_s = cov.as_ref().map(|(_, a, _, b)| format!("{a}..{b}")).unwrap_or_else(|| "-".into());
     let mut text = format!(
         "[chrono {tool}] total={total_s} coverage={cov_s} truncated={} index={idx} q=\"{q}\"",

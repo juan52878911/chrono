@@ -150,10 +150,11 @@ pub fn churn(store: &Store, w: &Window, symbols_only: bool) -> Result<Json> {
     envelope(store, "churn", w, LIMIT, n, Json::obj().set("churn", Json::Arr(items)))
 }
 
-pub fn search(store: &Store, query: &str) -> Result<Json> {
-    const LIMIT: usize = 25;
+pub fn search(store: &Store, query: &str, limit: Option<&str>) -> Result<Json> {
+    // `--limit` se ignoraba: siempre 25, aunque la ayuda de las demás consultas lo admite.
+    let limit = parse_limit(limit, 25)?;
     let w = Window { since_text: None, since_epoch: 0 };
-    let rows = chrono_metrics::search(store.conn(), query, LIMIT)?;
+    let rows = chrono_metrics::search(store.conn(), query, limit)?;
     let items: Vec<Json> = rows
         .iter()
         .map(|h| {
@@ -168,7 +169,7 @@ pub fn search(store: &Store, query: &str) -> Result<Json> {
         store,
         "search",
         &w,
-        LIMIT,
+        limit,
         n,
         Json::obj().set("query", Json::str(query)).set("results", Json::Arr(items)),
     )
@@ -322,6 +323,7 @@ pub fn sources(store: &Store) -> Result<Json> {
                 .set("levels", Json::str(&pairs(&s.levels)))
                 .set("unlabeled_inferred", Json::str(&pairs(&s.inferred_levels)))
                 .set("top_entities", Json::str(&pairs(&s.top_entities)))
+                .set("dims", Json::str(&s.dims.join(" ")))
         })
         .collect();
     let n = items.len();

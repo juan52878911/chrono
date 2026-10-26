@@ -104,6 +104,37 @@ fn attr_top_sql(scope: &crate::EventScope, since_epoch: i64) -> (String, Vec<Str
     (sql, extra)
 }
 
+/// Dimensiones fijas de `top` (columnas del modelo, no claves de `attrs`).
+const FIXED_DIMS: [&str; 4] = ["level", "kind", "actor", "entity"];
+
+/// ¿Alguna fuente declara `key` como dim o la lleva en `attrs`?
+fn is_known_key(conn: &Connection, key: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM source_dims WHERE key = ?1) OR EXISTS(SELECT 1 FROM attr_keys WHERE key = ?1)",
+        [key],
+        |r| r.get(0),
+    )?;
+    Ok(n != 0)
+}
+
+/// Dims declaradas por las fuentes del índice, ordenadas y sin repetir.
+fn declared_dims(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT DISTINCT key FROM source_dims ORDER BY key")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Error de una dimensión desconocida, con las que sí hay en este índice.
+fn unknown_dim(conn: &Connection, dim: &str) -> String {
+    let declared = declared_dims(conn).unwrap_or_default();
+    let mut msg = format!("top: unknown dimension {dim:?}. Available: {}", FIXED_DIMS.join(", "));
+    if !declared.is_empty() {
+        msg.push_str(&format!("; declared by the sources: {}", declared.join(", ")));
+    }
+    msg.push_str("; or attr:<key> for any attribute");
+    msg
+}
+
 /// Valores más frecuentes de la dimensión `dim`, por nº de eventos.
 ///
 /// Dimensiones soportadas:
@@ -158,6 +189,15 @@ pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilte
     };
     let map = |r: &rusqlite::Row| Ok(TopValue { value: r.get(0)?, count: r.get(1)? });
     let limit = limit as i64;
+    // Una dim declarada por una fuente (o una clave de `attrs`) vale sin el
+    // prefijo: `top cwd` es `top attr:cwd`. Las fijas tienen prioridad.
+    let attr_dim;
+    let dim = if !FIXED_DIMS.contains(&dim) && !dim.starts_with("attr:") && valid_attr_key(dim) && is_known_key(conn, dim)? {
+        attr_dim = format!("attr:{dim}");
+        attr_dim.as_str()
+    } else {
+        dim
+    };
     if let Some(key) = dim.strip_prefix("attr:") {
         if !valid_attr_key(key) {
             return Err(format!("top: invalid attr key: {key:?}").into());
@@ -207,7 +247,7 @@ pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilte
              JOIN entities ON entities.id = touches.entity_id",
             "entities.key",
         ),
-        other => return Err(format!("top: unsupported dimension: {other}").into()),
+        other => return Err(unknown_dim(conn, other).into()),
     };
 
     // Sin filtros, la consulta de siempre: con condiciones presentes, aunque
@@ -628,5 +668,32 @@ mod tests_p3 {
         with_dims.delete_source_events("jsonl:/b").unwrap();
         let t = top_filtered(with_dims.conn(), "attr:dur", 0, &TopFilter::default(), 20).unwrap();
         assert!(t.is_empty(), "{t:?}");
+    }
+
+    #[test]
+    fn dim_declarada_sin_prefijo_y_error_con_las_disponibles() {
+        let db = TempDb::new("dimsinprefijo");
+        let mut store = Store::open(db.path()).unwrap();
+        let mut w = store.writer().unwrap();
+        w.set_dims(vec!["cwd".into()]);
+        for i in 0..6i64 {
+            let mut e = mk(&format!("e{i}"), "INFO", 1_000 + i, "");
+            e.source_id = "jsonl:/s".into();
+            e.attrs.insert("cwd".into(), format!("/p{}", i % 2));
+            e.attrs.insert("host".into(), "h".into());
+            w.add_event(&e).unwrap();
+        }
+        w.commit().unwrap();
+        let c = store.conn();
+        let f = TopFilter::default();
+        // `cwd` (dim declarada) y `host` (clave de attrs) valen sin `attr:`.
+        assert_eq!(top_filtered(c, "cwd", 0, &f, 10).unwrap(), top_filtered(c, "attr:cwd", 0, &f, 10).unwrap());
+        assert_eq!(top_filtered(c, "host", 0, &f, 10).unwrap(), vec![TopValue { value: "h".into(), count: 6 }]);
+        // Una desconocida lista las fijas y las declaradas.
+        let err = top_filtered(c, "nada", 0, &f, 10).unwrap_err().to_string();
+        assert!(err.contains("\"nada\"") && err.contains("level, kind, actor, entity") && err.contains("cwd"), "{err}");
+        assert!(!err.contains("unsupported"), "{err}");
+        // `sources` dice qué dims hay para que no haya que adivinarlas.
+        assert_eq!(crate::sources(c).unwrap()[0].dims, vec!["cwd".to_string()]);
     }
 }

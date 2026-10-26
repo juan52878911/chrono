@@ -64,7 +64,7 @@ pub fn timeline(
         Some("level") => "level",
         Some("kind") => "kind",
         Some(other) => {
-            return Err(format!("timeline: unsupported group_by: {other}").into());
+            return Err(format!("timeline: unsupported --by {other:?} (use level or kind; for other dimensions, top <dim>)").into());
         }
     };
 
@@ -307,7 +307,7 @@ pub fn timeline_scoped(
         None => "''",
         Some("level") => "e.level",
         Some("kind") => "e.kind",
-        Some(other) => return Err(format!("timeline: unsupported group_by: {other}").into()),
+        Some(other) => return Err(format!("timeline: unsupported --by {other:?} (use level or kind; for other dimensions, top <dim>)").into()),
     };
     if let Some(rows) = timeline_from_cube(conn, since_epoch, until_epoch, bucket_secs, group_by, scope, limit)? {
         return Ok(rows);

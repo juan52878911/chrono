@@ -23,6 +23,8 @@ pub struct SourceSummary {
     pub inferred_levels: Vec<(String, i64)>,
     pub kinds: Vec<(String, i64)>,
     pub top_entities: Vec<(String, i64)>,
+    /// Dims que declara la fuente: valen en `top <dim>`, `--attr k:v` y `--join`.
+    pub dims: Vec<String>,
 }
 
 /// Una fila por fuente, orden estable por id.
@@ -83,7 +85,13 @@ pub fn sources(conn: &Connection) -> Result<Vec<SourceSummary>> {
              JOIN entities en ON en.id = t.entity_id WHERE e.source_ref = ?1
              GROUP BY en.key ORDER BY c DESC, en.key LIMIT 15"
         };
+        let dims = {
+            let mut st = conn.prepare_cached("SELECT key FROM source_dims WHERE source_ref = ?1 ORDER BY key")?;
+            let rows = st.query_map(params![sref], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
         out.push(SourceSummary {
+            dims,
             levels: counts(levels, sref)?,
             inferred_levels: counts(inferred, sref)?,
             kinds: counts(kinds, sref)?,
