@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rusqlite::{params, Transaction};
+use rusqlite::{params, OptionalExtension, Transaction};
 
 use crate::json::attrs_to_json;
 use crate::Result;
@@ -272,6 +272,23 @@ impl<'a> Writer<'a> {
             }
         }
         Ok(r)
+    }
+
+    /// Entidad `(key, type)` del primer evento ya escrito (en el índice o en
+    /// este lote) con el link `(rel, target)`, sin contar `unknown`.
+    pub fn linked_entity(&mut self, rel: &str, target: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .tx
+            .prepare_cached(
+                "SELECT en.key, en.type FROM link_targets lt
+                 JOIN event_links el ON el.target_id = lt.id
+                 JOIN touches t ON t.event_rid = el.event_rid
+                 JOIN entities en ON en.id = t.entity_id
+                 WHERE lt.rel = ?1 AND lt.target = ?2 AND en.key <> 'unknown'
+                 ORDER BY el.event_rid LIMIT 1",
+            )?
+            .query_row(params![rel, target], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?)
     }
 
     /// Upsert de `(rel, target)` en `link_targets`, cacheado (v7).

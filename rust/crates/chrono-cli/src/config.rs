@@ -26,6 +26,7 @@ const COMMON_OPTIONS: &[(&str, &str)] = &[
     ("adapter", "fuerza el adaptador (como --as)"),
     ("redact", "\"off\" desactiva la redacción de secretos"),
     ("dims", "claves de attrs guardadas como dims indexadas, con comas (top attr:k y --attr k:v sin recorrer events)"),
+    ("entity_via", "rel de link: un evento sin entidad toma la del evento con su misma clave (resultado → uso)"),
 ];
 
 const TOP_KEYS: &[&str] = &[
@@ -40,10 +41,12 @@ const TOP_KEYS: &[&str] = &[
     "max_events_per_source",
     "commands",
     "intermediario",
+    "relations",
 ];
 
 const COMMAND_KEYS: &[&str] = &["run", "records", "options", "timeout_secs", "cwd"];
 const INTERMEDIARIO_KEYS: &[&str] = &["enabled", "verify", "rules", "read"];
+const RELATION_KEYS: &[&str] = &["source", "field", "pattern", "len"];
 
 struct Checker<'a> {
     registry: &'a Registry,
@@ -203,6 +206,13 @@ impl Checker<'_> {
                     }
                 }
                 "intermediario" => self.intermediario(&p, v),
+                "relations" => {
+                    if self.want_type(&p, v, "object") {
+                        for (name, sides) in v.as_object().into_iter().flatten() {
+                            self.relation(&child(&p, name), name, sides);
+                        }
+                    }
+                }
                 _ => self.unknown_key(&p, k, TOP_KEYS, true),
             }
         }
@@ -315,6 +325,45 @@ impl Checker<'_> {
                     }
                 }
                 _ => self.unknown_key(&p, k, COMMAND_KEYS, true),
+            }
+        }
+    }
+
+    /// Una relación: nombre de clave y lista de extremos `{source, field, pattern, len}`.
+    fn relation(&mut self, path: &str, name: &str, v: &Value) {
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c)) {
+            self.err(path, format!("{name:?}: a relation name is a key ([A-Za-z0-9_.-])"), format!("{name:?}: el nombre de una relación es una clave ([A-Za-z0-9_.-])"));
+        }
+        if !self.want_type(path, v, "array") {
+            return;
+        }
+        let sides = v.as_array().map(Vec::as_slice).unwrap_or_default();
+        if sides.is_empty() {
+            self.warn(path, "no sides: relates nothing".into(), "sin extremos: no relaciona nada".into());
+        }
+        for (i, side) in sides.iter().enumerate() {
+            let sp = format!("{path}[{i}]");
+            if !self.want_type(&sp, side, "object") {
+                continue;
+            }
+            for (k, val) in side.as_object().into_iter().flatten() {
+                let p = child(&sp, k);
+                match k.as_str() {
+                    "source" | "field" => {
+                        self.want_type(&p, val, "string");
+                    }
+                    "len" => {
+                        self.want_type(&p, val, "uint");
+                    }
+                    "pattern" => {
+                        if self.want_type(&p, val, "string") {
+                            if let Err(e) = chrono_core::Pattern::parse(val.as_str().unwrap_or_default()) {
+                                self.err(&p, format!("invalid pattern: {e}"), format!("patrón no válido: {e}"));
+                            }
+                        }
+                    }
+                    _ => self.unknown_key(&p, k, RELATION_KEYS, true),
+                }
             }
         }
     }
@@ -496,7 +545,20 @@ mod tests {
     }
 
     #[test]
-    fn comandos_e_intermediario() {
+    fn relaciones() {
+        assert!(findings(r#"{"version":2,"relations":{"prueba":[{"source":"pruebas","field":"file","pattern":"prueba-(\\d+)"},{"field":"title","len":7}]}}"#).is_empty());
+        let f = findings(r#"{"version":2,"relations":{"$x":[{"sorce":"a","pattern":"(a","len":"7"}],"vacia":[]}}"#);
+        let has = |path: &str, error: bool| f.iter().any(|(p, e)| p == path && *e == error);
+        assert!(has(r#"relations["$x"]"#, true), "{f:?}");
+        assert!(has(r#"relations["$x"][0].sorce"#, true), "{f:?}");
+        assert!(has(r#"relations["$x"][0].pattern"#, true), "{f:?}");
+        assert!(has(r#"relations["$x"][0].len"#, true), "{f:?}");
+        assert!(has("relations.vacia", false), "{f:?}");
+        assert_eq!(f.len(), 5, "{f:?}");
+    }
+
+    #[test]
+        fn comandos_e_intermediario() {
         let f = findings(
             r#"{"version":1,"commands":{"gh":{"run":[],"option":{}}},
                "intermediario":{"enabled":"si","rules":[{"adapter":"x"}],"extra":1}}"#,

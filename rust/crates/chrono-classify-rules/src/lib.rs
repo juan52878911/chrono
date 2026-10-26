@@ -85,6 +85,31 @@ pub struct Config {
     /// `.chrono/intermediario.json`, que se sigue leyendo si esta clave falta.
     /// Se guarda como JSON libre: la forma la valida `chrono config check`.
     pub intermediario: Option<serde_json::Value>,
+    /// Relaciones por clave entre fuentes (P-REL-2): nombre -> de dónde sale
+    /// la clave en cada fuente. Al ingerir, cada valor es un `link` con
+    /// `rel = nombre`; dos eventos con el mismo valor quedan relacionados
+    /// aunque vengan de fuentes distintas. Ver [`RelationSide`].
+    pub relations: BTreeMap<String, Vec<RelationSide>>,
+}
+
+/// Un extremo de una relación: en qué fuentes y de qué campo sale la clave.
+/// `{"source": "pruebas", "field": "file", "pattern": "prueba-(\\d+)"}`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RelationSide {
+    /// Fuente: su alias (`--name`), id, ruta, nombre de fichero o tipo
+    /// (`git`, `jsonl`…). Vacío = todas.
+    pub source: String,
+    /// `title`, `id`, `kind`, `level`, `actor`, `entity`, `file`,
+    /// `link:<rel>` o una clave de `attrs`. Vacío = la clave con el nombre
+    /// de la relación.
+    pub field: String,
+    /// Patrón de `chrono_core::Pattern` (sin `regex`): el valor es lo que
+    /// captura su grupo, o la coincidencia entera. Vacío = el campo entero.
+    pub pattern: String,
+    /// Recorta el valor a N caracteres (un sha de 40 frente a uno corto de
+    /// 7). 0 = sin recorte.
+    pub len: usize,
 }
 
 /// Una fuente de comando (ver [`Config::commands`]).
@@ -114,7 +139,7 @@ impl Default for CommandSpec {
 }
 
 /// Versión del esquema de `.chrono/config.json` que entiende este binario.
-pub const CONFIG_VERSION: u32 = 1;
+pub const CONFIG_VERSION: u32 = 2;
 
 /// Sufijo del caché de una fuente de comando: `<nombre>.cmd.jsonl`.
 pub const COMMAND_CACHE_SUFFIX: &str = ".cmd.jsonl";
@@ -306,6 +331,7 @@ impl Config {
             max_events_per_source: 0,
             commands: BTreeMap::new(),
             intermediario: None,
+            relations: BTreeMap::new(),
         }
     }
 

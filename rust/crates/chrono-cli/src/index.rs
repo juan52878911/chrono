@@ -24,6 +24,7 @@ use crate::glob;
 use crate::i18n::t;
 
 mod glob_source;
+mod relations;
 use glob_source::GlobSource;
 use crate::timeutil::{epoch_to_iso8601, now_epoch};
 
@@ -421,7 +422,8 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
         if let Some(gs) = GlobSource::from_row(&s.id, &s.manifest_json) {
             let cfg = chrono_classify_rules::load(&index_root);
             let ctx = IngestCtx { options_keys: gs.options_keys(), preset: gs.preset.as_deref(), group: Some((&s.id, "")) };
-            let changed = reset_if_dims_changed(&store, &s.id, &ingest_dims(adapter, &source_config(&cfg, Path::new(&s.path), &ctx), true))?;
+            let sides = relation_sides(&cfg, adapter, Path::new(&s.path), &ctx);
+            let changed = reset_if_dims_changed(&store, &s.id, &ingest_dims(adapter, &source_config(&cfg, Path::new(&s.path), &ctx), true, &sides))?;
             if changed {
                 gs.clear_state(&store)?;
             }
@@ -453,7 +455,8 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
         let preset = manifest_value(&s.manifest_json, "preset");
         let ctx = IngestCtx { preset: preset.as_deref(), ..Default::default() };
         let cfg = chrono_classify_rules::load(&index_root);
-        let dims_changed = reset_if_dims_changed(&store, &s.id, &ingest_dims(adapter, &source_config(&cfg, &path, &ctx), false))?;
+        let sides = relation_sides(&cfg, adapter, &path, &ctx);
+        let dims_changed = reset_if_dims_changed(&store, &s.id, &ingest_dims(adapter, &source_config(&cfg, &path, &ctx), false, &sides))?;
         let wm = if dims_changed { None } else { wm };
         let (n, new_wm, diverged) = match ingest_source(adapter, &path, wm, &mut store, &index_root, &ctx) {
             Ok((n, new_wm, _manifest)) => (n, new_wm, false),
@@ -752,7 +755,10 @@ fn ingest_source(
 ) -> std::result::Result<(usize, Watermark, BTreeMap<String, String>), IngestError> {
     let cfg = chrono_classify_rules::load(repo_for_config);
     let source_cfg = source_config(&cfg, path, ctx);
-    let dims = ingest_dims(source, &source_cfg, ctx.group.is_some());
+    let sides = relation_sides(&cfg, source, path, ctx);
+    let dims = ingest_dims(source, &source_cfg, ctx.group.is_some(), &sides);
+    // Sin entidad propia, la del evento que comparte esta clave (`entity_via`).
+    let entity_via = source.entity_via(&source_cfg);
     // En una fuente glob, los ids de hash llevan delante un hash del fichero: dos ficheros
     // con la misma línea en el mismo offset darían el mismo id y el segundo
     // evento se perdería (`INSERT OR IGNORE`).
@@ -819,8 +825,12 @@ fn ingest_source(
                     }
                     ev.attrs.insert("file".to_string(), file.to_string());
                 }
+                relations::apply(&sides, &mut ev);
                 if redact {
                     redacted += chrono_core::redact_event(&mut ev);
+                }
+                if let Some(rel) = &entity_via {
+                    inherit_entity(&mut w, rel, &mut ev)?;
                 }
                 if !w.add_event(&ev)? {
                     // Ya estaba: no cuenta como nuevo ni se reclasifica.
@@ -879,13 +889,48 @@ fn source_config(cfg: &chrono_classify_rules::Config, path: &Path, ctx: &IngestC
 
 /// Dims con que se ingiere una fuente: las de su config (o preset) y, en una
 /// fuente glob, `file` (cada evento lleva su fichero, y así se borra por fichero).
-fn ingest_dims(source: &dyn Source, source_cfg: &SourceConfig, glob: bool) -> Vec<String> {
+/// Llevan también la firma de sus `relations` (`rel:…`): cambiar una relación
+/// reindexa la fuente como cambiar una dim.
+fn ingest_dims(source: &dyn Source, source_cfg: &SourceConfig, glob: bool, sides: &[relations::Side]) -> Vec<String> {
     let mut dims = source.dims(source_cfg);
     if glob && !dims.iter().any(|d| d == "file") {
         dims.push("file".to_string());
-        dims.sort();
     }
+    dims.extend(relations::signature(sides));
+    dims.sort();
     dims
+}
+
+/// Extremos de `relations` que tocan a la fuente. Una glob se nombra por su id,
+/// alias o patrón, nunca por el fichero que se está leyendo: la firma tiene
+/// que ser la misma para todos sus ficheros.
+fn relation_sides(cfg: &chrono_classify_rules::Config, source: &dyn Source, path: &Path, ctx: &IngestCtx<'_>) -> Vec<relations::Side> {
+    match ctx.group {
+        Some((id, _)) => relations::sides_for(cfg, source.kind(), id, Path::new(""), &ctx.options_keys),
+        None => relations::sides_for(cfg, source.kind(), &canonical_source_id(source.kind(), path), path, &ctx.options_keys),
+    }
+}
+
+/// `entity_via`: un evento sin entidad (solo `unknown`) toma la del primer
+/// evento ya indexado con su misma clave `rel` (el resultado de una tool, la
+/// de su uso). Se busca en el índice, no en el cursor: no se pierde si un
+/// `sync` corta entre los dos ni si están en ficheros distintos.
+fn inherit_entity(w: &mut chrono_store::Writer<'_>, rel: &str, ev: &mut chrono_core::Event) -> Result<()> {
+    let unknown = ev.touches.iter().all(|t| t.entity == "unknown");
+    if !unknown {
+        return Ok(());
+    }
+    let Some(key) = ev.links.iter().find(|l| l.rel == rel).map(|l| l.target.clone()) else { return Ok(()) };
+    if let Some((entity, entity_type)) = w.linked_entity(rel, &key)? {
+        match ev.touches.first_mut() {
+            Some(t) => {
+                t.entity = entity;
+                t.entity_type = entity_type;
+            }
+            None => ev.touches.push(chrono_core::Touch { entity, entity_type, weight: 1, attrs: BTreeMap::new() }),
+        }
+    }
+    Ok(())
 }
 
 /// Si la fuente se ingirió con otras dims que las de la config de hoy, sus

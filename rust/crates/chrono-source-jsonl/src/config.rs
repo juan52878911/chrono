@@ -70,7 +70,9 @@ pub const PRESETS: &[(&str, &[(&str, &str)])] = &[(
         ("time_field", "timestamp"),
         ("kind_field", "type"),
         ("entity_field", "name"),
-        ("entity_join", "tool_use_id=id"),
+        // El resultado toma la tool de su uso por el link `tool_use` (en el
+        // índice, no en el cursor: no se pierde si un `sync` corta a mitad).
+        ("entity_via", "tool_use"),
         // Una sesión reanudada o bifurcada copia el historial en otro fichero:
         // el mismo `toolu_…` es la misma llamada y cuenta una vez.
         ("uid_field", "id|tool_use_id"),

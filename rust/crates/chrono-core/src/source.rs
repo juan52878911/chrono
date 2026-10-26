@@ -58,6 +58,13 @@ pub trait Source {
     fn dims(&self, cfg: &SourceConfig) -> Vec<String> {
         dims_option(cfg)
     }
+
+    /// `entity_via`: el `rel` de link por el que un evento sin entidad toma la
+    /// del evento con su misma clave (ver el CLI). La opción común, o la de un
+    /// preset del adaptador.
+    fn entity_via(&self, cfg: &SourceConfig) -> Option<String> {
+        cfg.options.get("entity_via").map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    }
 }
 
 /// La opción `dims` (`"host,container"`) como lista ordenada y sin repetidos.
