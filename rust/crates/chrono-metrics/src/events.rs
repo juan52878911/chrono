@@ -104,6 +104,45 @@ pub fn events_ordered(conn: &Connection, f: &EventFilter, limit: usize, newest_f
     Ok(out)
 }
 
+/// Los eventos con `rid` mayor que `after_rid`, en orden de inserción, de
+/// `limit` en `limit` (con o sin tiempo; `since`/`until` de `f` no cuentan). Lo
+/// usa `tail`: paginar por tiempo perdía los que comparten instante con el
+/// último mostrado cuando entraban más de `limit` de golpe.
+pub fn events_after_rid(conn: &Connection, f: &EventFilter, after_rid: i64, limit: usize) -> Result<Vec<(i64, EventRow)>> {
+    let scope = crate::EventScope {
+        source: f.source,
+        grep: f.grep,
+        level: f.level,
+        kind: f.kind,
+        entity: f.entity,
+        attr: f.attr,
+        join: f.join,
+        infer_level: f.infer_level,
+        until_epoch: 0,
+    };
+    let (filters, extra) = scope.sql(3);
+    let sql = format!(
+        "SELECT e.rid, e.id, s.id, e.kind, e.at, e.at_epoch, e.level, e.title
+         FROM events e JOIN sources s ON s.ref = e.source_ref
+         WHERE e.rid > ?1 {filters}
+         ORDER BY e.rid ASC
+         LIMIT ?2"
+    );
+    let limit = limit as i64;
+    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&after_rid, &limit];
+    for p in &extra {
+        bound.push(p);
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(bound), |r| {
+        Ok((
+            r.get(0)?,
+            EventRow { id: r.get(1)?, source_id: r.get(2)?, kind: r.get(3)?, at: r.get(4)?, at_epoch: r.get(5)?, level: r.get(6)?, title: r.get(7)? },
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};

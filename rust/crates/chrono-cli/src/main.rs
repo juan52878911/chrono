@@ -890,6 +890,15 @@ fn main() {
         return;
     }
 
+    // Un reindex en marcha o cortado deja el índice a medias: las cifras pueden faltar.
+    match chrono_store::reindex_pending(&db) {
+        Some((_, true)) => eprintln!("{}", t(
+            "chrono: warning: a reindex is running on this index; results may be incomplete until it finishes",
+            "chrono: aviso: hay un reindex en marcha sobre este índice; las cifras pueden salir incompletas hasta que acabe",
+        )),
+        Some((backup, false)) => eprintln!("chrono: {}: {}", t("warning", "aviso"), index::interrupted_reindex_msg(&db, &backup)),
+        None => {}
+    }
     let store = chrono_store::Store::open_read(&db).unwrap_or_else(|e| fatal_open(e, &db, &f));
     if let (Some(s), Some(arg)) = (f.source.as_deref().filter(|s| !s.is_empty()), source_arg.as_deref()) {
         check_source(&store, s, arg);

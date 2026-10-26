@@ -297,7 +297,7 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
         Some(s) => s,
         None => return Ok(text_content(state.open_error().unwrap_or_else(no_index_text))),
     };
-    run_tool(store, name, args)
+    run_tool(&store, name, args)
 }
 
 /// Texto de la respuesta de una herramienta (lo mismo que ve el modelo por MCP):

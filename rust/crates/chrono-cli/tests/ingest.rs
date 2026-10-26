@@ -443,3 +443,54 @@ fn tail_deja_rollups_plantillas_y_busqueda_como_un_sync() {
     let pats = env.ok(&["patterns"]);
     assert!(pats.contains("pinchazo"), "{pats}");
 }
+
+#[test]
+fn tail_ensena_todo_lo_nuevo_aunque_comparta_instante() {
+    let env = Env::new("tail-paginas", r#"{"version":2}"#);
+    let log = env.dir().join("app.jsonl");
+    let line = |i: u32| format!(r#"{{"ts":"2024-01-01T00:00:00Z","msg":"golpe {i}"}}"#) + "\n";
+    write(env.dir(), "app.jsonl", &line(0));
+    env.ok(&["add", &path_s(&log)]);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_chrono"))
+        .args(["tail", "--interval", "1s", "--db", &env.db()])
+        .current_dir(env.dir())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // Se lee mientras escribe: con la tubería llena (64 KB) el hijo se bloquearía.
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut s);
+        s
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    // 3000 de golpe, todos en el mismo instante que el último ya indexado.
+    let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+    std::io::Write::write_all(&mut f, (1..=3000).map(line).collect::<String>().as_bytes()).unwrap();
+    drop(f);
+    std::thread::sleep(std::time::Duration::from_millis(3000));
+    let _ = child.kill();
+    let _ = child.wait();
+    let text = reader.join().unwrap();
+    // Antes: 1000 (una página) y los demás, con el mismo instante, nunca.
+    assert_eq!(text.lines().filter(|l| l.contains("golpe")).count(), 3000, "{:?}", env.sql("SELECT COUNT(*) FROM events"));
+}
+
+#[test]
+fn tail_sigue_en_el_indice_nuevo_tras_un_reindex() {
+    let env = Env::new("tail-reindex", r#"{"version":2}"#);
+    let log = env.dir().join("app.jsonl");
+    let line = |i: u32| format!(r#"{{"ts":"2024-01-01T00:00:{i:02}Z","msg":"evento {i}"}}"#) + "\n";
+    write(env.dir(), "app.jsonl", &line(1));
+    env.ok(&["add", &path_s(&log)]);
+    tail_once(&env, || {
+        env.ok(&["reindex"]);
+        let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        std::io::Write::write_all(&mut f, line(2).as_bytes()).unwrap();
+    });
+    // Antes: el tail seguía con el índice apartado (borrado al acabar el
+    // reindex) y el evento 2 no llegaba al nuevo.
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["2"]);
+}

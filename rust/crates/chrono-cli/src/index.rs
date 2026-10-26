@@ -613,16 +613,15 @@ pub fn tail(
     grep: Option<&str>,
 ) -> Result<()> {
     let mut store = Store::open(db)?;
+    let mut opened = file_id(db);
     let index_root = index_root_of(db);
     let interval = Duration::from_millis(interval_ms.clamp(200, 3_600_000) as u64);
 
-    // `tail -f`: se sigue SOLO lo nuevo → se arranca desde el máximo at_epoch ya
-    // presente (0 si el índice está vacío, en cuyo caso se mostrará todo).
-    let mut since: i64 = store
-        .conn()
-        .query_row("SELECT COALESCE(MAX(at_epoch), 0) FROM events", [], |r| r.get(0))
-        .unwrap_or(0);
-    let mut seen: HashSet<String> = HashSet::new();
+    // `tail -f`: se sigue SOLO lo nuevo → desde el último `rid` ya presente. Por
+    // `rid` y no por tiempo: con más de una página de golpe, los eventos del
+    // mismo instante que el último mostrado se perdían (el índice sí los tenía).
+    let max_rid = |st: &Store| st.conn().query_row("SELECT COALESCE(MAX(rid), 0) FROM events", [], |r| r.get::<_, i64>(0)).unwrap_or(0);
+    let mut last_rid = max_rid(&store);
     let mut last_err: Option<String> = None;
 
     eprintln!("{}", t(
@@ -630,11 +629,24 @@ pub fn tail(
         format!("chrono tail: siguiendo cada {interval_ms} ms — Ctrl-C para parar"),
     ));
 
+    let filter = chrono_metrics::EventFilter { source, kind, level, grep, ..Default::default() };
     let mut stdout = std::io::stdout();
     loop {
         {
             // Por vuelta, no durante todo el `tail`: un `sync` de un hook no espera horas.
             let _lock = lock_ingest(db)?;
+            // Un `reindex` aparta el índice y crea otro en la misma ruta: con la
+            // conexión vieja se seguía escribiendo en la copia (que luego se
+            // borra). Si el fichero cambió, se reabre y se sigue desde lo que hay.
+            if file_id(db) != opened {
+                store = Store::open(db)?;
+                opened = file_id(db);
+                last_rid = max_rid(&store);
+                eprintln!("{}", t(
+                    "chrono tail: the index was replaced (reindex?); reopened, following from now",
+                    "chrono tail: el índice cambió (¿reindex?); reabierto, se sigue desde ahora",
+                ));
+            }
             // Una fuente que falla (un fichero borrado) no para el `tail`: el
             // aviso sale una vez y las demás siguen al día.
             match sync_store(&mut store, &index_root, None, true) {
@@ -649,31 +661,41 @@ pub fn tail(
             }
         }
 
-        let filter = chrono_metrics::EventFilter {
-            since_epoch: since,
-            until_epoch: 0,
-            source,
-            kind,
-            level,
-            grep,
-            entity: None,
-            attr: None,
-            join: None,
-            infer_level: false,
-        };
-        let rows = chrono_metrics::events(store.conn(), &filter, 1000)?;
-        for r in &rows {
-            if seen.insert(r.id.clone()) {
-                let lvl: &str = if r.level.is_empty() { "-" } else { r.level.as_str() };
-                let src = r.source_id.split(':').next().unwrap_or(&r.source_id);
-                let _ = writeln!(stdout, "{}  {:5}  [{src}]  {}", r.at, lvl, r.title);
-                if r.at_epoch > since {
-                    since = r.at_epoch;
-                }
+        // Todo lo nuevo, de página en página, y en orden cronológico.
+        let mut rows = Vec::new();
+        loop {
+            let page = chrono_metrics::events_after_rid(store.conn(), &filter, last_rid, 1000)?;
+            let full = page.len() == 1000;
+            if let Some((rid, _)) = page.last() {
+                last_rid = *rid;
             }
+            rows.extend(page.into_iter().map(|(_, r)| r));
+            if !full {
+                break;
+            }
+        }
+        rows.sort_by(|a, b| a.at_epoch.cmp(&b.at_epoch).then_with(|| a.id.cmp(&b.id)));
+        for r in &rows {
+            let lvl: &str = if r.level.is_empty() { "-" } else { r.level.as_str() };
+            let src = r.source_id.split(':').next().unwrap_or(&r.source_id);
+            let _ = writeln!(stdout, "{}  {:5}  [{src}]  {}", r.at, lvl, r.title);
         }
         let _ = stdout.flush();
         std::thread::sleep(interval);
+    }
+}
+
+/// Dispositivo e inodo del índice (`None` si no está): cambia si alguien lo
+/// sustituye por otro fichero en la misma ruta.
+fn file_id(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::metadata(path).ok().and_then(|m| m.modified().ok()).map(|t| (0, t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)))
     }
 }
 
@@ -721,12 +743,69 @@ impl From<Box<dyn std::error::Error + Send + Sync>> for IngestError {
 /// el segundo chocaba con la transacción larga del primero (`database is
 /// locked` tras el `busy_timeout`) o repetía el mismo delta. Las consultas no
 /// lo toman: leen del WAL sin bloquear.
-fn lock_ingest(db: &Path) -> Result<std::fs::File> {
-    let f = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(format!("{}.lock", db.display()))?;
+///
+/// Reentrante en el mismo hilo: `reindex` lo toma para todo su recorrido y
+/// llama a `init`/`add`, que lo piden otra vez (un `flock` sobre otra
+/// descripción del mismo fichero se bloquearía contra el propio proceso).
+///
+/// Con un `reindex` a medias (su marca sigue ahí), ninguna otra ingesta toca el
+/// índice: está incompleto y la copia buena es otra.
+pub(crate) fn lock_ingest(db: &Path) -> Result<IngestLock> {
+    let lock = take_ingest_lock(db)?;
+    if lock.file.is_some() {
+        if let Some((backup, _)) = chrono_store::reindex_pending(db) {
+            return Err(interrupted_reindex_msg(db, &backup).into());
+        }
+    }
+    Ok(lock)
+}
+
+/// Como [`lock_ingest`], sin mirar la marca de reindex (lo usa `reindex`, que
+/// es quien la pone y la quita).
+pub(crate) fn lock_ingest_for_reindex(db: &Path) -> Result<IngestLock> {
+    take_ingest_lock(db)
+}
+
+/// «Un reindex no terminó»: qué pasa y cómo seguir.
+pub(crate) fn interrupted_reindex_msg(db: &Path, backup: &Path) -> String {
+    t(
+        format!(
+            "a reindex of {} did not finish: the index may be incomplete and the good copy is {}. Resume it with: chrono --db {} reindex",
+            db.display(), backup.display(), db.display()
+        ),
+        format!(
+            "un reindex de {} no terminó: el índice puede estar a medias y la copia buena es {}. Reanúdalo con: chrono --db {} reindex",
+            db.display(), backup.display(), db.display()
+        ),
+    )
+}
+
+thread_local! {
+    /// Cerrojos de ingesta que este hilo ya tiene (ver [`lock_ingest`]).
+    static HELD: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// El cerrojo de ingesta tomado; se suelta al soltarlo. `file` es `None` si ya
+/// lo tenía este hilo (lo suelta quien lo tomó primero).
+pub(crate) struct IngestLock {
+    file: Option<std::fs::File>,
+    path: PathBuf,
+}
+
+impl Drop for IngestLock {
+    fn drop(&mut self) {
+        if self.file.is_some() {
+            HELD.with(|h| h.borrow_mut().retain(|p| p != &self.path));
+        }
+    }
+}
+
+fn take_ingest_lock(db: &Path) -> Result<IngestLock> {
+    let path = PathBuf::from(format!("{}.lock", db.display()));
+    if HELD.with(|h| h.borrow().contains(&path)) {
+        return Ok(IngestLock { file: None, path });
+    }
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path)?;
     if let Err(std::fs::TryLockError::WouldBlock) = f.try_lock() {
         eprintln!("{}", t(
             "chrono: another ingest is running on this index; waiting for it",
@@ -734,7 +813,8 @@ fn lock_ingest(db: &Path) -> Result<std::fs::File> {
         ));
         f.lock()?;
     }
-    Ok(f)
+    HELD.with(|h| h.borrow_mut().push(path.clone()));
+    Ok(IngestLock { file: Some(f), path })
 }
 
 /// Abre el índice para `init`, que lo rehace con una sola fuente (`source_id`).
@@ -759,6 +839,8 @@ fn open_or_recreate(db: &Path, source_id: &str, explicit_db: bool) -> Result<Sto
         Err(e) => return Err(e),
     };
     let msg = match e.downcast_ref::<chrono_store::SchemaMismatch>() {
+        // Sin versión: otro proceso lo está creando (o no es de chrono); no se toca.
+        Some(m) if m.is_unknown() => return Err(crate::reindex::explain_open_error(&*e, db, explicit_db).unwrap_or_else(|| e.to_string()).into()),
         Some(m) if m.is_newer() => return Err(crate::reindex::explain_open_error(&*e, db, explicit_db).unwrap_or_else(|| e.to_string()).into()),
         Some(m) => {
             let others: Vec<String> = chrono_store::read_sources_any_version(db)

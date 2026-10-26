@@ -27,6 +27,12 @@ impl SchemaMismatch {
         self.found.as_deref().and_then(|v| v.parse::<i64>().ok()).is_some_and(|v| v > self.want)
     }
 
+    /// El índice no dice su versión (tiene `meta` sin `schema_version`): a medio
+    /// crear por otro proceso, o no es de chrono. Reindexar no es la salida.
+    pub fn is_unknown(&self) -> bool {
+        self.found.is_none()
+    }
+
     /// `v5`, o `?` si el índice no la guarda.
     pub fn found_label(&self) -> String {
         self.found.as_deref().map_or_else(|| "?".to_string(), |v| format!("v{v}"))
@@ -35,6 +41,9 @@ impl SchemaMismatch {
 
 impl std::fmt::Display for SchemaMismatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_unknown() {
+            return write!(f, "{}", UNKNOWN_SCHEMA);
+        }
         if self.is_newer() {
             return write!(
                 f,
@@ -55,12 +64,34 @@ impl std::fmt::Display for SchemaMismatch {
 
 impl std::error::Error for SchemaMismatch {}
 
+/// Mensaje de un índice sin versión de esquema.
+const UNKNOWN_SCHEMA: &str =
+    "el índice no dice su versión de esquema: otro proceso lo está creando ahora mismo (repite en un momento) o no es un índice de chrono";
+
 /// El error de abrir un índice dice que el fichero no es una base SQLite o que
 /// está dañado (y no que esté ocupado, sin permisos o inaccesible): lo único que
 /// justifica apartarlo y crear otro.
 pub fn is_corrupt(e: &(dyn std::error::Error + 'static)) -> bool {
     use rusqlite::ErrorCode::{DatabaseCorrupt, NotADatabase};
     e.downcast_ref::<rusqlite::Error>().and_then(rusqlite::Error::sqlite_error_code).is_some_and(|c| matches!(c, NotADatabase | DatabaseCorrupt))
+}
+
+/// Marca de un `reindex` a medias: `<db>.reindexing`, con la ruta de la copia
+/// del índice viejo dentro. Se escribe antes de apartar el índice y se borra al
+/// acabar; si sigue ahí, el índice puede estar a medias y la copia es la buena.
+pub fn reindex_marker(db: &Path) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("{}.reindexing", db.display()))
+}
+
+/// Si hay un `reindex` sin terminar sobre `db`: la copia buena y si sigue en
+/// marcha (otro proceso tiene el cerrojo de ingesta, `<db>.lock`) o se cortó.
+pub fn reindex_pending(db: &Path) -> Option<(std::path::PathBuf, bool)> {
+    let backup = std::fs::read_to_string(reindex_marker(db)).ok()?;
+    let running = std::fs::OpenOptions::new()
+        .write(true)
+        .open(format!("{}.lock", db.display()))
+        .is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
+    Some((std::path::PathBuf::from(backup.trim()), running))
 }
 
 /// Las fuentes registradas en un índice de cualquier versión, en el orden en

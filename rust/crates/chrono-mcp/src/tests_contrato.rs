@@ -119,3 +119,34 @@ fn indice_de_otro_esquema_las_tools_dicen_como_reconstruirlo() {
     assert!(text.contains(&format!("chrono --db {} reindex", db.0.display())), "{text}");
     assert!(!text.contains("chrono init"), "no es que falte el índice: {text}");
 }
+
+#[test]
+fn el_mcp_reabre_el_indice_si_lo_cambian_y_dice_un_reindex_a_medias() {
+    let (db, store) = fixture("reabre");
+    drop(store);
+    let state = crate::State { store: Default::default(), open_error: Default::default(), db: Some(db.0.clone()), discover: true };
+    let sources = |state: &crate::State| -> String {
+        let r = crate::tools::call_tool(state, &json!({"name": "sources", "arguments": {"format": "json"}})).unwrap();
+        r["content"][0]["text"].as_str().unwrap().to_string()
+    };
+    assert!(sources(&state).contains("jsonl:/app"), "{}", sources(&state));
+
+    // Como un reindex: el índice se aparta y en su ruta aparece otro (aquí, vacío).
+    let bak = PathBuf::from(format!("{}.bak", db.0.display()));
+    std::fs::rename(&db.0, &bak).unwrap();
+    for s in ["-wal", "-shm"] {
+        let _ = std::fs::rename(format!("{}{s}", db.0.display()), format!("{}{s}", bak.display()));
+    }
+    // Mientras dura (marca puesta), las tools lo dicen en vez de contestar con el viejo.
+    std::fs::write(chrono_store::reindex_marker(&db.0), bak.to_string_lossy().as_bytes()).unwrap();
+    let text = sources(&state);
+    assert!(text.contains("no terminó") && text.contains(&*bak.to_string_lossy()), "{text}");
+    Store::open(&db.0).unwrap();
+    std::fs::remove_file(chrono_store::reindex_marker(&db.0)).unwrap();
+    // Antes seguía leyendo el inodo viejo (la fuente de antes) sin dar error.
+    let text = sources(&state);
+    assert!(!text.contains("jsonl:/app"), "{text}");
+    for s in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{s}", bak.display()));
+    }
+}
