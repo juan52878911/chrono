@@ -308,6 +308,41 @@ fn tail_once(env: &Env, then: impl FnOnce()) {
 }
 
 #[test]
+fn una_fuente_borrada_no_para_sync_ni_tail() {
+    let env = Env::new("fuente-borrada", r#"{"version":2}"#);
+    let line = |i: u32| format!(r#"{{"ts":"2024-01-01T00:00:{i:02}Z","msg":"hola {i}"}}"#) + "\n";
+    write(env.dir(), "a.jsonl", &(line(1) + &line(2)));
+    write(env.dir(), "b.jsonl", &line(11));
+    let (a, b) = (env.dir().join("a.jsonl"), env.dir().join("b.jsonl"));
+    env.ok(&["add", &path_s(&a)]);
+    env.ok(&["add", &path_s(&b)]);
+    std::fs::remove_file(&a).unwrap();
+    let append = |i: u32| {
+        let mut f = std::fs::OpenOptions::new().append(true).open(&b).unwrap();
+        std::io::Write::write_all(&mut f, line(i).as_bytes()).unwrap();
+    };
+    append(12);
+
+    // Antes: error en a.jsonl y b.jsonl sin su línea nueva.
+    let out = env.run(&["sync", "--db", &env.db()]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("a.jsonl") && err.contains("are kept"), "{err}");
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["4"], "{err}");
+    let src = env.ok(&["sources"]);
+    assert_eq!(src.matches("sync_error").count(), 1, "{src}");
+
+    // `tail` tampoco se para: sigue trayendo lo nuevo de b.
+    tail_once(&env, || append(13));
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["5"]);
+
+    // Vuelve el fichero: el sync sale bien y el error desaparece de `sources`.
+    write(env.dir(), "a.jsonl", &(line(1) + &line(2)));
+    env.ok(&["sync"]);
+    assert!(!env.ok(&["sources"]).contains("sync_error"));
+}
+
+#[test]
 fn tail_deja_rollups_plantillas_y_busqueda_como_un_sync() {
     let env = Env::new("tail", r#"{"version":2}"#);
     let log = env.dir().join("app.jsonl");

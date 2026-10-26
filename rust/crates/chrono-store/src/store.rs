@@ -123,6 +123,12 @@ impl Store {
         Ok(())
     }
 
+    /// Borra una clave de `meta` (no-op si no está).
+    pub fn delete_meta(&self, key: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM meta WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     /// Lee un valor del manifiesto `meta`, o `None` si no existe.
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
         let v = self

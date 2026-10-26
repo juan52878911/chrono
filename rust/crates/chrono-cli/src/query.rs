@@ -373,7 +373,12 @@ pub fn sources(store: &Store) -> Result<Json> {
                 .set("top_entities", Json::str(&pairs(&s.top_entities)))
                 .set("dims", Json::str(&s.dims.join(" ")));
             // Solo si los hay: eventos con las dims u opciones de antes de un cambio sin reindexar.
-            if s.stale_dims_events > 0 { o.set("stale_dims_events", Json::Int(s.stale_dims_events)) } else { o }
+            let o = if s.stale_dims_events > 0 { o.set("stale_dims_events", Json::Int(s.stale_dims_events)) } else { o };
+            // Solo si el último sync no pudo leerla.
+            match &s.sync_error {
+                Some(e) => o.set("sync_error", Json::str(e)),
+                None => o,
+            }
         })
         .collect();
     let n = items.len();

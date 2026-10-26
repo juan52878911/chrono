@@ -412,6 +412,21 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
     // tamaños/tags/forge; si git no cambió (atajo de HEAD), no se re-tira del
     // forge de GitHub aunque otra fuente de log sí traiga eventos nuevos.
     let mut changed_git_paths: Vec<String> = Vec::new();
+    // Fuentes que no se pudieron leer: las demás siguen (antes una sola, p. ej.
+    // un fichero borrado, paraba el `sync` entero) y el error va al final.
+    let mut failed: Vec<String> = Vec::new();
+    let fail = |store: &Store, failed: &mut Vec<String>, id: &str, e: &dyn std::fmt::Display| -> Result<()> {
+        let kept = store.count_source_events(id, None)?;
+        if !light {
+            eprintln!("{}", t(
+                format!("  warning: can't read {id}: {e} — its {kept} indexed events are kept; the other sources go on"),
+                format!("  aviso: no se pudo leer {id}: {e} — se conservan sus {kept} eventos indexados; las demás fuentes siguen"),
+            ));
+        }
+        store.set_meta(&format!("sync_error:{id}"), &format!("{} {e}", now_iso()))?;
+        failed.push(format!("{id} ({e})"));
+        Ok(())
+    };
     for s in &sources {
         if let Some(ref want) = filter_id {
             // También casa por ruta: una fuente añadida con `--as` puede no
@@ -447,9 +462,16 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
             if changed {
                 gs.clear_state(store)?;
             }
-            let mut r = gs.sync(adapter, store, &index_root)?;
+            let mut r = match gs.sync(adapter, store, &index_root) {
+                Ok(r) => r,
+                Err(e) => {
+                    fail(store, &mut failed, &s.id, &e)?;
+                    continue;
+                }
+            };
             r.diverged |= changed;
             store.upsert_source(&s.id, &s.kind, &s.path, &r.watermark, &gs.manifest(r.files_total), &now)?;
+            store.delete_meta(&format!("sync_error:{}", s.id))?;
             diverged_any |= r.diverged;
             synced_any |= r.events > 0 || r.diverged;
             total += r.events;
@@ -494,10 +516,14 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
                     .map_err(|e| e.into_boxed())?;
                 (n, new_wm, true)
             }
-            Err(e) => return Err(e.into_boxed()),
+            Err(e) => {
+                fail(store, &mut failed, &s.id, &e.into_boxed())?;
+                continue;
+            }
         };
         let diverged = diverged || dims_changed;
         store.set_source_watermark(&s.id, &new_wm.value, &now)?;
+        store.delete_meta(&format!("sync_error:{}", s.id))?;
         // Una divergencia borró y reingirió la fuente: el índice cambió aunque el
         // conteo neto sea 0 (p.ej. el fichero encogió), así que FTS debe
         // reconstruirse por completo y finalize debe correr.
@@ -526,10 +552,22 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
         return Ok(());
     }
 
+    // Lo que no se pudo leer sale como error al final, tras actualizar lo demás.
+    let result = || -> Result<()> {
+        if failed.is_empty() {
+            return Ok(());
+        }
+        Err(t(
+            format!("sync: {} source(s) could not be read: {} (their events are kept; see `sources`)", failed.len(), failed.join(", ")),
+            format!("sync: {} fuente(s) no se pudieron leer: {} (sus eventos se conservan; ver `sources`)", failed.len(), failed.join(", ")),
+        )
+        .into())
+    };
+
     // Nada nuevo en ninguna fuente: no se reconstruye FTS ni se compacta.
     if !synced_any {
         say(t("sync: 0 new events", "sync: 0 eventos nuevos"));
-        return Ok(());
+        return result();
     }
 
     say(t("  building search index…", "  construyendo índice de búsqueda…"));
@@ -543,7 +581,7 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
     }
     finalize(&index_root, store, &changed_git_paths, !diverged_any, light)?;
     say(t(format!("sync: {total} new events"), format!("sync: {total} eventos nuevos")));
-    Ok(())
+    result()
 }
 
 /// `chrono tail [--interval 2s] [--source/--kind/--level/--grep]`: sigue el
@@ -573,6 +611,7 @@ pub fn tail(
         .query_row("SELECT COALESCE(MAX(at_epoch), 0) FROM events", [], |r| r.get(0))
         .unwrap_or(0);
     let mut seen: HashSet<String> = HashSet::new();
+    let mut last_err: Option<String> = None;
 
     eprintln!("{}", t(
         format!("chrono tail: following every {interval_ms} ms — Ctrl-C to stop"),
@@ -584,7 +623,18 @@ pub fn tail(
         {
             // Por vuelta, no durante todo el `tail`: un `sync` de un hook no espera horas.
             let _lock = lock_ingest(db)?;
-            sync_store(&mut store, &index_root, None, true)?;
+            // Una fuente que falla (un fichero borrado) no para el `tail`: el
+            // aviso sale una vez y las demás siguen al día.
+            match sync_store(&mut store, &index_root, None, true) {
+                Ok(()) => last_err = None,
+                Err(e) => {
+                    let msg = e.to_string();
+                    if last_err.as_deref() != Some(msg.as_str()) {
+                        eprintln!("{msg}");
+                        last_err = Some(msg);
+                    }
+                }
+            }
         }
 
         let filter = chrono_metrics::EventFilter {

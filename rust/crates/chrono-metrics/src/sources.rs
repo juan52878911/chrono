@@ -3,7 +3,7 @@
 //! debe mirar un agente para saber si chrono ya tiene los datos que busca
 //! (p. ej. los logs de Loki volcados por la fuente de comando `cmd:loki`).
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::Result;
 
@@ -28,6 +28,9 @@ pub struct SourceSummary {
     /// Eventos que conservan las dims u opciones de antes: cambiaron cuando parte
     /// de la fuente ya no se podía releer y no se reindexó (ver el CLI).
     pub stale_dims_events: i64,
+    /// El último `sync` no pudo leer la fuente (fichero borrado, repo movido):
+    /// cuándo y por qué. Sus eventos siguen en el índice.
+    pub sync_error: Option<String>,
 }
 
 /// `source_dims` guarda, junto a las dims, las firmas de `relations` (`rel:…`) y
@@ -117,8 +120,11 @@ pub fn sources(conn: &Connection) -> Result<Vec<SourceSummary>> {
             let rows = st.query_map(params![sref], |r| r.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
+        let sync_error: Option<String> =
+            conn.query_row("SELECT value FROM meta WHERE key = ?1", params![format!("sync_error:{id}")], |r| r.get(0)).optional()?;
         out.push(SourceSummary {
             dims,
+            sync_error,
             levels: counts(levels, sref)?,
             inferred_levels: counts(inferred, sref)?,
             kinds: counts(kinds, sref)?,

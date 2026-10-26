@@ -677,7 +677,7 @@ fn sources(conn: &Connection) -> Result<Value> {
                 "source": s.source, "alias": s.alias, "kind": s.kind, "events": s.events,
                 "first": s.first, "last": s.last,
                 "levels": vc(&s.levels), "inferred_levels_unlabeled": vc(&s.inferred_levels), "kinds": vc(&s.kinds), "top_entities": vc(&s.top_entities), "dims": s.dims,
-                "stale_dims_events": s.stale_dims_events,
+                "stale_dims_events": s.stale_dims_events, "sync_error": s.sync_error,
             })
         })
         .collect();
