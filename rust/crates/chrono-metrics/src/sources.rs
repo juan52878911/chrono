@@ -34,6 +34,22 @@ pub struct SourceSummary {
 /// de las opciones de la fuente (`opt:…`): no son claves que se puedan consultar.
 pub(crate) const NOT_SIGNATURE: &str = "key NOT GLOB 'rel:*' AND key NOT GLOB 'opt:*'";
 
+/// `(source_id, alias)` de las fuentes que tienen alias (el de una fuente glob,
+/// o `cmd:<nombre>` de una de comando), con el mismo criterio que [`sources`].
+pub fn source_aliases(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare("SELECT id, json_extract(manifest_json, '$.alias') FROM sources ORDER BY id")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, glob_alias) = row?;
+        let alias = glob_alias.or_else(|| id.rsplit('/').next().and_then(|f| f.strip_suffix(".cmd.jsonl")).map(|n| format!("cmd:{n}")));
+        if let Some(a) = alias.filter(|a| !a.is_empty()) {
+            out.push((id, a));
+        }
+    }
+    Ok(out)
+}
+
 /// Una fila por fuente, orden estable por id.
 pub fn sources(conn: &Connection) -> Result<Vec<SourceSummary>> {
     let mut stmt = conn.prepare(

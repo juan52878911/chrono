@@ -111,13 +111,17 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// atributo numérico y no el filtro `clave:valor` (que no casaba nada y daba
 /// `total=0` con grupos): cuenta los eventos que tienen ese atributo.
 fn count_args(tool: &str, args: &Value) -> Value {
-    let mut a = args.clone();
-    if tool == "stats" {
-        if let Some(o) = a.as_object_mut() {
-            if let Some(k) = o.get("attr").and_then(Value::as_str).map(str::to_string) {
-                o.insert("attr".into(), json!(format!("{k}:*")));
-            }
-        }
+    if tool != "stats" {
+        return args.clone();
+    }
+    // Y el filtro `where_attr`, si lo hay, junto a él.
+    let mut a = crate::tools::stats_filters(args);
+    if let Some(k) = args.get("attr").and_then(Value::as_str) {
+        let attr = match a.get("attr").and_then(Value::as_str).filter(|w| !w.trim().is_empty()) {
+            Some(w) => format!("{k}:*,{w}"),
+            None => format!("{k}:*"),
+        };
+        a["attr"] = json!(attr);
     }
     a
 }

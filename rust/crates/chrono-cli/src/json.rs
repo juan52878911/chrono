@@ -31,6 +31,28 @@ impl Json {
         Json::Str(s.to_string())
     }
 
+    /// Cambia cada `source_id` que tenga alias (`claude`, `cmd:loki`) por el
+    /// alias, para `--compact`: una fuente glob se acortaba a `jsonl:*.jsonl`,
+    /// que no dice cuál es. `aliases` son pares `(id, alias)`.
+    pub fn with_source_aliases(self, aliases: &[(String, String)]) -> Json {
+        match self {
+            Json::Obj(fields) => Json::Obj(
+                fields
+                    .into_iter()
+                    .map(|(k, v)| match v {
+                        Json::Str(s) if k == "source_id" => {
+                            let alias = aliases.iter().find(|(id, _)| *id == s).map(|(_, a)| a.clone());
+                            (k, Json::Str(alias.unwrap_or(s)))
+                        }
+                        v => (k, v.with_source_aliases(aliases)),
+                    })
+                    .collect(),
+            ),
+            Json::Arr(items) => Json::Arr(items.into_iter().map(|v| v.with_source_aliases(aliases)).collect()),
+            other => other,
+        }
+    }
+
     /// Serializa indentado con 2 espacios (como `json.Encoder.SetIndent("", "  ")`).
     pub fn pretty(&self) -> String {
         let mut out = String::new();
@@ -289,6 +311,20 @@ mod tests {
         assert!(c.contains("jsonl:logs.jsonl"), "{c}");
         assert!(c.contains("anchor.source_id: git:CRM_Aura"), "{c}");
         assert!(!c.contains("/private/tmp"), "{c}");
+    }
+
+    #[test]
+    fn compact_usa_el_alias_de_la_fuente() {
+        let r = Json::obj().set(
+            "events",
+            Json::Arr(vec![
+                Json::obj().set("source_id", Json::str("jsonl:/h/.claude/projects/*.jsonl")),
+                Json::obj().set("source_id", Json::str("jsonl:/x/app.jsonl")),
+            ]),
+        );
+        let aliases = vec![("jsonl:/h/.claude/projects/*.jsonl".to_string(), "claude".to_string())];
+        let c = Json::obj().set("result", r).with_source_aliases(&aliases).compact();
+        assert!(c.contains("\nclaude\n") && c.contains("jsonl:app.jsonl") && !c.contains("*.jsonl"), "{c}");
     }
 
     #[test]

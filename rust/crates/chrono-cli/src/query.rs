@@ -37,13 +37,33 @@ impl Window {
     }
 }
 
-/// Arma el envelope común leyendo el manifiesto del store.
+/// Arma el envelope común leyendo el manifiesto del store. `truncated` si se
+/// devolvió el tope entero (puede haber más).
 fn envelope(
     store: &Store,
     question: &str,
     window: &Window,
     max_items: usize,
     returned: usize,
+    result: Json,
+) -> Result<Json> {
+    envelope_with(store, question, window, max_items, returned, returned >= max_items, result)
+}
+
+/// Envelope de una respuesta que va siempre entera (un inventario, una ficha):
+/// `max_items = returned` y nunca `truncated` (antes `sources` daba n+1 para
+/// esquivarlo y `phases`/`tickets`/`show` salían como truncadas).
+fn envelope_complete(store: &Store, question: &str, window: &Window, returned: usize, result: Json) -> Result<Json> {
+    envelope_with(store, question, window, returned, returned, false, result)
+}
+
+fn envelope_with(
+    store: &Store,
+    question: &str,
+    window: &Window,
+    max_items: usize,
+    returned: usize,
+    truncated: bool,
     result: Json,
 ) -> Result<Json> {
     let mut manifest = Json::obj();
@@ -67,13 +87,41 @@ fn envelope(
             Json::obj()
                 .set("max_items", Json::Int(max_items as i64))
                 .set("returned", Json::Int(returned as i64))
-                .set("truncated", Json::Bool(returned >= max_items)),
+                .set("truncated", Json::Bool(truncated)),
         )
         .set("result", result))
 }
 
+/// Pone `hints` (avisos para leer el resultado: una attr que no existe, un
+/// índice sin git…) al principio del resultado, si hay: en `--compact` es lo
+/// primero que se lee.
+fn with_hints(result: Json, hints: Vec<String>) -> Json {
+    match result {
+        Json::Obj(mut fields) if !hints.is_empty() => {
+            fields.insert(0, ("hints".to_string(), Json::Arr(hints.iter().map(|h| Json::str(h)).collect())));
+            Json::Obj(fields)
+        }
+        other => other,
+    }
+}
+
+/// Aviso de una attr que no tiene ningún evento, con las que hay.
+fn unknown_attr_hint(store: &Store, key: &str) -> Result<String> {
+    let keys = chrono_metrics::attr_keys(store.conn(), 20)?.join(", ");
+    Ok(t(format!("no event has the attribute {key:?}; attributes: {keys}"), format!("ningún evento tiene la attr {key:?}; las que hay: {keys}")))
+}
+
 pub fn hotspots(store: &Store, w: &Window, symbols_only: bool) -> Result<Json> {
     const LIMIT: usize = 25;
+    // Sin git no hay tamaño: el ranking salía con los nombres de tools o
+    // servicios por frecuencia (size 0), que no es lo que mide hotspots.
+    if chrono_metrics::sources_of_kind(store.conn(), "git")? == 0 {
+        let hint = t(
+            "hotspots needs a git source (changes × size of each file) and this index has none; for logs or tools: chrono top entity",
+            "hotspots necesita una fuente git (cambios × tamaño de cada fichero) y este índice no tiene ninguna; para logs o tools: chrono top entity",
+        );
+        return envelope(store, "hotspots", w, LIMIT, 0, with_hints(Json::obj().set("hotspots", Json::Arr(vec![])), vec![hint]));
+    }
     let rows = chrono_metrics::hotspots(store.conn(), w.since_epoch, LIMIT, symbols_only)?;
     let items: Vec<Json> = rows
         .iter()
@@ -249,7 +297,7 @@ pub fn ticket(store: &Store, id: &str) -> Result<Json> {
         .set("commits", Json::Arr(t.commits.iter().map(|s| Json::str(s)).collect()))
         .set("files", Json::Arr(t.files.iter().map(|s| Json::str(s)).collect()))
         .set("prs", Json::Arr(t.prs.iter().map(|n| Json::Int(*n)).collect()));
-    envelope(store, "tickets", &w, 1, 1, result)
+    envelope_complete(store, "tickets", &w, 1, result)
 }
 
 /// `prs`: PRs del forge (tabla `issues`), los más recientes primero.
@@ -303,7 +351,7 @@ pub fn phases(store: &Store) -> Result<Json> {
         .map(|p| Json::obj().set("name", Json::str(&p.name)).set("date", Json::str(&p.date)))
         .collect();
     let n = items.len();
-    envelope(store, "phases", &w, n, n, Json::obj().set("phases", Json::Arr(items)))
+    envelope_complete(store, "phases", &w, n, Json::obj().set("phases", Json::Arr(items)))
 }
 
 /// `sources`: qué hay indexado (por fuente: eventos, ventana, niveles, entidades).
@@ -329,7 +377,7 @@ pub fn sources(store: &Store) -> Result<Json> {
         })
         .collect();
     let n = items.len();
-    envelope(store, "sources", &w, n + 1, n, Json::obj().set("sources", Json::Arr(items)))
+    envelope_complete(store, "sources", &w, n, Json::obj().set("sources", Json::Arr(items)))
 }
 
 /// Ruta del repo git del índice, para `branches` (que lee git en vivo). Primero
@@ -412,7 +460,7 @@ pub fn bench(store: &Store, db_path: &Path) -> Result<Json> {
         .set("templates", Json::Int(templates))
         .set("db_bytes", Json::Int(db_bytes));
     let result = Json::obj().set("stats", stats).set("timings", Json::Arr(timings));
-    envelope(store, "bench", &w, 1, 1, result)
+    envelope_complete(store, "bench", &w, 1, result)
 }
 
 /// `trace <id>`: sigue la cadena de `links` desde un evento (reverts, mismo
@@ -463,15 +511,22 @@ fn until_epoch(until: Option<&str>) -> Result<i64> {
 
 /// `events`: stream cronológico unificado de todas las fuentes, filtrable por
 /// `--source`/`--kind`/`--level`/`--grep` y la ventana `--since`/`--until`.
+/// `--order desc`: los más recientes primero.
 pub fn events(
     store: &Store,
     w: &Window,
     until: Option<&str>,
     scope: &chrono_metrics::EventScope,
+    order: Option<&str>,
     limit: Option<&str>,
 ) -> Result<Json> {
     const DEFAULT_LIMIT: usize = 100;
     let limit = parse_limit(limit, DEFAULT_LIMIT)?;
+    let newest_first = match order.map(str::trim).unwrap_or("") {
+        "" | "asc" => false,
+        "desc" => true,
+        o => return Err(t(format!("invalid --order: {o:?} (use asc or desc)"), format!("--order no válido: {o:?} (usa asc o desc)")).into()),
+    };
     let filter = chrono_metrics::EventFilter {
         since_epoch: w.since_epoch,
         until_epoch: until_epoch(until)?,
@@ -484,7 +539,7 @@ pub fn events(
         join: scope.join,
         infer_level: scope.infer_level,
     };
-    let rows = chrono_metrics::events(store.conn(), &filter, limit)?;
+    let rows = chrono_metrics::events_ordered(store.conn(), &filter, limit, newest_first)?;
     let items: Vec<Json> = rows
         .iter()
         .map(|e| {
@@ -498,7 +553,8 @@ pub fn events(
         })
         .collect();
     let n = items.len();
-    envelope(store, "events", w, limit, n, Json::obj().set("events", Json::Arr(items)))
+    let result = Json::obj().set("order", Json::str(if newest_first { "desc" } else { "asc" })).set("events", Json::Arr(items));
+    envelope(store, "events", w, limit, n, result)
 }
 
 /// `patterns`: plantillas de log más frecuentes (Drain-light, desde rollups).
@@ -548,7 +604,7 @@ pub fn show(store: &Store, id: &str, entity: Option<&str>) -> Result<Json> {
         .set("truncated", Json::Bool(s.truncated))
         .set("total_bytes", Json::Int(s.total_bytes as i64))
         .set("diff", Json::str(&s.text));
-    envelope(store, "show", &w, 1, 1, result)
+    envelope_complete(store, "show", &w, 1, result)
 }
 
 /// `timeline`: conteo de eventos por bucket temporal. `--bucket` (duración, por
@@ -600,11 +656,22 @@ pub fn timeline(
         .collect();
     let n = items.len();
     let until_json = if until_epoch == 0 { Json::Null } else { Json::str(&epoch_to_iso8601(until_epoch)) };
-    let result = Json::obj()
+    let mut result = Json::obj()
         .set("bucket_ms", Json::Int(bucket_ms))
         .set("by", group_by.map_or(Json::Null, Json::str))
         .set("until", until_json)
         .set("buckets", Json::Arr(items));
+    // Los eventos sin tiempo no caben en ningún bucket: se dicen aparte.
+    let untimed = chrono_metrics::untimed_events(store.conn(), scope)?;
+    if untimed > 0 {
+        result = with_hints(
+            result.set("untimed", Json::Int(untimed)),
+            vec![t(
+                format!("{untimed} matching events have no time and are in no bucket"),
+                format!("{untimed} eventos que casan no tienen tiempo y no están en ningún bucket"),
+            )],
+        );
+    }
     envelope(store, "timeline", w, limit, n, result)
 }
 
@@ -636,7 +703,16 @@ pub fn top(
         .map(|v| Json::obj().set("value", Json::str(&v.value)).set("count", Json::Int(v.count)))
         .collect();
     let n = items.len();
-    envelope(store, "top", w, limit, n, Json::obj().set("dim", Json::str(dim)).set("top", Json::Arr(items)))
+    // `attr:K` con una K que no existe da vacío: no es error (`informe` pide
+    // `attr:container` en cualquier índice), pero se dice.
+    let mut hints = Vec::new();
+    if let Some(k) = dim.strip_prefix("attr:").filter(|_| rows.is_empty()) {
+        if !chrono_metrics::attr_key_known(store.conn(), k)? {
+            hints.push(unknown_attr_hint(store, k)?);
+        }
+    }
+    let result = Json::obj().set("dim", Json::str(dim)).set("top", Json::Arr(items));
+    envelope(store, "top", w, limit, n, with_hints(result, hints))
 }
 
 /// `precede`: episodios de lo que casan los filtros y qué los precede.
@@ -768,7 +844,25 @@ pub fn correlate(store: &Store, id: &str, delta: Option<&str>, kind: Option<&str
         .set("delta_ms", Json::Int(delta_ms))
         .set("anchor", event_ref_json(&corr.anchor))
         .set("related", Json::Arr(related));
-    envelope(store, "correlate", &w, limit, n, result)
+    // Por tiempo solo se miran OTRAS fuentes: con una sola, siempre vacío.
+    let mut hints = Vec::new();
+    if n == 0 && chrono_metrics::other_timed_sources(store.conn(), id)? == Some(0) {
+        let keys = chrono_metrics::event_relation_keys(store.conn(), id)?;
+        let ej = keys.first().map_or("<key>".to_string(), |k| k.clone());
+        let list = keys.join(", ");
+        hints.push(if keys.is_empty() {
+            t(
+                format!("correlate by time only looks at OTHER sources and the index has no other with time; to relate by a key: --via {ej}"),
+                format!("correlate por tiempo solo mira OTRAS fuentes y el índice no tiene otra con tiempo; para relacionar por clave: --via {ej}"),
+            )
+        } else {
+            t(
+                format!("correlate by time only looks at OTHER sources and the index has no other with time; to relate by a key: --via {ej} (this event's keys: {list})"),
+                format!("correlate por tiempo solo mira OTRAS fuentes y el índice no tiene otra con tiempo; para relacionar por clave: --via {ej} (claves de este evento: {list})"),
+            )
+        });
+    }
+    envelope(store, "correlate", &w, limit, n, with_hints(result, hints))
 }
 
 /// `correlate <id> --via K`: lo que comparte la clave `K` con el evento, de
@@ -1110,7 +1204,15 @@ pub fn session_patterns(
         .set("sessions_total", Json::Int(sp.sessions_total as i64))
         .set("sessions", Json::Arr(sessions))
         .set("notes", strs(&sp.notes, sp.notes.len()));
-    envelope(store, "session_patterns", w, limit, returned, result)
+    // Sin Nod todo sale a cero: se dice delante, no solo en `notes` al final.
+    let mut hints = Vec::new();
+    if sp.events_scanned == 0 {
+        hints.push(t(
+            "no Nod events in the index: every figure is 0 (add them with: chrono add <events.jsonl> --as nod)",
+            "no hay eventos Nod en el índice: todas las cifras son 0 (añádelos con: chrono add <events.jsonl> --as nod)",
+        ));
+    }
+    envelope(store, "session_patterns", w, limit, returned, with_hints(result, hints))
 }
 
 /// `stats <attr>`: min/p50/p95/max/suma de un atributo numérico por grupo
@@ -1143,7 +1245,18 @@ pub fn stats(
         .collect();
     let n = items.len();
     let result = Json::obj().set("attr", Json::str(attr)).set("by", by.map_or(Json::Null, Json::str)).set("groups", Json::Arr(items));
-    envelope(store, "stats", w, limit, n, result)
+    let mut hints = Vec::new();
+    if rows.is_empty() {
+        hints.push(if chrono_metrics::attr_key_known(store.conn(), attr)? {
+            t(
+                format!("the attribute {attr:?} has no numeric values in these events (stats only counts numbers)"),
+                format!("la attr {attr:?} no tiene valores numéricos en estos eventos (stats solo cuenta números)"),
+            )
+        } else {
+            unknown_attr_hint(store, attr)?
+        });
+    }
+    envelope(store, "stats", w, limit, n, with_hints(result, hints))
 }
 
 /// `explain <fichero>[:desde-hasta]`: por qué un trozo de código está así.

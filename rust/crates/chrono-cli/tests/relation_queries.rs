@@ -541,7 +541,7 @@ fn correlate_via_con_una_clave_que_no_es_relacion_falla() {
     // `ticket2` no es una relación (es un campo de `ticket`): antes daba vacío.
     let anchor = env.id_of("ev-a2");
     let t = env.fail(&["correlate", &anchor, "--via", "ticket2"]);
-    assert!(t.contains("clave de relación desconocida"), "{t}");
+    assert!(t.contains("unknown relation key"), "{t}");
     // Y un id inexistente o una clave inválida fallan con mensaje.
     let t = env.fail(&["correlate", "no-existe", "--via", "ticket"]);
     assert!(t.contains("not found"), "{t}");
@@ -627,17 +627,17 @@ fn join_con_clave_invalida_o_desconocida_da_error_como_gaps_via_y_precede() {
     for join in ["a b=1", "a'b=1", "=1", "ticket x=AB-1", "tikcet=AB-1", "tikcet"] {
         for cmd in [&["events"][..], &["top", "kind"], &["timeline"], &["precede", "--level", "ERROR"]] {
             let t = env.fail(&[cmd, &["--join", join]].concat());
-            assert!(t.contains("clave de relación"), "{cmd:?} --join {join:?}: {t}");
+            assert!(t.contains("relation key"), "{cmd:?} --join {join:?}: {t}");
         }
     }
     // El mismo error en --via de correlate y gaps, y en el join de un lado de gaps.
     let id = env.id_of("a1");
     let t = env.fail(&["correlate", &id, "--via", "tikcet"]);
-    assert!(t.contains("clave de relación desconocida") && t.contains("tikcet"), "{t}");
+    assert!(t.contains("unknown relation key") && t.contains("tikcet"), "{t}");
     let t = env.fail(&["gaps", "--from", "tickets", "--to", "commits", "--via", "tikcet"]);
-    assert!(t.contains("clave de relación desconocida"), "{t}");
+    assert!(t.contains("unknown relation key"), "{t}");
     let t = env.fail(&["gaps", "--from", "tickets join=tikcet=AB-1", "--to", "commits", "--via", "ticket"]);
-    assert!(t.contains("clave de relación desconocida"), "{t}");
+    assert!(t.contains("unknown relation key"), "{t}");
     // Una clave que existe con un valor que no: vacío, sin error.
     let v = env.q(&["events", "--join", "ticket=ZZ-0"]);
     assert!(titles(&v).is_empty(), "{v}");

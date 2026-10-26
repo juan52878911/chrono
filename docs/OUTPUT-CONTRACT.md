@@ -19,6 +19,8 @@ This is **the product contract**: which questions chrono answers and their exact
 - **`token_budget`** is explicit: chrono trims to `max_items` and flags `truncated`.
 - **`window`** always present: every metric is relative to a time window.
 - **`manifest`** makes the answer reproducible and citable.
+- **`result.hints`** (optional, first key of `result`, in the user's language): why a result is empty or partial when it is not an error — `top attr:<key>` or `stats <attr>` with a key no event has (or with no numeric values), `hotspots` without a git source, time `correlate` with a single source (suggests `--via`), `session_patterns` without Nod events, events with no time left out of `timeline` (also counted in `result.untimed`). A `--level` no event has, and a flag that does not apply to the command, are warned on stderr. Over MCP, the tools with a header (`top`, `stats`, `timeline`, `events`, `patterns`, `precede`, `informe`) show them, and an unknown `level`, as `⚠` lines (`meta.warnings` with `format=json`); the rest keep `hints` in the result. MCP `top attr:<key>` counts `(resto)` only over events that have the key, and those without it in a separate `(sin valor)` row.
+- Lists that always come whole (`sources`, `phases`) report `max_items = returned` and `truncated: false`.
 
 ## Question catalog
 
