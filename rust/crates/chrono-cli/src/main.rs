@@ -222,6 +222,8 @@ struct Flags {
     depth: Option<String>,
     interval: Option<String>,
     as_kind: Option<String>,
+    preset: Option<String>,
+    name: Option<String>,
     task: Option<String>,
     session: Option<String>,
     hotspots: Option<String>,
@@ -320,6 +322,14 @@ fn parse_args(args: &[String]) -> Flags {
             "--as" if i + 1 < args.len() => {
                 i += 1;
                 f.as_kind = Some(args[i].clone());
+            }
+            "--preset" if i + 1 < args.len() => {
+                i += 1;
+                f.preset = Some(args[i].clone());
+            }
+            "--name" if i + 1 < args.len() => {
+                i += 1;
+                f.name = Some(args[i].clone());
             }
             "--task" if i + 1 < args.len() => {
                 i += 1;
@@ -526,7 +536,14 @@ fn main() {
             },
             None => (path, f.as_kind.clone()),
         };
-        if let Err(e) = index::add(&db, Path::new(&path), f.symbols, as_kind.as_deref()) {
+        // Con comodines (entre comillas para que no los expanda la shell): una
+        // fuente glob, una sola fila para todos los ficheros que casan.
+        let r = if glob::is_pattern(&path) {
+            index::add_glob(&db, &path, as_kind.as_deref(), f.name.as_deref(), f.preset.as_deref())
+        } else {
+            index::add(&db, Path::new(&path), f.symbols, as_kind.as_deref(), f.preset.as_deref())
+        };
+        if let Err(e) = r {
             fatal(e);
         }
         return;

@@ -186,15 +186,21 @@ impl EventScope<'_> {
     pub(crate) fn sql_on(&self, t: &str, first: usize) -> (String, Vec<String>) {
         let mut sql = String::new();
         let mut params: Vec<String> = Vec::new();
+        if let Some(s) = self.source.filter(|s| !s.is_empty()) {
+            // Kind (`jsonl`), prefijo de id (`jsonl:/var/log`) o alias de una fuente glob.
+            let like = if s.contains(':') { format!("{s}%") } else { format!("{s}:%") };
+            sql.push_str(&format!(
+                " AND {t}.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?{} OR json_extract(manifest_json, '$.alias') = ?{})",
+                first,
+                first + 1
+            ));
+            params.extend([like, s.to_string()]);
+        }
         let mut push = |clause: &str, value: String| {
             let n = first + params.len();
             sql.push_str(&format!(" AND {}", clause.replace("?N", &format!("?{n}")).replace("$t", t)));
             params.push(value);
         };
-        if let Some(s) = self.source.filter(|s| !s.is_empty()) {
-            let like = if s.contains(':') { format!("{s}%") } else { format!("{s}:%") };
-            push("$t.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?N)", like);
-        }
         if let Some(g) = self.grep.filter(|g| !g.is_empty()) {
             push("$t.title LIKE ?N", format!("%{g}%"));
         }

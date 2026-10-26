@@ -22,6 +22,9 @@ use chrono_tracker_github as tracker;
 
 use crate::glob;
 use crate::i18n::t;
+
+mod glob_source;
+use glob_source::GlobSource;
 use crate::timeutil::{epoch_to_iso8601, now_epoch};
 
 /// `source_id` canónico de una fuente: `<kind>:<ruta absoluta canónica>`. Es el
@@ -164,7 +167,7 @@ pub fn init(start: &Path, symbols: bool, as_kind: Option<&str>, db_override: Opt
     let mut store = open_or_recreate(&db)?;
     store.reset()?;
     let (n, wm, manifest) =
-        ingest_source(src, &ingest_path, None, &mut store, &root).map_err(|e| e.into_boxed())?;
+        ingest_source(src, &ingest_path, None, &mut store, &root, &IngestCtx::default()).map_err(|e| e.into_boxed())?;
 
     // Registra la fuente en la tabla `sources` (primera fuente del índice).
     let source_id = canonical_source_id(src.kind(), &ingest_path);
@@ -217,7 +220,7 @@ pub(crate) fn index_root_of(db: &Path) -> PathBuf {
 /// deploys en un mismo `.chrono/`, correlacionables por tiempo). No borra lo ya
 /// ingerido. Si la fuente ya estaba, la re-ingiere (borra sus eventos primero),
 /// así `add` es idempotente.
-pub fn add(db: &Path, start: &Path, symbols: bool, as_kind: Option<&str>) -> Result<()> {
+pub fn add(db: &Path, start: &Path, symbols: bool, as_kind: Option<&str>, preset: Option<&str>) -> Result<()> {
     let _lock = lock_ingest(db)?;
     let mut store = Store::open(db)?;
     let index_root = index_root_of(db);
@@ -240,8 +243,12 @@ pub fn add(db: &Path, start: &Path, symbols: bool, as_kind: Option<&str>) -> Res
         store.delete_source_events(&source_id)?;
     }
 
-    let (n, wm, manifest) = ingest_source(src, &ingest_path, None, &mut store, &index_root)
+    let ctx = IngestCtx { preset, ..Default::default() };
+    let (n, wm, mut manifest) = ingest_source(src, &ingest_path, None, &mut store, &index_root, &ctx)
         .map_err(|e| e.into_boxed())?;
+    if let Some(p) = preset {
+        manifest.insert("preset".to_string(), p.to_string());
+    }
     store.upsert_source(
         &source_id,
         src.kind(),
@@ -272,6 +279,69 @@ pub fn add(db: &Path, start: &Path, symbols: bool, as_kind: Option<&str>) -> Res
     eprintln!("{}", t(
         format!("chrono: added {} source ({n} events). Index now has {total} sources.", src.kind()),
         format!("chrono: añadida fuente {} ({n} eventos). El índice tiene ya {total} fuentes.", src.kind()),
+    ));
+    Ok(())
+}
+
+/// `chrono add '<dir>/**/*.jsonl'`: añade una fuente glob, UNA fila en
+/// `sources` para todos los ficheros que casan (ver `glob_source`). `alias`
+/// (`--name`) sirve para `--source <alias>` y como clave en `source_options`.
+pub fn add_glob(db: &Path, pattern: &str, as_kind: Option<&str>, alias: Option<&str>, preset: Option<&str>) -> Result<()> {
+    let _lock = lock_ingest(db)?;
+    let mut store = Store::open(db)?;
+    let index_root = index_root_of(db);
+    let registry = build_registry();
+    let pattern = glob_source::absolutize(pattern);
+    let files = glob::expand(&pattern);
+    let Some(first) = files.first() else {
+        return Err(t(format!("no file matches {pattern}"), format!("ningún fichero casa con {pattern}")).into());
+    };
+    let cfg = chrono_classify_rules::load(&index_root);
+    let config_adapter = alias
+        .into_iter()
+        .chain([pattern.as_str()])
+        .find_map(|k| cfg.source_options.get(k).and_then(|o| o.get("adapter")).cloned());
+    let effective_as = as_kind.map(str::to_string).or(config_adapter);
+    let (src, _, _) = resolve_source(&registry, first, effective_as.as_deref())?;
+    let gs = GlobSource {
+        id: format!("{}:{pattern}", src.kind()),
+        pattern: pattern.clone(),
+        alias: alias.map(str::to_string),
+        preset: preset.map(str::to_string),
+    };
+    if let Some(a) = alias {
+        let taken = store.list_sources()?.into_iter().any(|s| {
+            s.id != gs.id && GlobSource::from_row(&s.id, &s.manifest_json).and_then(|g| g.alias).as_deref() == Some(a)
+        });
+        if taken {
+            return Err(t(format!("alias {a:?} is already in use"), format!("el alias {a:?} ya está en uso")).into());
+        }
+    }
+    let already = store.list_sources()?.iter().any(|s| s.id == gs.id);
+    if already {
+        eprintln!("{}", t(
+            format!("chrono: source {} already indexed — re-ingesting", gs.id),
+            format!("chrono: la fuente {} ya estaba — se re-ingiere", gs.id),
+        ));
+        store.delete_source_events(&gs.id)?;
+        gs.clear_state(&store)?;
+    }
+    // La fila va antes que los eventos: el estado por fichero cuelga de ella.
+    store.upsert_source(&gs.id, src.kind(), &pattern, "", &gs.manifest(files.len()), &now_iso())?;
+    let r = gs.sync(src, &mut store, &index_root)?;
+    store.upsert_source(&gs.id, src.kind(), &pattern, &r.watermark, &gs.manifest(r.files_total), &now_iso())?;
+
+    eprintln!("{}", t("  building search index…", "  construyendo índice de búsqueda…"));
+    if already || r.diverged {
+        store.rebuild_fts()?;
+    } else {
+        store.fts_sync()?;
+    }
+    finalize(&index_root, &store, &[], !(already || r.diverged))?;
+    let total = store.list_sources()?.len();
+    eprintln!("{}", t(
+        format!("chrono: added {} source of {} files ({} events). Index now has {total} sources.", src.kind(), r.files_total, r.events),
+        format!("chrono: añadida fuente {} de {} ficheros ({} eventos). El índice tiene ya {total} fuentes.", src.kind(), r.files_total, r.events),
     ));
     Ok(())
 }
@@ -329,7 +399,13 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
             let same_path = source_arg
                 .and_then(|p| std::fs::canonicalize(p).ok())
                 .is_some_and(|p| p.to_string_lossy() == s.path);
-            if &s.id != want && !same_path {
+            // Una fuente glob casa por su patrón o por su alias.
+            let same_glob = source_arg.is_some_and(|p| {
+                let arg = p.to_string_lossy();
+                GlobSource::from_row(&s.id, &s.manifest_json)
+                    .is_some_and(|g| g.pattern == glob_source::absolutize(&arg) || g.alias.as_deref() == Some(arg.as_ref()))
+            });
+            if &s.id != want && !same_path && !same_glob {
                 continue;
             }
         }
@@ -341,6 +417,14 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
             ));
             continue;
         };
+        if let Some(gs) = GlobSource::from_row(&s.id, &s.manifest_json) {
+            let r = gs.sync(adapter, &mut store, &index_root)?;
+            store.upsert_source(&s.id, &s.kind, &s.path, &r.watermark, &gs.manifest(r.files_total), &now)?;
+            diverged_any |= r.diverged;
+            synced_any |= r.events > 0 || r.diverged;
+            total += r.events;
+            continue;
+        }
         let path = PathBuf::from(&s.path);
 
         // Atajo de git: si el HEAD no cambió, no se abre el cursor.
@@ -358,7 +442,9 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
             Some(Watermark { kind: s.kind.clone(), value: s.watermark.clone() })
         };
 
-        let (n, new_wm, diverged) = match ingest_source(adapter, &path, wm, &mut store, &index_root) {
+        let preset = manifest_value(&s.manifest_json, "preset");
+        let ctx = IngestCtx { preset: preset.as_deref(), ..Default::default() };
+        let (n, new_wm, diverged) = match ingest_source(adapter, &path, wm, &mut store, &index_root, &ctx) {
             Ok((n, new_wm, _manifest)) => (n, new_wm, false),
             Err(IngestError::Diverged) => {
                 eprintln!("{}", t(
@@ -366,7 +452,7 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
                     format!("  divergencia en {} — se reindexa esa fuente", s.id),
                 ));
                 store.delete_source_events(&s.id)?;
-                let (n, new_wm) = ingest_source(adapter, &path, None, &mut store, &index_root)
+                let (n, new_wm) = ingest_source(adapter, &path, None, &mut store, &index_root, &ctx)
                     .map(|(n, new_wm, _)| (n, new_wm))
                     .map_err(|e| e.into_boxed())?;
                 (n, new_wm, true)
@@ -497,6 +583,11 @@ fn tail_ingest(store: &mut Store, registry: &Registry, index_root: &Path) -> Res
     let sources = store.list_sources()?;
     for s in &sources {
         let Some(adapter) = registry.by_kind(&s.kind) else { continue };
+        if let Some(gs) = GlobSource::from_row(&s.id, &s.manifest_json) {
+            let r = gs.sync(adapter, store, index_root)?;
+            store.upsert_source(&s.id, &s.kind, &s.path, &r.watermark, &gs.manifest(r.files_total), &now)?;
+            continue;
+        }
         let path = PathBuf::from(&s.path);
         if s.kind == "git" {
             if let Ok(head) = chrono_source_git::head_sha(&path) {
@@ -510,11 +601,13 @@ fn tail_ingest(store: &mut Store, registry: &Registry, index_root: &Path) -> Res
         } else {
             Some(Watermark { kind: s.kind.clone(), value: s.watermark.clone() })
         };
-        let new_wm = match ingest_source(adapter, &path, wm, store, index_root) {
+        let preset = manifest_value(&s.manifest_json, "preset");
+        let ctx = IngestCtx { preset: preset.as_deref(), ..Default::default() };
+        let new_wm = match ingest_source(adapter, &path, wm, store, index_root, &ctx) {
             Ok((_n, new_wm, _)) => new_wm,
             Err(IngestError::Diverged) => {
                 store.delete_source_events(&s.id)?;
-                ingest_source(adapter, &path, None, store, index_root)
+                ingest_source(adapter, &path, None, store, index_root, &ctx)
                     .map(|(_n, w, _)| w)
                     .map_err(|e| e.into_boxed())?
             }
@@ -604,6 +697,30 @@ fn open_or_recreate(db: &Path) -> Result<Store> {
     }
 }
 
+/// De dónde salen las opciones de una ingesta y, en una fuente glob, a qué
+/// fuente y fichero pertenecen sus eventos. `Default` = fuente de un fichero.
+#[derive(Default)]
+struct IngestCtx<'a> {
+    /// Claves de `source_options` a probar antes que la ruta (alias y patrón de
+    /// una fuente glob).
+    options_keys: Vec<String>,
+    /// Preset elegido en `add --preset`, si la config no pone otro.
+    preset: Option<&'a str>,
+    /// `(source_id de la fuente glob, ruta del fichero relativa a su base)`.
+    group: Option<(&'a str, &'a str)>,
+}
+
+/// Valor de texto `key` del `manifest_json` de una fuente.
+fn manifest_value(manifest_json: &str, key: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(manifest_json).ok()?;
+    v.get(key)?.as_str().map(str::to_string)
+}
+
+/// FNV-1a de 32 bits (sal corta y estable para los ids de una fuente glob).
+fn fnv1a32(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(*b)).wrapping_mul(0x0100_0193))
+}
+
 /// Ingesta genérica: drena el `Cursor` de CUALQUIER `Source` al `Writer` en
 /// una sola transacción, clasificando cada evento (Level-0 reglas) al vuelo.
 /// Vale para git y para cualquier otro adaptador futuro (jsonl, csv…).
@@ -619,12 +736,25 @@ fn ingest_source(
     watermark: Option<Watermark>,
     store: &mut Store,
     repo_for_config: &Path,
+    ctx: &IngestCtx<'_>,
 ) -> std::result::Result<(usize, Watermark, BTreeMap<String, String>), IngestError> {
     let cfg = chrono_classify_rules::load(repo_for_config);
     // Opciones del adaptador desde .chrono/config.json (columnas CSV, preset/year
-    // de textlog…), resueltas por ruta/nombre de la fuente. Se toman antes de
-    // mover `cfg` al clasificador.
-    let source_cfg = SourceConfig { options: cfg.source_options_for(path) };
+    // de textlog…), resueltas por ruta/nombre de la fuente (o por alias/patrón en
+    // una fuente glob). Se toman antes de mover `cfg` al clasificador.
+    let mut options = ctx
+        .options_keys
+        .iter()
+        .find_map(|k| cfg.source_options.get(k).cloned())
+        .unwrap_or_else(|| if ctx.group.is_some() { BTreeMap::new() } else { cfg.source_options_for(path) });
+    if let Some(preset) = ctx.preset {
+        options.entry("preset".to_string()).or_insert_with(|| preset.to_string());
+    }
+    let source_cfg = SourceConfig { options };
+    // En una fuente glob, los ids llevan delante un hash del fichero: dos ficheros
+    // con la misma línea en el mismo offset darían el mismo id y el segundo
+    // evento se perdería (`INSERT OR IGNORE`).
+    let group = ctx.group.map(|(id, file)| (id, file, format!("{:08x}", fnv1a32(file.as_bytes()))));
     // Caps de ingesta (0 = sin cap; por defecto no alteran nada → paridad).
     let body_max_bytes = cfg.body_max_bytes;
     let max_events = cfg.max_events_per_source;
@@ -676,6 +806,11 @@ fn ingest_source(
                         cut -= 1;
                     }
                     ev.body.truncate(cut);
+                }
+                if let Some((id, file, salt)) = &group {
+                    ev.source_id = id.to_string();
+                    ev.id = format!("{salt}.{}", ev.id);
+                    ev.attrs.insert("file".to_string(), file.to_string());
                 }
                 if redact {
                     redacted += chrono_core::redact_event(&mut ev);
@@ -1033,5 +1168,51 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let _ = std::fs::remove_file(format!("{}.lock", db.display()));
+    }
+
+    fn count(db: &Path, sql: &str) -> i64 {
+        Store::open_read(db).unwrap().conn().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn una_fuente_glob_es_una_fila_y_solo_relee_lo_que_crece() {
+        let dir = std::env::temp_dir().join(format!("chrono-glob-src-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let line = |i: usize| format!("{{\"ts\":{},\"msg\":\"hola\",\"service\":\"api\"}}\n", 1_700_000_000 + i);
+        for f in ["p1/a.jsonl", "p1/b.jsonl", "p2/sub/c.jsonl"] {
+            let p = dir.join("datos").join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            // Las tres primeras líneas son IGUALES en los tres ficheros (mismo offset):
+            // sin la sal por fichero, sus ids chocarían y se perderían eventos.
+            std::fs::write(&p, (0..3).map(line).collect::<String>()).unwrap();
+        }
+        let db = dir.join(".chrono/index.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let pattern = format!("{}/datos/**/*.jsonl", dir.display());
+        add_glob(&db, &pattern, Some("jsonl"), Some("datos"), None).unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM sources"), 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM events"), 9);
+        assert_eq!(count(&db, "SELECT COUNT(DISTINCT json_extract(attrs, '$.file')) FROM events"), 3);
+
+        // Crece un fichero y aparece otro: solo entran sus líneas nuevas.
+        let mut f = std::fs::OpenOptions::new().append(true).open(dir.join("datos/p1/a.jsonl")).unwrap();
+        f.write_all(line(7).as_bytes()).unwrap();
+        std::fs::write(dir.join("datos/p2/d.jsonl"), line(8)).unwrap();
+        sync(&db, None).unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM events"), 11);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM sources"), 1);
+        let manifest: String = Store::open_read(&db).unwrap().list_sources().unwrap()[0].manifest_json.clone();
+        assert!(manifest.contains("\"files\":\"4\""), "{manifest}");
+
+        // Un fichero reescrito más corto diverge: se reingiere SOLO ese fichero.
+        std::fs::write(dir.join("datos/p1/b.jsonl"), line(9)).unwrap();
+        sync(&db, Some(Path::new("datos"))).unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM events"), 9);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM events WHERE json_extract(attrs, '$.file') = 'p1/b.jsonl'"), 1);
+
+        // Sin cambios: nada que leer.
+        sync(&db, None).unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM events"), 9);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

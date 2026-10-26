@@ -227,24 +227,30 @@ impl Store {
     /// re-ingesta tras divergencia. NO toca `entities`/`actors` (compartidos
     /// entre fuentes; sus flags se recalculan en el enriquecimiento).
     pub fn delete_source_events(&self, source_id: &str) -> Result<()> {
+        self.delete_events_where(source_id, None)
+    }
+
+    /// Como [`Store::delete_source_events`], solo los eventos de UN fichero de
+    /// una fuente glob (los que llevan `attrs.file = file`).
+    pub fn delete_source_file_events(&self, source_id: &str, file: &str) -> Result<()> {
+        self.delete_events_where(source_id, Some(file))
+    }
+
+    fn delete_events_where(&self, source_id: &str, file: Option<&str>) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         // v5: events.source_ref es entero; se resuelve el string a su `ref` con
         // una subconsulta. Si la fuente no existe, `(SELECT ref …)` da NULL y
         // `source_ref = NULL` no casa nada (no-op, igual que antes). NO se borra
         // la fila de `sources`: su `ref` se conserva para la re-ingesta.
+        let selected = "source_ref = (SELECT ref FROM sources WHERE id = ?1)
+                        AND (?2 IS NULL OR json_extract(attrs, '$.file') = ?2)";
         for child in ["touches", "labels", "links"] {
             tx.execute(
-                &format!(
-                    "DELETE FROM {child} WHERE event_id IN
-                       (SELECT id FROM events WHERE source_ref = (SELECT ref FROM sources WHERE id = ?1))"
-                ),
-                params![source_id],
+                &format!("DELETE FROM {child} WHERE event_id IN (SELECT id FROM events WHERE {selected})"),
+                params![source_id, file],
             )?;
         }
-        tx.execute(
-            "DELETE FROM events WHERE source_ref = (SELECT ref FROM sources WHERE id = ?1)",
-            params![source_id],
-        )?;
+        tx.execute(&format!("DELETE FROM events WHERE {selected}"), params![source_id, file])?;
         tx.commit()?;
         Ok(())
     }
