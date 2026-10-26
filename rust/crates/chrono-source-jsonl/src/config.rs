@@ -42,8 +42,51 @@ pub const OPTIONS: &[(&str, &str)] = &[
     ("id_field", "campo con el id estable del registro"),
     ("links", "enlaces rel=campo separados por comas"),
     ("explode", "ruta a un array: un evento por elemento"),
-    ("explode_where", "filtro de explode: clave=valor"),
+    ("explode_where", "filtro de explode: clave=valor o clave=v1|v2"),
+    ("level_map", "traduce valores del nivel: true=ERROR,false= (vacío = sin nivel)"),
+    ("error_message_field", "título de los eventos ERROR: campo o a|b (primera línea, acotada)"),
+    ("attrs", "solo estas claves van a attrs (lista con comas; por defecto, todos los escalares)"),
+    ("entity_join", "campo=campo_previo: sin entidad, hereda la del evento previo del fichero con ese valor"),
+    ("preset", "opciones con nombre: claude-sessions"),
 ];
+
+/// Presets: conjuntos de opciones con nombre. Las opciones de la fuente pisan
+/// a las del preset.
+pub const PRESETS: &[(&str, &[(&str, &str)])] = &[(
+    // Transcripciones de Claude Code (`~/.claude/projects/**/*.jsonl`): un
+    // evento por uso de tool y por resultado. Entidad = la tool (el resultado la
+    // hereda de su `tool_use` por `tool_use_id`); nivel ERROR si `is_error`. Ni
+    // el input de la tool ni el contenido del resultado entran en el índice,
+    // salvo la primera línea de los errores (redactada como todo el título).
+    "claude-sessions",
+    &[
+        ("explode", "message.content"),
+        ("explode_where", "type=tool_use|tool_result"),
+        ("time_field", "timestamp"),
+        ("kind_field", "type"),
+        ("entity_field", "name"),
+        ("entity_join", "tool_use_id=id"),
+        ("message_field", "name"),
+        ("error_message_field", "content|content.0.text"),
+        ("level_field", "is_error"),
+        ("level_map", "true=ERROR,false="),
+        ("links", "tool_use=id,tool_use=tool_use_id,file=input.file_path,url=input.url"),
+        ("attrs", "type,is_error,cwd,gitBranch,sessionId,tool_use_id,id,isSidechain,version"),
+    ],
+)];
+
+/// Opciones efectivas: las del `preset` (si lo hay) con las de la fuente encima.
+/// Error si el preset no existe.
+pub fn effective_options(cfg: &SourceConfig) -> CoreResult<SourceConfig> {
+    let Some(name) = option_trimmed(&cfg.options, "preset") else { return Ok(cfg.clone()) };
+    let Some((_, opts)) = PRESETS.iter().find(|(n, _)| *n == name) else {
+        let names: Vec<&str> = PRESETS.iter().map(|(n, _)| *n).collect();
+        return Err(CoreError::Other(format!("jsonl: preset desconocido {name:?}; hay: {}", names.join(", "))));
+    };
+    let mut options: std::collections::BTreeMap<String, String> = opts.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    options.extend(cfg.options.iter().filter(|(k, _)| *k != "preset").map(|(k, v)| (k.clone(), v.clone())));
+    Ok(SourceConfig { options })
+}
 
 /// Expansión de un array de la línea: una línea → N eventos (ver
 /// `SourceConfig.options["explode"]` / `["explode_where"]`).
@@ -51,9 +94,10 @@ pub const OPTIONS: &[(&str, &str)] = &[
 pub struct ExplodeSpec {
     /// Ruta (ver `path`) al array a expandir, p.ej. `message.content`.
     pub path: String,
-    /// Filtro opcional `(clave, valor)`: solo expanden los elementos objeto
-    /// cuyo campo `clave` (ruta relativa al elemento) sea igual a `valor`.
-    pub filter: Option<(String, String)>,
+    /// Filtro opcional `(clave, valores)`: solo expanden los elementos objeto
+    /// cuyo campo `clave` (ruta relativa al elemento) sea igual a uno de los
+    /// `valores` (`type=tool_use|tool_result`).
+    pub filter: Option<(String, Vec<String>)>,
 }
 
 impl ExplodeSpec {
@@ -72,7 +116,7 @@ impl ExplodeSpec {
             .filter_map(|(i, v)| v.as_object().map(|m| (i, m)))
             .filter(|(_, m)| match &self.filter {
                 None => true,
-                Some((key, want)) => path::lookup(m, key).and_then(scalar_to_string).is_some_and(|got| got == *want),
+                Some((key, want)) => path::lookup(m, key).and_then(scalar_to_string).is_some_and(|got| want.contains(&got)),
             })
             .collect()
     }
@@ -113,6 +157,18 @@ pub struct JsonlOverrides {
     /// `rel=commit` el evento queda unido al commit (lo siguen `trace` y la
     /// resolución por prefijo de sha).
     pub links: Vec<(String, String)>,
+    /// `level_map`: valor crudo del nivel → nivel (`true` → `ERROR`; un nivel
+    /// vacío deja el evento sin nivel). Lo que no está en el mapa, tal cual.
+    pub level_map: Vec<(String, String)>,
+    /// `error_message_field`: alternativas (`a|b`) para el título de los eventos
+    /// de nivel ERROR (primera línea, acotada).
+    pub error_message_field: Vec<String>,
+    /// `attrs`: si no está vacío, solo estas claves (rutas) van a `attrs`.
+    pub attrs: Vec<String>,
+    /// `entity_join`: `(campo, campo_previo)`. Un evento sin entidad hereda la
+    /// del evento previo del mismo fichero cuyo `campo_previo` valga lo que su
+    /// `campo` (`tool_use_id=id`: el resultado hereda la tool de su uso).
+    pub entity_join: Option<(String, String)>,
 }
 
 /// Resolución de campos para una única línea u otra "muestra" representativa
@@ -148,28 +204,54 @@ fn option_trimmed(options: &std::collections::BTreeMap<String, String>, key: &st
     options.get(key).map(|v| v.trim()).filter(|v| !v.is_empty()).map(str::to_string)
 }
 
-/// Parsea `clave=valor` (separa en el primer `=`). `None` si falta el `=` o
-/// la clave queda vacía.
-fn parse_where(s: &str) -> Option<(String, String)> {
+/// Parsea `clave=valor` o `clave=v1|v2` (separa en el primer `=`). `None` si
+/// falta el `=` o la clave queda vacía.
+fn parse_where(s: &str) -> Option<(String, Vec<String>)> {
     let (k, v) = s.split_once('=')?;
     let k = k.trim();
     if k.is_empty() {
         return None;
     }
-    Some((k.to_string(), v.trim().to_string()))
+    Some((k.to_string(), v.split('|').map(|x| x.trim().to_string()).collect()))
+}
+
+/// `a=b,c=d` → pares con la clave sin espacios; el valor puede quedar vacío.
+fn parse_pairs(s: &str) -> Vec<(String, String)> {
+    s.split(',')
+        .filter_map(|part| {
+            let (k, v) = part.split_once('=')?;
+            let k = k.trim();
+            (!k.is_empty()).then(|| (k.to_string(), v.trim().to_string()))
+        })
+        .collect()
+}
+
+fn parse_list(s: &str, sep: char) -> Vec<String> {
+    s.split(sep).map(str::trim).filter(|x| !x.is_empty()).map(str::to_string).collect()
 }
 
 /// Valida las opciones de expansión: `explode_where` requiere `explode` y
 /// debe tener la forma `clave=valor`. Se llama al abrir el cursor para que una
 /// config errónea falle en alto en vez de no expandir nada en silencio.
 pub fn validate_options(cfg: &SourceConfig) -> CoreResult<()> {
+    let cfg = &effective_options(cfg)?;
     let explode = option_trimmed(&cfg.options, "explode");
+    if let Some(m) = option_trimmed(&cfg.options, "level_map") {
+        if m.split(',').any(|p| !p.contains('=') || p.split_once('=').is_some_and(|(k, _)| k.trim().is_empty())) {
+            return Err(CoreError::Other(format!("jsonl: `level_map` debe ser `valor=NIVEL,…`, no {m:?}")));
+        }
+    }
+    if let Some(j) = option_trimmed(&cfg.options, "entity_join") {
+        if parse_where(&j).is_none_or(|(_, v)| v.len() != 1 || v[0].is_empty()) {
+            return Err(CoreError::Other(format!("jsonl: `entity_join` debe ser `campo=campo_previo`, no {j:?}")));
+        }
+    }
     if let Some(w) = option_trimmed(&cfg.options, "explode_where") {
         if explode.is_none() {
             return Err(CoreError::Other("jsonl: `explode_where` requiere `explode`".to_string()));
         }
         if parse_where(&w).is_none() {
-            return Err(CoreError::Other(format!("jsonl: `explode_where` debe ser `clave=valor`, no {w:?}")));
+            return Err(CoreError::Other(format!("jsonl: `explode_where` debe ser `clave=valor` o `clave=v1|v2`, no {w:?}")));
         }
     }
     Ok(())
@@ -191,6 +273,12 @@ pub fn overrides_from(cfg: &SourceConfig) -> JsonlOverrides {
         kind_field: override_of(&cfg.options, "kind_field"),
         id_field: override_of(&cfg.options, "id_field"),
         links: option_trimmed(&cfg.options, "links").map(|s| parse_links(&s)).unwrap_or_default(),
+        level_map: option_trimmed(&cfg.options, "level_map").map(|s| parse_pairs(&s)).unwrap_or_default(),
+        error_message_field: option_trimmed(&cfg.options, "error_message_field").map(|s| parse_list(&s, '|')).unwrap_or_default(),
+        attrs: option_trimmed(&cfg.options, "attrs").map(|s| parse_list(&s, ',')).unwrap_or_default(),
+        entity_join: option_trimmed(&cfg.options, "entity_join")
+            .and_then(|s| parse_where(&s))
+            .and_then(|(k, mut v)| (v.len() == 1).then(|| (k, v.remove(0)))),
     }
 }
 
@@ -236,7 +324,7 @@ pub fn resolve_config(cfg: &SourceConfig, sample: &Map<String, Value>) -> JsonlC
         entity_field: resolve_field_in(ov.entity_field.as_deref(), ENTITY_FIELDS, &scope),
         actor_field: resolve_field_in(ov.actor_field.as_deref(), ACTOR_FIELDS, &scope),
         explode: ov.explode.as_ref().map(|e| e.path.clone()).unwrap_or_default(),
-        explode_where: ov.explode.as_ref().and_then(|e| e.filter.as_ref()).map(|(k, v)| format!("{k}={v}")).unwrap_or_default(),
+        explode_where: ov.explode.as_ref().and_then(|e| e.filter.as_ref()).map(|(k, v)| format!("{k}={}", v.join("|"))).unwrap_or_default(),
     }
 }
 

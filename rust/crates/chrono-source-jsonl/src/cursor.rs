@@ -106,6 +106,8 @@ pub struct JsonlCursor {
     /// eventos no entregados (los ids son deterministas, re-emitir es
     /// idempotente).
     line_start: u64,
+    /// Entidades vistas en el fichero, para `entity_join`.
+    memo: record::EntityMemo,
 }
 
 impl JsonlCursor {
@@ -113,6 +115,7 @@ impl JsonlCursor {
     /// bytes (0 si no hay watermark previo).
     pub fn open(path: &Path, start_offset: u64, cfg: &SourceConfig) -> CoreResult<Self> {
         config::validate_options(cfg)?;
+        let cfg = &config::effective_options(cfg)?;
         let sample: Map<String, Value> = peek_first_nonempty_line(path)
             .and_then(|line| serde_json::from_str::<Value>(&line).ok())
             .and_then(|v| v.as_object().cloned())
@@ -133,6 +136,7 @@ impl JsonlCursor {
             path: path.to_path_buf(),
             pending: VecDeque::new(),
             line_start: start_offset,
+            memo: record::EntityMemo::default(),
         })
     }
 
@@ -180,7 +184,7 @@ impl Cursor for JsonlCursor {
             };
             // Una línea puede dar 0 (explode sin array/sin coincidencias), 1 o
             // N eventos; los N se encolan y se entregan de uno en uno.
-            self.pending = record::line_to_events(&obj, &raw, line_offset, &self.overrides, &self.source_id).into();
+            self.pending = record::line_to_events(&obj, &raw, line_offset, &self.overrides, &self.source_id, &mut self.memo).into();
             self.line_start = line_offset;
             if let Some(ev) = self.pending.pop_front() {
                 return Ok(Some(ev));
