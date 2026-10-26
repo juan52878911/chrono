@@ -168,6 +168,27 @@ pub fn checkpoint_truncate(path: &Path, wait: std::time::Duration) -> Result<()>
     }
 }
 
+/// Copia `src` sobre `dst` página a página con la API de backup de SQLite, a
+/// través del pager de `dst` y con sus cerrojos: los lectores que tienen `dst`
+/// abierto siguen con su instantánea y la siguiente lectura ve lo nuevo. Un
+/// `rename` encima dejaba sus `-wal`/`-shm` compartidos entre el fichero viejo
+/// (aún abierto) y el nuevo, y un `sync` que llegaba después veía «database disk
+/// image is malformed».
+pub fn replace_in_place(dst: &Path, src: &Path, wait: std::time::Duration) -> Result<()> {
+    let from = Connection::open_with_flags(src, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut to = Connection::open(dst)?;
+    to.busy_timeout(wait)?;
+    rusqlite::backup::Backup::new(&from, &mut to)?.run_to_completion(1 << 20, std::time::Duration::ZERO, None)?;
+    Ok(())
+}
+
+/// Copia consistente de `src` en `dst` (`VACUUM INTO`), sin tocar `src`.
+pub fn snapshot_into(src: &Path, dst: &Path) -> Result<()> {
+    let conn = Connection::open_with_flags(src, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.execute("VACUUM INTO ?1", [dst.to_string_lossy()])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

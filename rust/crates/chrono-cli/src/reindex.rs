@@ -57,12 +57,12 @@ fn new_path(db: &Path) -> PathBuf {
 /// pisaban y se perdían fuentes.
 ///
 /// El índice nuevo se construye aparte, en `<db>.new`, mientras el de siempre
-/// sigue en su sitio y las consultas lo leen. Al acabar, los dos se vacían de
-/// WAL (`wal_checkpoint(TRUNCATE)`) y `<db>.new` sustituye a `<db>` con un
-/// `rename` atómico: nunca hay un instante sin `<db>` y nunca se renombra un
-/// `-wal`/`-shm` en uso (antes se apartaba el índice con sus `-wal`/`-shm`
-/// mientras los lectores los tenían abiertos: «disk I/O error», y un lector que
-/// llegaba entre medias no encontraba índice). Si el proceso muere a medias, el
+/// sigue en su sitio y las consultas lo leen. Al acabar se copia sobre `<db>`
+/// con la API de backup de SQLite, en su sitio y con sus cerrojos: nunca hay un
+/// instante sin `<db>` y quien lo tenga abierto sigue sobre el mismo fichero
+/// (con un `rename`, los `-wal`/`-shm` quedaban compartidos entre el fichero
+/// viejo, aún abierto por lectores, y el nuevo: «disk I/O error» y «database
+/// disk image is malformed» en el estrés). Si el proceso muere a medias, el
 /// índice de siempre sigue intacto y el siguiente `reindex` descarta `<db>.new`.
 ///
 /// Una fuente que no se puede reindexar (p. ej. su fichero ya no existe) no lo
@@ -190,15 +190,19 @@ fn swap(
     let backup = if degraded {
         // El viejo, ya sin nada en el WAL, queda también con otro nombre: un
         // enlace (o una copia si el sistema de ficheros no los admite).
+        // Copia de verdad, no un enlace: el índice se reescribe en su sitio.
         let b = backup_path(db, version);
-        if std::fs::hard_link(db, &b).is_err() {
-            std::fs::copy(db, &b)?;
-        }
+        chrono_store::snapshot_into(db, &b)?;
         Some(b)
     } else {
         None
     };
-    std::fs::rename(new, db)?;
+    // En su sitio, no con `rename`: quien tenga el índice abierto (lectores, el
+    // MCP, un `sync` a la espera del cerrojo) sigue sobre el mismo fichero.
+    chrono_store::replace_in_place(db, new, wait)?;
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", new.display()));
+    }
     let counts = match (before, after) {
         (Some(b), Some(a)) => format!("{b} → {a}"),
         (_, Some(a)) => format!("? → {a}"),
