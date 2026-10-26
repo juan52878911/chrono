@@ -271,6 +271,19 @@ impl Store {
         Ok(n as usize)
     }
 
+    /// Eventos de una fuente por su `file` (dim o, sin ella, `attrs.file`;
+    /// `None` = sin fichero): lo que necesita una fuente glob para saber cuáles
+    /// se pueden releer.
+    pub fn source_file_counts(&self, source_id: &str) -> Result<Vec<(Option<String>, usize)>> {
+        let mut st = self.conn.prepare(
+            "SELECT COALESCE((SELECT v.value FROM event_dims d JOIN dim_values v ON v.id = d.dim_id
+                              WHERE d.event_rid = e.rid AND v.key = 'file'), json_extract(e.attrs, '$.file')) AS f, COUNT(*)
+             FROM events e WHERE e.source_ref = (SELECT ref FROM sources WHERE id = ?1) GROUP BY f",
+        )?;
+        let rows = st.query_map(params![source_id], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)? as usize)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Segunda pasada de `entity_via`, al acabar una ingesta: los eventos que
     /// siguen en `unknown` toman la entidad del primer evento con su mismo link
     /// `rel` (el resultado que se leyó antes que su uso, p. ej. en otro fichero

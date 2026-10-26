@@ -181,6 +181,75 @@ fn un_fichero_reescrito_con_el_mismo_tamano_y_mtime_se_relee() {
 }
 
 #[test]
+fn una_edicion_en_medio_de_un_fichero_grande_se_relee() {
+    let env = Env::new("huella-medio", r#"{"version":2}"#);
+    let d = env.dir().join("datos");
+    // ~240 KB: el medio queda fuera de los primeros y últimos 64 KB.
+    let line = |i: usize, tag: &str| format!("{{\"ts\":\"2024-01-01T00:00:00Z\",\"msg\":\"linea {i:05} {tag}\"}}\n");
+    let body: String = (0..4000).map(|i| line(i, "aa")).collect();
+    write(&d, "a.jsonl", &body);
+    env.ok(&["add", &path_s(&d.join("*.jsonl")), "--as", "jsonl"]);
+    let a = d.join("a.jsonl");
+    let has = |msg: &str| env.sql(&format!("SELECT COUNT(*) FROM events WHERE title = '{msg}'"))[0].clone();
+    let edit = |from: &str, to: &str| {
+        let s = std::fs::read_to_string(&a).unwrap();
+        assert!(s.contains(from));
+        std::fs::write(&a, s.replacen(from, to, 1)).unwrap();
+    };
+    let mtime = || std::fs::metadata(&a).unwrap().modified().unwrap();
+
+    // 1. Mismo tamaño, otro mtime.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    edit("linea 02000 aa", "linea 02000 bb");
+    env.ok(&["sync"]);
+    assert_eq!((has("linea 02000 bb"), has("linea 02000 aa")), ("1".into(), "0".into()));
+
+    // 2. Mismo tamaño y el mtime de antes.
+    let before = mtime();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    edit("linea 02001 aa", "linea 02001 cc");
+    std::fs::File::options().write(true).open(&a).unwrap().set_modified(before).unwrap();
+    env.ok(&["sync"]);
+    assert_eq!((has("linea 02001 cc"), has("linea 02001 aa")), ("1".into(), "0".into()));
+
+    // 3. Edición en medio y una línea añadida: antes solo entraba la añadida.
+    edit("linea 02002 aa", "linea 02002 dd");
+    let mut f = std::fs::OpenOptions::new().append(true).open(&a).unwrap();
+    std::io::Write::write_all(&mut f, line(4000, "nueva").as_bytes()).unwrap();
+    drop(f);
+    env.ok(&["sync"]);
+    assert_eq!((has("linea 02002 dd"), has("linea 02002 aa"), has("linea 04000 nueva")), ("1".into(), "0".into(), "1".into()));
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["4001"]);
+
+    // Un append normal sigue siendo incremental y un sync sin cambios no relee nada.
+    let mut f = std::fs::OpenOptions::new().append(true).open(&a).unwrap();
+    std::io::Write::write_all(&mut f, line(4001, "nueva").as_bytes()).unwrap();
+    drop(f);
+    assert!(env.ok(&["sync"]).contains("sync: 1 new events"));
+    assert!(env.ok(&["sync"]).contains("0 new events"));
+}
+
+#[test]
+fn cambiar_las_dims_cuenta_los_eventos_de_ficheros_fuera_del_estado() {
+    let cfg = |dims: &str| format!(r#"{{"version":2,"source_options":{{"logs":{{{dims}}}}}}}"#);
+    let env = Env::new("dims-fuera", &cfg(""));
+    let d = env.dir().join("datos");
+    let line = |host: &str| format!("{{\"ts\":\"2024-01-01T00:00:00Z\",\"msg\":\"hola {host}\",\"host\":\"{host}\"}}\n");
+    write(&d, "a.jsonl", &line("h1"));
+    write(&d, "b.jsonl", &line("h2"));
+    env.ok(&["add", &path_s(&d.join("*.jsonl")), "--as", "jsonl", "--name", "logs"]);
+    // b.jsonl desaparece y el estado no lo recuerda (índice de antes, estado perdido).
+    std::fs::remove_file(d.join("b.jsonl")).unwrap();
+    env.sql("DELETE FROM meta WHERE key LIKE 'glob_state:%'");
+
+    env.set_config(&cfg(r#""dims":"host""#));
+    let out = env.ok(&["sync"]);
+    // Antes: «reindexing» y el evento de b.jsonl perdido.
+    assert!(out.contains("1 of its events can no longer be reread") && out.contains("not reindexing"), "{out}");
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["2"], "{out}");
+}
+
+#[test]
 fn cambiar_las_dims_con_un_fichero_borrado_no_pierde_sus_eventos() {
     let cfg = |dims: &str| format!(r#"{{"version":2,"source_options":{{"logs":{{{dims}}}}}}}"#);
     let env = Env::new("dims-borrado", &cfg(""));
