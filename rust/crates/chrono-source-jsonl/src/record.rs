@@ -554,10 +554,11 @@ mod tests {
             got,
             [
                 ("tool_use", "Bash", "", "Bash"),
-                // Hereda la tool de su uso (`entity_join`); título = primera línea del error.
-                ("tool_result", "Bash", "ERROR", "Exit code 1"),
+                // Sin entidad en el cursor: la tool de su uso se la da el índice
+                // por el link `tool_use` (`entity_via`). Título = primera línea del error.
+                ("tool_result", "unknown", "ERROR", "Exit code 1"),
                 // Un resultado correcto no mete su contenido en el título.
-                ("tool_result", "Bash", "", "tool_result"),
+                ("tool_result", "unknown", "", "tool_result"),
             ]
         );
         assert_eq!((evs[0].id.as_str(), evs[1].id.as_str(), evs[2].id.as_str()), ("tool_use:toolu_9", "tool_result:toolu_9", "tool_result:toolu_9"));
