@@ -13,6 +13,12 @@
 //! del fichero relativa a la base del patrón (la parte sin comodines). Si un
 //! fichero diverge (truncado o reescrito), se borran y reingieren solo sus
 //! eventos. Un fichero que desaparece conserva sus eventos (son historia).
+//!
+//! Tamaño y mtime no bastan: un fichero reescrito con el mismo tamaño y el mismo
+//! mtime (`touch -r`, `rsync -t`, una copia que conserva fechas) no se releía.
+//! Cada fichero guarda además una huella barata (primeros y últimos 64 KB) y su
+//! ctime, que el usuario no puede fijar: con tamaño y mtime iguales, la huella
+//! solo se recalcula si el ctime cambió, así un `sync` sin cambios no lee nada.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -30,12 +36,56 @@ use crate::i18n::t;
 /// ya leído no se relee: los ids son deterministas, pero cuesta tiempo).
 const SAVE_EVERY: usize = 200;
 
+/// Bytes del principio y del final que entran en la huella de un fichero.
+const FINGERPRINT_SPAN: u64 = 64 * 1024;
+
 /// Lo que se sabe de un fichero tras leerlo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileState {
     size: u64,
     mtime_ns: i128,
     watermark: String,
+    /// ctime (0 = desconocido: estado anterior a la huella o sin ctime en el SO).
+    ctime_ns: i128,
+    /// Huella de los primeros y últimos `FINGERPRINT_SPAN` bytes ("" = sin calcular).
+    fingerprint: String,
+}
+
+/// mtime y ctime de un fichero en ns (0 si el SO no los da).
+fn times_ns(md: &std::fs::Metadata) -> (i128, i128) {
+    let mtime = md.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as i128);
+    #[cfg(unix)]
+    let ctime = {
+        use std::os::unix::fs::MetadataExt;
+        i128::from(md.ctime()) * 1_000_000_000 + i128::from(md.ctime_nsec())
+    };
+    #[cfg(not(unix))]
+    let ctime = 0;
+    (mtime, ctime)
+}
+
+/// Huella de los primeros y últimos `FINGERPRINT_SPAN` bytes de los `size`
+/// primeros de `path` (todo el fichero si es pequeño). Hash de 64 bits por
+/// palabras: no es criptográfico, solo distingue un contenido reescrito.
+fn fingerprint(path: &Path, size: u64) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let mut buf = Vec::with_capacity((2 * FINGERPRINT_SPAN).min(size) as usize);
+    (&mut f).take(FINGERPRINT_SPAN.min(size)).read_to_end(&mut buf)?;
+    let tail_from = size.saturating_sub(FINGERPRINT_SPAN).max(FINGERPRINT_SPAN);
+    if tail_from < size {
+        f.seek(SeekFrom::Start(tail_from))?;
+        f.take(size - tail_from).read_to_end(&mut buf)?;
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ size;
+    let mut words = buf.chunks_exact(8);
+    for w in &mut words {
+        h = (h ^ u64::from_le_bytes(w.try_into().unwrap_or_default())).wrapping_mul(0x0000_0100_0000_01b3).rotate_left(29);
+    }
+    for b in words.remainder() {
+        h = (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Ok(format!("{h:016x}"))
 }
 
 /// Datos fijos de una fuente glob (en su `manifest_json`).
@@ -105,7 +155,10 @@ impl GlobSource {
             else {
                 continue;
             };
-            out.insert(file.clone(), FileState { size, mtime_ns: mtime.parse().unwrap_or(0), watermark: wm.to_string() });
+            // Ctime y huella van detrás: un estado de antes no los tiene.
+            let ctime_ns = st.get(3).and_then(Value::as_str).and_then(|c| c.parse().ok()).unwrap_or(0);
+            let fingerprint = st.get(4).and_then(Value::as_str).unwrap_or("").to_string();
+            out.insert(file.clone(), FileState { size, mtime_ns: mtime.parse().unwrap_or(0), watermark: wm.to_string(), ctime_ns, fingerprint });
         }
         Ok(out)
     }
@@ -113,7 +166,7 @@ impl GlobSource {
     /// Guarda el estado y devuelve su resumen para `sources.watermark`.
     fn save_state(&self, store: &Store, state: &BTreeMap<String, FileState>) -> Result<String> {
         let obj: serde_json::Map<String, Value> =
-            state.iter().map(|(f, st)| (f.clone(), json!([st.size, st.mtime_ns.to_string(), st.watermark]))).collect();
+            state.iter().map(|(f, st)| (f.clone(), json!([st.size, st.mtime_ns.to_string(), st.watermark, st.ctime_ns.to_string(), st.fingerprint]))).collect();
         let raw = Value::Object(obj).to_string();
         store.set_meta(&self.state_key(), &raw)?;
         Ok(format!("glob:{}:{:08x}", state.len(), fnv1a32(raw.as_bytes())))
@@ -136,18 +189,34 @@ impl GlobSource {
         let (files_word, events_word) = (t("files", "ficheros"), t("events", "eventos"));
         for (i, path) in files.iter().enumerate() {
             let Ok(md) = std::fs::metadata(path) else { continue };
-            let mtime_ns = md
-                .modified()
-                .ok()
-                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_nanos() as i128);
+            let (mtime_ns, ctime_ns) = times_ns(&md);
             let rel = path.strip_prefix(&base).unwrap_or(path).to_string_lossy().into_owned();
-            let prev = state.get(&rel);
-            if prev.is_some_and(|p| p.size == md.len() && p.mtime_ns == mtime_ns) {
-                continue;
+            let mut prev = state.get(&rel).cloned();
+            let mut rewritten = false;
+            if let Some(p) = prev.as_mut().filter(|p| p.size == md.len() && p.mtime_ns == mtime_ns) {
+                if p.ctime_ns == ctime_ns && ctime_ns != 0 {
+                    continue;
+                }
+                // Mismo tamaño y mtime, pero algo tocó el fichero: la huella decide.
+                let Ok(fp) = fingerprint(path, md.len()) else { continue };
+                if p.fingerprint.is_empty() || p.fingerprint == fp {
+                    // Sin huella previa (estado de antes) no hay con qué comparar: se adopta.
+                    p.ctime_ns = ctime_ns;
+                    p.fingerprint = fp;
+                    state.insert(rel, p.clone());
+                    continue;
+                }
+                // Reescrito: se relee entero, como una divergencia.
+                rewritten = true;
             }
             let ctx = IngestCtx { options_keys: options_keys.clone(), preset: self.preset.as_deref(), group: Some((&self.id, &rel)) };
-            let wm = prev.filter(|p| !p.watermark.is_empty()).map(|p| Watermark { kind: adapter.kind().to_string(), value: p.watermark.clone() });
+            let wm = prev
+                .filter(|p| !p.watermark.is_empty() && !rewritten)
+                .map(|p| Watermark { kind: adapter.kind().to_string(), value: p.watermark });
+            if rewritten {
+                store.delete_source_file_events(&self.id, &rel)?;
+                out.diverged = true;
+            }
             let (n, new_wm) = match ingest_source(adapter, path, wm, store, index_root, &ctx) {
                 Ok((n, w, _)) => (n, w),
                 Err(IngestError::Diverged) => {
@@ -162,7 +231,8 @@ impl GlobSource {
                     continue;
                 }
             };
-            state.insert(rel, FileState { size: md.len(), mtime_ns, watermark: new_wm.value });
+            let fingerprint = fingerprint(path, md.len()).unwrap_or_default();
+            state.insert(rel, FileState { size: md.len(), mtime_ns, watermark: new_wm.value, ctime_ns, fingerprint });
             out.events += n;
             out.files_read += 1;
             if out.files_read.is_multiple_of(SAVE_EVERY) {

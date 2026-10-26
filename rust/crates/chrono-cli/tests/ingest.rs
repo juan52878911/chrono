@@ -139,6 +139,32 @@ fn init_en_un_repo_sin_commits_y_add_y_sync_despues() {
     assert_eq!(env.sql("SELECT kind, COUNT(*) FROM events GROUP BY kind ORDER BY kind"), ["commit|1", "log|1"]);
 }
 
+#[test]
+fn un_fichero_reescrito_con_el_mismo_tamano_y_mtime_se_relee() {
+    let env = Env::new("huella", r#"{"version":2}"#);
+    let d = env.dir().join("datos");
+    let line = |msg: &str| format!("{{\"ts\":\"2024-01-01T00:00:00Z\",\"msg\":\"{msg}\"}}\n");
+    write(&d, "a.jsonl", &line("alfa uno"));
+    write(&d, "b.jsonl", &line("otro fichero"));
+    env.ok(&["add", &path_s(&d.join("*.jsonl")), "--as", "jsonl"]);
+    let titles = || env.sql("SELECT title FROM events ORDER BY title");
+    assert_eq!(titles(), ["alfa uno", "otro fichero"]);
+
+    let a = d.join("a.jsonl");
+    let mtime = std::fs::metadata(&a).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&a, line("beta dos")).unwrap();
+    std::fs::File::options().write(true).open(&a).unwrap().set_modified(mtime).unwrap();
+    assert_eq!(std::fs::metadata(&a).unwrap().modified().unwrap(), mtime);
+
+    env.ok(&["sync"]);
+    assert_eq!(titles(), ["beta dos", "otro fichero"]);
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events_fts WHERE events_fts MATCH 'beta'"), ["1"]);
+    // Sin tocar nada más, un sync no relee ni reindexa.
+    let out = env.ok(&["sync"]);
+    assert!(out.contains("0 new events"), "{out}");
+}
+
 /// `tail` durante un ciclo y se mata (no termina solo).
 fn tail_once(env: &Env, then: impl FnOnce()) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_chrono"))
