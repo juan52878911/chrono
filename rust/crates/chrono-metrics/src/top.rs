@@ -64,7 +64,7 @@ fn top_sql_with(from_clause: &str, value_expr: &str, filters: &str) -> String {
 
 /// SQL de `top attr:<clave>` (parámetros: ?1 path JSON, ?2 since, ?3 limit,
 /// ?4 clave, y los del alcance desde ?5).
-fn attr_top_sql(scope: &crate::EventScope, since_epoch: i64) -> (String, Vec<String>) {
+fn attr_top_sql(scope: &crate::EventScope, since_epoch: i64, key: &str) -> (String, Vec<String>) {
     // v6: los eventos con la clave como dim, por `event_dims` (sin filtros ni
     // ventana, sin tocar `events`); el resto, del JSON de las fuentes que la
     // tienen en `attrs`. Un evento la lleva en un sitio o en el otro, nunca en los dos.
@@ -88,7 +88,7 @@ fn attr_top_sql(scope: &crate::EventScope, since_epoch: i64) -> (String, Vec<Str
         "SELECT value, SUM(n) AS count FROM (
          {from_dims}
          UNION ALL
-         SELECT json_extract(events.attrs, ?1) AS value, 1 AS n
+         SELECT {} AS value, 1 AS n
          FROM events
          WHERE events.source_ref IN (SELECT source_ref FROM attr_keys WHERE key = ?4)
            AND (?2 = 0 OR events.at_epoch >= ?2)
@@ -99,7 +99,8 @@ fn attr_top_sql(scope: &crate::EventScope, since_epoch: i64) -> (String, Vec<Str
          -- Un valor de dim_values sin eventos (su fuente se borró) no cuenta.
          HAVING count > 0
          ORDER BY count DESC, value ASC
-         LIMIT ?3"
+         LIMIT ?3",
+        crate::timeline::attr_json("events", key, "?1")
     );
     (sql, extra)
 }
@@ -203,7 +204,7 @@ pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilte
             return Err(format!("top: invalid attr key: {key:?}").into());
         }
         let path = format!("$.{key}");
-        let (sql, extra) = attr_top_sql(&scope, since_epoch);
+        let (sql, extra) = attr_top_sql(&scope, since_epoch, key);
         let key_s = key.to_string();
         let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&path, &since_epoch, &limit, &key_s];
         for p in &extra {
@@ -648,7 +649,7 @@ mod tests_p3 {
         let n: i64 = with_dims.conn().query_row("SELECT COUNT(*) FROM events WHERE attrs LIKE '%host%'", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 60);
         // `top attr:host` sin filtros: event_dims y solo las fuentes con `host` en attrs.
-        let (sql, _) = attr_top_sql(&crate::EventScope::default(), 0);
+        let (sql, _) = attr_top_sql(&crate::EventScope::default(), 0, "host");
         let eqp = format!("EXPLAIN QUERY PLAN {sql}");
         let mut stmt = with_dims.conn().prepare(&eqp).unwrap();
         let p: Vec<String> = stmt
@@ -695,5 +696,43 @@ mod tests_p3 {
         assert!(!err.contains("unsupported"), "{err}");
         // `sources` dice qué dims hay para que no haya que adivinarlas.
         assert_eq!(crate::sources(c).unwrap()[0].dims, vec!["cwd".to_string()]);
+    }
+
+    /// Una clave con punto (`message.model`) se guarda tal cual en attrs: como
+    /// attr se lee igual que como dim (antes, como ruta anidada, no casaba nada).
+    #[test]
+    fn una_attr_con_punto_se_lee_como_clave_literal_igual_que_una_dim() {
+        fn build(name: &str, dims: bool) -> (TempDb, Store) {
+            let db = TempDb::new(name);
+            let mut store = Store::open(db.path()).unwrap();
+            let mut w = store.writer().unwrap();
+            if dims {
+                w.set_dims(vec!["message.model".into()]);
+            }
+            for i in 0..9i64 {
+                let mut e = mk(&format!("e{i}"), "INFO", 1_000 + i, "");
+                e.attrs.insert("message.model".into(), ["opus", "sonnet", "opus"][(i % 3) as usize].into());
+                e.attrs.insert("dur".into(), i.to_string());
+                w.add_event(&e).unwrap();
+            }
+            w.commit().unwrap();
+            (db, store)
+        }
+        let q = |s: &Store| -> Vec<String> {
+            let c = s.conn();
+            let f = TopFilter { attr: Some("message.model:opus"), ..Default::default() };
+            let sc = crate::EventScope { attr: Some("message.model:son*"), ..Default::default() };
+            vec![
+                format!("{:?}", top_filtered(c, "attr:message.model", 0, &TopFilter::default(), 5).unwrap()),
+                format!("{:?}", top_filtered(c, "level", 0, &f, 5).unwrap()),
+                format!("{:?}", crate::stats(c, "dur", Some("attr:message.model"), 0, &sc, 5).unwrap()),
+            ]
+        };
+        let (_d1, con_dims) = build("punto-dims", true);
+        let (_d2, sin_dims) = build("punto-attrs", false);
+        let attrs = q(&sin_dims);
+        assert_eq!(q(&con_dims), attrs);
+        assert!(attrs[0].contains("\"opus\", count: 6"), "{attrs:?}");
+        assert!(attrs[1].contains("count: 6"), "{attrs:?}");
     }
 }

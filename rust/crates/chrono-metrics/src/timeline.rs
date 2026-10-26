@@ -162,8 +162,21 @@ pub(crate) fn level_expr(t: &str, infer: bool) -> String {
 pub(crate) fn attr_sql(t: &str, key: &str, json_path: &str) -> String {
     format!(
         "COALESCE((SELECT v.value FROM event_dims d JOIN dim_values v ON v.id = d.dim_id
-                   WHERE d.event_rid = {t}.rid AND v.key = '{key}'), json_extract({t}.attrs, {json_path}))"
+                   WHERE d.event_rid = {t}.rid AND v.key = '{key}'), {})",
+        attr_json(t, key, json_path)
     )
+}
+
+/// La attr `key` del JSON de `attrs`: primero como clave literal y, si no está,
+/// como ruta (`json_path`). Las fuentes guardan las claves pedidas tal cual
+/// (`message.model`), así que una clave con punto leída solo como ruta no casaba
+/// nunca fuera de las dims. `key` ya validada (sin comillas).
+pub(crate) fn attr_json(t: &str, key: &str, json_path: &str) -> String {
+    if key.contains('.') {
+        format!("COALESCE(json_extract({t}.attrs, '$.\"{key}\"'), json_extract({t}.attrs, {json_path}))")
+    } else {
+        format!("json_extract({t}.attrs, {json_path})")
+    }
 }
 
 /// Rids de los eventos con la attr `key` igual a (o, con `like`, que empieza por)
@@ -175,7 +188,8 @@ pub(crate) fn attr_rids_sql(key: &str, p: &str, like: bool) -> String {
         "SELECT d.event_rid FROM event_dims d JOIN dim_values v ON v.id = d.dim_id WHERE v.key = '{key}' AND v.value {op} {p}
          UNION ALL
          SELECT ea.rid FROM events ea WHERE ea.source_ref IN (SELECT source_ref FROM attr_keys WHERE key = '{key}')
-                                        AND json_extract(ea.attrs, '$.{key}') {op} {p}"
+                                        AND {} {op} {p}",
+        attr_json("ea", key, &format!("'$.{key}'"))
     )
 }
 
