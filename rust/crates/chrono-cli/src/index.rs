@@ -197,11 +197,23 @@ pub fn init(start: &Path, symbols: bool, as_kind: Option<&str>, db_override: Opt
         ingest_symbols(&ingest_path, &store, None)?;
     }
 
-    if src.kind() == "git" && chrono_source_git::head_is_unborn(&ingest_path) {
-        eprintln!("{}", t(
+    match chrono_source_git::unborn_head(&ingest_path).filter(|_| src.kind() == "git") {
+        Some((_, 0)) => eprintln!("{}", t(
             "chrono: the repo has no commits yet; `chrono sync` will read them once there are",
             "chrono: el repo aún no tiene commits; `chrono sync` los leerá cuando los haya",
-        ));
+        )),
+        // Rama huérfana en un repo con historia: no es que el repo esté vacío.
+        Some((branch, n)) => eprintln!("{}", t(
+            format!(
+                "chrono: HEAD points to no commit (branch {branch} has no commits yet), but {n} branch(es) do; \
+                 init reads HEAD's history: switch to one of them and run init again, or `chrono sync` once {branch} has commits"
+            ),
+            format!(
+                "chrono: HEAD no apunta a ningún commit (la rama {branch} aún no tiene commits), pero hay {n} rama(s) con commits; \
+                 init lee la historia de HEAD: cambia a una de ellas y repite init, o `chrono sync` cuando {branch} tenga commits"
+            ),
+        )),
+        None => {}
     }
     let unit = if src.kind() == "git" { ("commits", "commits") } else { ("events", "eventos") };
     eprintln!("{}", t(

@@ -40,6 +40,18 @@ pub fn head_is_unborn(repo: &Path) -> bool {
     ok(&["symbolic-ref", "-q", "HEAD"]) && !ok(&["rev-parse", "--verify", "-q", "HEAD"])
 }
 
+/// Con HEAD sin nacer, la rama a la que apunta y cuántas ramas locales tienen
+/// commits (una rama huérfana recién creada en un repo con historia no es un
+/// repo vacío). `None` si HEAD apunta a un commit.
+pub fn unborn_head(repo: &Path) -> Option<(String, usize)> {
+    if !head_is_unborn(repo) {
+        return None;
+    }
+    let branch = run(repo, &["symbolic-ref", "--short", "-q", "HEAD"]).unwrap_or_default();
+    let branches = run(repo, &["for-each-ref", "--format=%(refname)", "refs/heads"]).map_or(0, |o| o.lines().filter(|l| !l.is_empty()).count());
+    Some((branch, branches))
+}
+
 /// Sha del commit al que apunta `rev` (rama, tag, `origin/dev`…).
 pub fn rev_sha(repo: &Path, rev: &str) -> Result<String> {
     run(repo, &["rev-parse", "--verify", &format!("{rev}^{{commit}}")])

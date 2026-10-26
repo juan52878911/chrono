@@ -25,7 +25,7 @@ mod timeutil;
 
 pub use blame::{blame, file_lines, Blame, BlameCommit};
 pub use branches::{branches, Branch, BranchAuthor, BranchTip};
-pub use gitutil::{blob_lines, commit_exists, git_version, head_is_unborn, head_sha, is_shallow, ls_tree, Result};
+pub use gitutil::{blob_lines, commit_exists, git_version, head_is_unborn, head_sha, is_shallow, ls_tree, unborn_head, Result};
 pub use show::{show, Show};
 
 use chrono_core::{CoreError, Result as CoreResult, Source, SourceConfig, Watermark};

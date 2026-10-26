@@ -128,11 +128,23 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 #[test]
+fn init_en_una_rama_huerfana_no_dice_que_el_repo_este_vacio() {
+    let env = Env::new("huerfana", r#"{"version":2}"#);
+    git(env.dir(), &["init", "-q", "-b", "main"]);
+    git(env.dir(), &["commit", "-q", "--allow-empty", "-m", "primero"]);
+    git(env.dir(), &["switch", "-q", "--orphan", "nueva"]);
+    let out = env.ok(&["init"]);
+    // Antes: «the repo has no commits yet», con main llena.
+    assert!(!out.contains("the repo has no commits"), "{out}");
+    assert!(out.contains("HEAD points to no commit (branch nueva has no commits yet), but 1 branch(es) do"), "{out}");
+}
+
+#[test]
 fn init_en_un_repo_sin_commits_y_add_y_sync_despues() {
     let env = Env::new("sin-commits", r#"{"version":2}"#);
     git(env.dir(), &["init", "-q"]);
     let out = env.ok(&["init"]);
-    assert!(out.contains("0 commits"), "{out}");
+    assert!(out.contains("0 commits") && out.contains("has no commits yet"), "{out}");
     write(env.dir(), "app.jsonl", "{\"ts\":\"2024-01-01T00:00:00Z\",\"msg\":\"hola\"}\n");
     env.ok(&["add", &path_s(&env.dir().join("app.jsonl"))]);
     env.ok(&["sync"]);
