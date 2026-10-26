@@ -354,7 +354,7 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
         "prs" => prs(conn, since)?,
         "timeline" => {
             // El parámetro MCP es en SEGUNDOS (cómodo); `at_epoch` es ms → ×1000.
-            let bucket_ms = arg_i64(args, "bucket_secs", 3600).max(1) * 1000;
+            let bucket_ms = arg_i64(args, "bucket_secs", 3600).max(1).saturating_mul(1000);
             let by = args.get("by").and_then(Value::as_str).filter(|s| !s.is_empty());
             let limit = arg_i64(args, "limit", 500).max(1) as usize;
             let scope = scope_from(args);
