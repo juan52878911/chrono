@@ -76,7 +76,7 @@ impl Store {
         } else {
             // Una consulta sobre una ruta sin índice no deja un `.db` vacío.
             if !path.is_file() {
-                return Err(format!("no hay índice en {} (créalo con chrono init)", path.display()).into());
+                return Err(crate::NoIndex { path: path.to_path_buf() }.into());
             }
             use rusqlite::OpenFlags;
             Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX)?

@@ -218,8 +218,47 @@ fn una_consulta_sobre_una_ruta_sin_indice_no_crea_uno_vacio() {
     let db = dir.0.join("nada.db");
     let out = run(&dir.0, &["top", "level", "--db", &db.to_string_lossy()]);
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("chrono init"), "{}", String::from_utf8_lossy(&out.stderr));
+    let err = String::from_utf8_lossy(&out.stderr);
+    // En inglés con CHRONO_LANG=en (antes salía en español).
+    assert!(err.contains("no index at") && err.contains("chrono init"), "{err}");
     assert!(!db.exists(), "antes quedaba un .db vacío");
+    // sync y tail tampoco lo crean (antes, sí); add sí.
+    for cmd in [&["sync"][..], &["tail", "--interval", "1s"]] {
+        let mut a = cmd.to_vec();
+        let db_s = db.to_string_lossy().into_owned();
+        a.extend(["--db", &db_s]);
+        let out = run(&dir.0, &a);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success() && err.contains("no index at"), "{cmd:?}: {err}");
+        assert!(!db.exists() && !PathBuf::from(format!("{db_s}.lock")).exists(), "{cmd:?} creó el índice");
+    }
+}
+
+#[test]
+fn tail_se_para_si_el_indice_desaparece() {
+    let (dir, db) = dos_fuentes("tail-borrado", 10);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_chrono"))
+        .args(["tail", "--interval", "1s", "--db", &db.to_string_lossy()])
+        .current_dir(&dir.0)
+        .env("CHRONO_LANG", "en")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    for s in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{s}", db.display()));
+    }
+    let start = std::time::Instant::now();
+    while child.try_wait().unwrap().is_none() && start.elapsed() < std::time::Duration::from_secs(5) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let out = child.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    // Antes: creaba un índice vacío en su sitio y seguía.
+    assert!(!out.status.success() && err.contains("is gone"), "{err}");
+    assert!(!db.exists(), "tail recreó el índice");
 }
 
 #[test]

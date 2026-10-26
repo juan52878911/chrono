@@ -8,6 +8,21 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::{Result, SourceRow, SCHEMA_VERSION};
 
+/// No hay índice en `path` (y quien lo abría no debe crearlo). El texto va en
+/// español, como el resto de errores del store; el CLI lo traduce.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoIndex {
+    pub path: std::path::PathBuf,
+}
+
+impl std::fmt::Display for NoIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no hay índice en {} (créalo con chrono init)", self.path.display())
+    }
+}
+
+impl std::error::Error for NoIndex {}
+
 /// El índice tiene un esquema que esta versión no lee. `found` es lo que dice
 /// su `meta.schema_version` (`None` si no lo dice).
 #[derive(Debug, Clone, PartialEq)]

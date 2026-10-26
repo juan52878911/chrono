@@ -249,6 +249,13 @@ fn swap(
 /// Mensaje de un error al abrir el índice: si es de otra versión de esquema,
 /// qué versión tiene, cuál hace falta y el comando exacto para reconstruirlo.
 pub fn explain_open_error(e: &(dyn std::error::Error + 'static), db: &Path, explicit_db: bool) -> Option<String> {
+    if let Some(n) = e.downcast_ref::<chrono_store::NoIndex>() {
+        // Antes salía en español con cualquier CHRONO_LANG.
+        return Some(t(
+            format!("no index at {} (create it with chrono init)", n.path.display()),
+            format!("no hay índice en {} (créalo con chrono init)", n.path.display()),
+        ));
+    }
     let m = e.downcast_ref::<chrono_store::SchemaMismatch>()?;
     if m.is_unknown() {
         return Some(t(

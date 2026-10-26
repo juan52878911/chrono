@@ -372,7 +372,9 @@ pub fn add_glob(db: &Path, pattern: &str, as_kind: Option<&str>, alias: Option<&
 /// que ya no existe y no se quiere seguir viendo en `sources` ni en `sync`.
 pub fn remove(db: &Path, arg: &str) -> Result<()> {
     // Sin índice, el mismo error que las consultas (y no se crea uno vacío).
-    drop(Store::open_read(db)?);
+    if !db.is_file() {
+        return Err(chrono_store::NoIndex { path: db.to_path_buf() }.into());
+    }
     let _lock = lock_ingest(db)?;
     let store = Store::open(db)?;
     let sources = store.list_sources()?;
@@ -414,6 +416,9 @@ pub fn remove(db: &Path, arg: &str) -> Result<()> {
 /// `path`, si se pasa), ingiriendo el delta desde el watermark de cada una. Si
 /// una fuente diverge (rebase/force-push, log rotado), reindexa SOLO esa fuente.
 pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
+    if !db.is_file() {
+        return Err(chrono_store::NoIndex { path: db.to_path_buf() }.into());
+    }
     let _lock = lock_ingest(db)?;
     let mut store = Store::open(db)?;
     sync_store(&mut store, &index_root_of(db), source_arg, false)
@@ -698,6 +703,15 @@ pub fn tail(
     let mut stdout = std::io::stdout();
     loop {
         {
+            // El índice desapareció (borrado o movido): antes `Store::open` creaba
+            // uno vacío en su sitio y el `tail` seguía sobre él.
+            if !db.is_file() {
+                return Err(t(
+                    format!("the index {} is gone (deleted or moved); tail stops", db.display()),
+                    format!("el índice {} ya no está (borrado o movido); tail se para", db.display()),
+                )
+                .into());
+            }
             // Por vuelta, no durante todo el `tail`: un `sync` de un hook no espera horas.
             let _lock = lock_ingest(db)?;
             // Un `reindex` aparta el índice y crea otro en la misma ruta: con la

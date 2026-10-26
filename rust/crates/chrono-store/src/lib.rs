@@ -10,7 +10,7 @@ mod store;
 mod writer;
 
 pub use legacy::{
-    checkpoint_truncate, count_events_any_version, count_source_events_any_version, is_corrupt, read_meta_any_version, read_sources_any_version, reindex_marker, reindex_pending, SchemaMismatch,
+    checkpoint_truncate, count_events_any_version, count_source_events_any_version, is_corrupt, read_meta_any_version, read_sources_any_version, reindex_marker, reindex_pending, NoIndex, SchemaMismatch,
 };
 pub use store::{SourceRow, Store};
 pub use writer::{Writer, WriterCaches};

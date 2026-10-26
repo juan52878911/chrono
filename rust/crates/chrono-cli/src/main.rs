@@ -825,6 +825,11 @@ fn main() {
         let abs = std::fs::canonicalize(&cache).unwrap_or(cache);
         f.source = Some(format!("jsonl:{}", abs.display()));
     }
+    // `sync`, `tail` y `remove` no crean el índice (antes `Store::open` dejaba uno
+    // vacío en una ruta equivocada): el mismo error que las consultas. `add` sí.
+    if matches!(cmd, "sync" | "tail" | "remove") && !db.is_file() {
+        fatal_open(Box::new(chrono_store::NoIndex { path: db.clone() }), &db, &f);
+    }
     if cmd == "sync" {
         // Las fuentes de comando se refrescan ANTES del sync: vuelven a
         // ejecutarse y añaden a su caché lo nuevo, que el sync procesa como el
