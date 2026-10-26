@@ -1,10 +1,10 @@
 {
-  "version": "chrono 0.2.7",
+  "version": "chrono 0.3.0",
   "n": 1000000,
-  "binario_bytes": 2244352,
+  "binario_bytes": 2244368,
   "ingesta": {
-    "s": 31.345,
-    "rss_mb": 620.5,
+    "s": 29.152,
+    "rss_mb": 620.2,
     "db_bytes": 584724480,
     "bytes_por_evento": 584.7
   },
@@ -23,70 +23,70 @@
     "idx_events_at": 17.2,
     "idx_events_sh1": 13.0
   },
-  "sync_noop_s": 0.004,
+  "sync_noop_s": 0.005,
   "cli": {
     "informe": {
-      "s": 11.569,
+      "s": 12.349,
       "rss_mb": 77.1,
       "bytes": 5003
     },
     "top entity": {
-      "s": 0.477,
+      "s": 0.476,
       "rss_mb": 24.1,
       "bytes": 1644
     },
     "top attr:host": {
-      "s": 1.074,
+      "s": 1.211,
       "rss_mb": 43.2,
       "bytes": 860
     },
     "top level": {
-      "s": 0.075,
-      "rss_mb": 24.2,
+      "s": 0.076,
+      "rss_mb": 24.1,
       "bytes": 576
     },
     "patterns --level ERROR,FATAL": {
-      "s": 0.335,
+      "s": 0.361,
       "rss_mb": 24.3,
       "bytes": 2336
     },
     "patterns --entity svc-3": {
-      "s": 1.415,
-      "rss_mb": 24.3,
+      "s": 1.667,
+      "rss_mb": 24.4,
       "bytes": 2336
     },
     "patterns": {
       "s": 0.008,
-      "rss_mb": 10.5,
+      "rss_mb": 10.4,
       "bytes": 2352
     },
     "timeline --bucket 1h": {
-      "s": 0.009,
-      "rss_mb": 11.1,
+      "s": 0.008,
+      "rss_mb": 11.0,
       "bytes": 3763
     },
     "timeline --bucket 1h --by level": {
-      "s": 0.542,
-      "rss_mb": 43.2,
+      "s": 0.535,
+      "rss_mb": 43.1,
       "bytes": 14314
     },
     "precede --grep refused --level ERROR": {
-      "s": 0.181,
+      "s": 0.192,
       "rss_mb": 25.7,
       "bytes": 50077
     },
     "precede --level FATAL": {
-      "s": 0.215,
-      "rss_mb": 25.9,
+      "s": 0.221,
+      "rss_mb": 26.0,
       "bytes": 1342
     },
     "events --level FATAL --limit 50": {
-      "s": 0.216,
+      "s": 0.319,
       "rss_mb": 24.3,
       "bytes": 21244
     },
     "search refused": {
-      "s": 0.055,
+      "s": 0.071,
       "rss_mb": 23.0,
       "bytes": 4215
     }

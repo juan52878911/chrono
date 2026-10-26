@@ -73,6 +73,17 @@ Lo que convierte a chrono de «logs y git» en «cualquier compendio».
 | **Preset `claude-sessions`** para el adaptador `jsonl`: `time_field`, `kind_field`, `entity_field`, `explode` sobre `message.content[]` (una tool = un evento), `links` a ficheros y URLs | Con el fixture de sesiones: `top entity` = tools más usadas, `precede` sobre fallos de Bash, `correlate` con git |
 | **Fuente `dir` (inventario)**: un evento por fichero con ruta, tipo (por extensión y número mágico, sin dependencias), tamaño, fechas y hash; la carpeta como entidad | Indexa la carpeta de 2,2 GB sin leer su contenido entero (hash incremental por tamaño + mtime) |
 
+**Diseño concretado al empezar F2** (transcripciones reales: 1 925 ficheros, 2,7 GB en `~/.claude/projects`):
+- `explode` ya existe y está probado con una línea de Claude (`message.content`, elemento-luego-raíz): `name` es
+  la tool en `tool_use`; `timestamp`, `cwd`, `gitBranch`, `sessionId` salen de la raíz.
+- Falta en el adaptador `jsonl`: `explode_where` con varios valores (`type=tool_use|tool_result`); `level_map`
+  (`is_error: true` → `ERROR`); y un título de respaldo acotado (hoy, sin `message_field`, el título es el
+  elemento serializado: metería comandos y contenido de ficheros en el índice).
+- Una fuente glob es **una** fila en `sources` (agrupada por alias), con watermark por fichero; si no, 1 925 filas
+  inflan `sources` y cada `sync` las recorre una a una.
+- El nombre de la tool no viaja en `tool_result` (solo `tool_use_id`): «qué tool falla más» necesita el enlace
+  `tool_use_id` → `id`, que es justo `relations` (F4). En F2 basta con guardar `tool_use_id` como link.
+
 **Validación de la fase:** caso real de tus sesiones de Claude, respondido por MCP sin leer transcripciones.
 Si no aporta lo esperado, se replantean las fases 4 y 6 antes de seguir.
 
