@@ -310,9 +310,7 @@ mod tests {
                     };
                     out.push(format!("top {dim} {since} {sc:?}: {:?}", top_filtered(conn, dim, since, &f, 50).unwrap()));
                 }
-                if !sc.only_source_grep() {
-                    out.push(format!("patterns {since} {sc:?}: {:?}", patterns_scoped(conn, since, &sc, 50).unwrap()));
-                }
+                out.push(format!("patterns {since} {sc:?}: {:?}", patterns_scoped(conn, since, &sc, 50).unwrap()));
                 out.push(format!("count {since} {sc:?}: {}", super::count_events(conn, since, &sc).unwrap()));
                 for (bucket, by) in [(600_000, None), (1_200_000, Some("level")), (600_000, Some("kind"))] {
                     let t = timeline_scoped(conn, since, until, bucket, by, &sc, 0).unwrap();

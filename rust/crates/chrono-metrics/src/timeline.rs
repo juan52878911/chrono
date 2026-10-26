@@ -197,12 +197,6 @@ impl EventScope<'_> {
             && [self.source, self.grep, self.level, self.kind, self.entity, self.attr, self.join].iter().all(|v| v.map_or(true, str::is_empty))
     }
 
-    /// Solo filtra por fuente y/o texto: lo único que saben responder los
-    /// rollups de `patterns`.
-    pub fn only_source_grep(&self) -> bool {
-        self.until_epoch <= 0 && [self.level, self.kind, self.entity, self.attr, self.join].iter().all(|v| v.map_or(true, str::is_empty))
-    }
-
     /// Como `sql`, para otros crates (la cabecera del MCP cuenta con los mismos filtros).
     pub fn sql_public(&self, first: usize) -> (String, Vec<String>) {
         self.sql_on("e", first)
