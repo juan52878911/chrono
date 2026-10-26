@@ -86,13 +86,23 @@ CREATE TABLE IF NOT EXISTS touches (
     PRIMARY KEY (event_rid, entity_id)
 ) WITHOUT ROWID;
 
--- Relaciones deterministas (absorbe commit_tickets + reverts).
-CREATE TABLE IF NOT EXISTS links (
+-- Relaciones deterministas (absorbe commit_tickets + reverts). v7: el par
+-- (rel, target) se guarda una vez en `link_targets` y `event_links` lo une al
+-- evento por entero; la vista `links` conserva la forma de antes para leer.
+CREATE TABLE IF NOT EXISTS link_targets (
+    id     INTEGER PRIMARY KEY,
+    rel    TEXT NOT NULL,                 -- "ticket" | "reverts" | "pr" | ...
+    target TEXT NOT NULL,
+    UNIQUE (rel, target)
+);
+CREATE TABLE IF NOT EXISTS event_links (
     event_rid INTEGER NOT NULL REFERENCES events(rid),
-    rel      TEXT NOT NULL,               -- "ticket" | "reverts" | "pr" | ...
-    target   TEXT NOT NULL,
-    PRIMARY KEY (event_rid, rel, target)
+    target_id INTEGER NOT NULL REFERENCES link_targets(id),
+    PRIMARY KEY (event_rid, target_id)
 ) WITHOUT ROWID;
+CREATE VIEW IF NOT EXISTS links AS
+    SELECT l.event_rid AS event_rid, t.rel AS rel, t.target AS target
+    FROM event_links l JOIN link_targets t ON t.id = l.target_id;
 
 -- Etiquetas de clasificación multitarea (generaliza classifications).
 CREATE TABLE IF NOT EXISTS labels (
@@ -139,8 +149,8 @@ CREATE INDEX IF NOT EXISTS idx_events_at     ON events(at_epoch);
 CREATE INDEX IF NOT EXISTS idx_events_srcref_at ON events(source_ref, at_epoch);
 CREATE INDEX IF NOT EXISTS idx_touches_ent   ON touches(entity_id, event_rid);
 CREATE INDEX IF NOT EXISTS idx_labels_task   ON labels(task, label);
-CREATE INDEX IF NOT EXISTS idx_links_rel     ON links(rel, target);
-CREATE INDEX IF NOT EXISTS idx_links_target  ON links(target);
+CREATE INDEX IF NOT EXISTS idx_event_links_target ON event_links(target_id, event_rid);
+CREATE INDEX IF NOT EXISTS idx_link_targets_target ON link_targets(target);
 
 -- `events --level` y `top level` sin filtros. v6: ya no hay `idx_events_kind`
 -- (en logs había un solo kind; los conteos por kind salen de `dim_rollups`).

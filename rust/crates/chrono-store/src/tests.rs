@@ -76,12 +76,12 @@ fn open_crea_esquema_y_version_actual_y_reabrir_no_falla() {
     let db = TempDb::new("open");
 
     let store = Store::open(db.path()).expect("open crea el índice");
-    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("6"));
+    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("7"));
     drop(store);
 
     // Reabrir un índice ya existente (mismo schema_version) no debe fallar.
     let store2 = Store::open(db.path()).expect("reabrir no falla");
-    assert_eq!(store2.meta("schema_version").unwrap().as_deref(), Some("6"));
+    assert_eq!(store2.meta("schema_version").unwrap().as_deref(), Some("7"));
 }
 
 #[test]
@@ -364,7 +364,7 @@ fn reset_borra_datos_pero_conserva_meta() {
     }
     // meta se conserva.
     assert_eq!(store.meta("git_version").unwrap().as_deref(), Some("2.45.0"));
-    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("6"));
+    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("7"));
 }
 
 #[test]
@@ -416,4 +416,33 @@ fn borrar_eventos_invalida_los_rollups_y_el_incremental_no_suma_dos_veces() {
     store.build_rollups_sync(60_000).unwrap();
     assert_eq!(total(&store), (2, 2));
     assert_eq!(store.meta("rollup_max_rowid").unwrap().as_deref(), Some("3"));
+}
+
+#[test]
+fn un_indice_v6_migra_sus_links_a_targets_internados() {
+    let db = TempDb::new("v6-links");
+    {
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO meta VALUES ('schema_version', '6');
+             CREATE TABLE links(event_rid INTEGER NOT NULL, rel TEXT NOT NULL, target TEXT NOT NULL,
+                                PRIMARY KEY (event_rid, rel, target)) WITHOUT ROWID;
+             CREATE INDEX idx_links_rel ON links(rel, target);
+             INSERT INTO links VALUES (1, 'tool_use', 'toolu_a'), (2, 'tool_use', 'toolu_a'), (2, 'file', 'x.rs'), (3, 'file', 'x.rs');",
+        )
+        .unwrap();
+    }
+    let store = Store::open(db.path()).unwrap();
+    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("7"));
+    let c = store.conn();
+    let n = |sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(n("SELECT COUNT(*) FROM link_targets"), 2);
+    assert_eq!(n("SELECT COUNT(*) FROM event_links"), 4);
+    // La vista conserva la forma de antes.
+    assert_eq!(n("SELECT COUNT(*) FROM links WHERE rel = 'tool_use' AND target = 'toolu_a'"), 2);
+    assert_eq!(n("SELECT COUNT(*) FROM links WHERE event_rid = 2"), 2);
+    drop(store);
+    // Reabrir no vuelve a migrar.
+    Store::open(db.path()).unwrap();
 }

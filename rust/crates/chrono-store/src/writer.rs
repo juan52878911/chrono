@@ -19,6 +19,7 @@ pub struct WriterCaches {
     entities: HashMap<String, i64>,
     sources: HashMap<String, i64>,
     dim_values: HashMap<(String, String), i64>,
+    link_targets: HashMap<(String, String), i64>,
     attr_keys: HashSet<(i64, String)>,
     dims: Vec<String>,
 }
@@ -158,11 +159,10 @@ impl<'a> Writer<'a> {
         }
 
         for l in &ev.links {
+            let target_id = self.link_target_id(&l.rel, &l.target)?;
             self.tx
-                .prepare_cached(
-                    "INSERT OR IGNORE INTO links(event_rid, rel, target) VALUES (?1,?2,?3)",
-                )?
-                .execute(params![rid, l.rel, l.target])?;
+                .prepare_cached("INSERT OR IGNORE INTO event_links(event_rid, target_id) VALUES (?1, ?2)")?
+                .execute(params![rid, target_id])?;
         }
 
         Ok(true)
@@ -272,6 +272,23 @@ impl<'a> Writer<'a> {
             }
         }
         Ok(r)
+    }
+
+    /// Upsert de `(rel, target)` en `link_targets`, cacheado (v7).
+    fn link_target_id(&mut self, rel: &str, target: &str) -> Result<i64> {
+        let k = (rel.to_string(), target.to_string());
+        if let Some(&id) = self.c.link_targets.get(&k) {
+            return Ok(id);
+        }
+        self.tx
+            .prepare_cached("INSERT OR IGNORE INTO link_targets(rel, target) VALUES (?1, ?2)")?
+            .execute(params![k.0, k.1])?;
+        let id: i64 = self
+            .tx
+            .prepare_cached("SELECT id FROM link_targets WHERE rel = ?1 AND target = ?2")?
+            .query_row(params![k.0, k.1], |r| r.get(0))?;
+        self.c.link_targets.insert(k, id);
+        Ok(id)
     }
 
     /// Upsert de `(clave, valor)` en `dim_values`, cacheado.

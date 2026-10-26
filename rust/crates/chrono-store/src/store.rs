@@ -67,7 +67,9 @@ impl Store {
                 )
                 .optional()?;
             let want = SCHEMA_VERSION.to_string();
-            if version.as_deref() != Some(want.as_str()) {
+            if version.as_deref() == Some("6") {
+                migrate_v6_links(&conn)?;
+            } else if version.as_deref() != Some(want.as_str()) {
                 return Err(format!(
                     "chrono-store: schema_version del índice es {:?}, se requiere {} \
                      (reindexa: borra el índice o usa Store::reset)",
@@ -272,7 +274,7 @@ impl Store {
         // Los rids primero: la selección por fichero lee `event_dims`, que se borra.
         tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS del_rids(rid INTEGER PRIMARY KEY); DELETE FROM del_rids;")?;
         tx.execute(&format!("INSERT INTO del_rids SELECT rid FROM events WHERE {selected}"), params![source_id, file])?;
-        for child in ["touches", "labels", "links", "event_dims"] {
+        for child in ["touches", "labels", "event_links", "event_dims"] {
             tx.execute(&format!("DELETE FROM {child} WHERE event_rid IN (SELECT rid FROM del_rids)"), [])?;
         }
         tx.execute("DELETE FROM events WHERE rid IN (SELECT rid FROM del_rids)", [])?;
@@ -290,7 +292,8 @@ impl Store {
         let tx = self.conn.transaction()?;
         for table in [
             "touches",
-            "links",
+            "event_links",
+            "link_targets",
             "labels",
             "event_dims",
             "dim_values",
@@ -625,6 +628,39 @@ impl Store {
         self.conn.execute_batch("VACUUM;")?;
         Ok(())
     }
+}
+
+/// v6 → v7: `links(event_rid, rel, target)` pasa a `link_targets` + `event_links`
+/// (cada target una vez, unido por entero) y `links` queda como vista. Es la
+/// única diferencia entre las dos versiones: no hace falta reindexar.
+fn migrate_v6_links(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "BEGIN IMMEDIATE;
+         ALTER TABLE links RENAME TO links_v6;
+         CREATE TABLE link_targets (
+             id     INTEGER PRIMARY KEY,
+             rel    TEXT NOT NULL,
+             target TEXT NOT NULL,
+             UNIQUE (rel, target)
+         );
+         CREATE TABLE event_links (
+             event_rid INTEGER NOT NULL REFERENCES events(rid),
+             target_id INTEGER NOT NULL REFERENCES link_targets(id),
+             PRIMARY KEY (event_rid, target_id)
+         ) WITHOUT ROWID;
+         INSERT INTO link_targets(rel, target) SELECT DISTINCT rel, target FROM links_v6 ORDER BY rel, target;
+         INSERT INTO event_links(event_rid, target_id)
+             SELECT l.event_rid, t.id FROM links_v6 l JOIN link_targets t ON t.rel = l.rel AND t.target = l.target;
+         DROP TABLE links_v6;
+         CREATE VIEW links AS
+             SELECT l.event_rid AS event_rid, t.rel AS rel, t.target AS target
+             FROM event_links l JOIN link_targets t ON t.id = l.target_id;
+         CREATE INDEX idx_event_links_target ON event_links(target_id, event_rid);
+         CREATE INDEX idx_link_targets_target ON link_targets(target);
+         UPDATE meta SET value = '7' WHERE key = 'schema_version';
+         COMMIT;",
+    )?;
+    Ok(())
 }
 
 fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
