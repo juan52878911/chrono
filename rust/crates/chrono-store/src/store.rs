@@ -236,6 +236,31 @@ impl Store {
         Ok(())
     }
 
+    /// Segunda pasada de `entity_via`, al acabar una ingesta: los eventos que
+    /// siguen en `unknown` toman la entidad del primer evento con su mismo link
+    /// `rel` (el resultado que se leyó antes que su uso, p. ej. en otro fichero
+    /// de la glob). Solo los que aún no cuentan los rollups (`rid` mayor que su
+    /// watermark): cambiar la entidad de algo ya agregado descuadraría
+    /// `dim_rollups`. Devuelve cuántos se arreglaron.
+    pub fn repair_entity_via(&self, rel: &str) -> Result<usize> {
+        let after: i64 = self.meta("rollup_max_rowid")?.and_then(|v| v.parse().ok()).unwrap_or(0);
+        let linked = "SELECT t2.entity_id FROM event_links el
+                      JOIN link_targets lt ON lt.id = el.target_id AND lt.rel = ?1
+                      JOIN event_links el2 ON el2.target_id = el.target_id AND el2.event_rid <> el.event_rid
+                      JOIN touches t2 ON t2.event_rid = el2.event_rid
+                      JOIN entities en2 ON en2.id = t2.entity_id AND en2.key <> 'unknown'
+                      WHERE el.event_rid = touches.event_rid
+                      ORDER BY el2.event_rid LIMIT 1";
+        Ok(self.conn.execute(
+            &format!(
+                "UPDATE touches SET entity_id = ({linked})
+                 WHERE event_rid > ?2 AND entity_id = (SELECT id FROM entities WHERE key = 'unknown')
+                   AND EXISTS ({linked})"
+            ),
+            params![rel, after],
+        )?)
+    }
+
     /// Dims con que se ingirió la fuente (ordenadas; vacío si ninguna).
     pub fn source_dims(&self, source_id: &str) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(

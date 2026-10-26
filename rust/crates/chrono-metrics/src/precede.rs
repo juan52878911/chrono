@@ -50,7 +50,8 @@ pub struct Common {
     pub episodes: i64,
     /// Frecuencia base (P-MSR-3): fracción de las ventanas del mismo tamaño en
     /// el periodo que contienen la plantilla (con cualquier nivel), desde los
-    /// `rollups` de 60 s. `None` si la plantilla no está en los rollups.
+    /// `rollups` de 60 s. `None` si la plantilla no está en los rollups o con `join`
+    /// (la base de todo el índice no es la de dentro de una clave).
     pub base_rate: Option<f64>,
     /// `base_rate × episodios`: en cuántos estaría por azar.
     pub expected: Option<f64>,
@@ -276,7 +277,9 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
     }
     let candidates: Vec<((String, String), i64)> = common.into_iter().filter(|(_, n)| *n >= 2 || episodes_total == 1).collect();
     let templates: Vec<&str> = candidates.iter().map(|((_, t), _)| t.as_str()).collect();
-    let rates = base_rates(conn, &templates, o.window_ms, o.since_epoch, o.anchor.until_epoch)?;
+    // Con clave, la base temporal de todo el índice no es la de dentro de una
+    // sesión o traza: sin frecuencia base por clave, ni esperado ni lift.
+    let rates = if join.is_some() { HashMap::new() } else { base_rates(conn, &templates, o.window_ms, o.since_epoch, o.anchor.until_epoch)? };
     let total = episodes_total as f64;
     let mut commons: Vec<Common> = candidates
         .into_iter()
@@ -312,6 +315,16 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
 fn base_rates(conn: &Connection, templates: &[&str], window_ms: i64, since: i64, until: i64) -> Result<HashMap<String, f64>> {
     let mut out = HashMap::new();
     if templates.is_empty() {
+        return Ok(out);
+    }
+    // Rollups atrasados (un `tail`, eventos borrados) darían una base baja y un
+    // lift inflado: sin ellos al día, no hay frecuencia base.
+    let fresh: bool = conn.query_row(
+        "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'rollup_max_rowid'), -1) >= (SELECT COALESCE(MAX(rid), 0) FROM events)",
+        [],
+        |r| r.get(0),
+    )?;
+    if !fresh {
         return Ok(out);
     }
     let bucket: i64 = conn
@@ -445,16 +458,17 @@ mod tests {
         let (path, mut store) = temp_store("lift");
         {
             let mut w = store.writer().unwrap();
-            // 30 caídas cada hora; 20 min antes de cada una, un `disk full` (raro
-            // fuera de ahí); y un `heartbeat lost` cada 5 min todo el periodo (sale
-            // antes de casi todo, por azar).
+            // 30 caídas cada hora; 20 s antes de cada una, un aviso `disk full` (raro
+            // fuera de ahí); y un ERROR `heartbeat lost` cada 5 min todo el periodo
+            // (sale antes de casi todo, por azar). El ubicuo es MÁS grave: por
+            // severidad saldría primero; solo el exceso sobre el azar lo baja.
             for i in 0..30i64 {
                 let t = 3600 * (i + 1);
                 w.add_event(&ev(&format!("a{i}"), t, "FATAL", "db", "FATAL: shutting down")).unwrap();
-                w.add_event(&ev(&format!("d{i}"), t - 20, "ERROR", "disk", "ERROR: disk full")).unwrap();
+                w.add_event(&ev(&format!("d{i}"), t - 20, "WARNING", "disk", "WARNING: disk full")).unwrap();
             }
             for k in 0..(31 * 12) {
-                w.add_event(&ev(&format!("h{k}"), 300 * k + 7, "WARNING", "net", "WARNING: heartbeat lost")).unwrap();
+                w.add_event(&ev(&format!("h{k}"), 300 * k + 7, "ERROR", "net", "ERROR: heartbeat lost")).unwrap();
             }
             w.commit().unwrap();
         }

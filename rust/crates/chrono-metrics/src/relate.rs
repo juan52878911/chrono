@@ -219,10 +219,27 @@ pub struct Gaps {
 /// la unidad es el valor de `U` (p. ej. `sessionId`): una sesión cuenta como
 /// cubierta si ALGUNA de sus claves `K` aparece en `to` («sesiones sin
 /// commit»). Exacto: cuenta todas las unidades; `limit` solo acota la muestra.
+/// `since` acota el lado `from`; en `to` vale cualquier momento (un resultado
+/// anterior a la ventana también cubre). Un evento de `from` sin valor de `by`
+/// no es unidad.
 pub fn gaps(conn: &Connection, from: &EventScope, to: &EventScope, via: &str, by: Option<&str>, since_epoch: i64, limit: usize) -> Result<Gaps> {
     check_key(via)?;
     if let Some(b) = by {
         check_key(b)?;
+    }
+    // Una fuente que no existe daría «todo es hueco» sin avisar.
+    for (side, sc) in [("from", from), ("to", to)] {
+        if let Some(src) = sc.source.filter(|s| !s.is_empty()) {
+            let like = if src.contains(':') { format!("{src}%") } else { format!("{src}:%") };
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM sources WHERE id LIKE ?1 OR json_extract(manifest_json, '$.alias') = ?2",
+                params![like, src],
+                |r| r.get(0),
+            )?;
+            if n == 0 {
+                return Err(format!("gaps: --{side}: ninguna fuente se llama {src:?} (mira `chrono sources`)").into());
+            }
+        }
     }
     let (ff, fp) = from.sql(2);
     let (tf, tp) = to.sql(2 + fp.len());
@@ -239,7 +256,7 @@ pub fn gaps(conn: &Connection, from: &EventScope, to: &EventScope, via: &str, by
                     WHERE (?1 = 0 OR e.at_epoch >= ?1) {ff}),
               t AS (SELECT DISTINCT kv.value AS value
                     FROM events e JOIN ({vals}) kv ON kv.rid = e.rid
-                    WHERE (?1 = 0 OR e.at_epoch >= ?1) {tf}),
+                    WHERE 1 {tf}),
               cov AS (SELECT DISTINCT f.unit FROM f JOIN t ON t.value = f.value)"
     );
     let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&since_epoch];

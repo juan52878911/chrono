@@ -597,9 +597,27 @@ pub fn tail(
 fn tail_ingest(store: &mut Store, registry: &Registry, index_root: &Path) -> Result<()> {
     let now = now_iso();
     let sources = store.list_sources()?;
+    let cfg = chrono_classify_rules::load(index_root);
     for s in &sources {
         let Some(adapter) = registry.by_kind(&s.kind) else { continue };
-        if let Some(gs) = GlobSource::from_row(&s.id, &s.manifest_json) {
+        // Con otras dims o relaciones que las de la config, solo `sync` puede
+        // releer la fuente entera: `tail` escribiría las nuevas en `source_dims`
+        // y el `sync` siguiente ya no vería el cambio (eventos viejos sin ellas).
+        let glob = GlobSource::from_row(&s.id, &s.manifest_json);
+        let preset = manifest_value(&s.manifest_json, "preset");
+        let ctx = match &glob {
+            Some(gs) => IngestCtx { options_keys: gs.options_keys(), preset: gs.preset.as_deref(), group: Some((&s.id, "")) },
+            None => IngestCtx { preset: preset.as_deref(), ..Default::default() },
+        };
+        let want = ingest_dims(adapter, &source_config(&cfg, Path::new(&s.path), &ctx), glob.is_some(), &relation_sides(&cfg, adapter, Path::new(&s.path), &ctx));
+        if store.source_dims(&s.id)? != want && store.source_has_events(&s.id)? {
+            eprintln!("{}", t(
+                format!("  dims or relations of {} changed — skipped; run `chrono sync` to reindex it", s.id),
+                format!("  cambiaron las dims o relaciones de {} — se omite; `chrono sync` la reindexa", s.id),
+            ));
+            continue;
+        }
+        if let Some(gs) = glob {
             let r = gs.sync(adapter, store, index_root)?;
             store.upsert_source(&s.id, &s.kind, &s.path, &r.watermark, &gs.manifest(r.files_total), &now)?;
             continue;
@@ -617,8 +635,6 @@ fn tail_ingest(store: &mut Store, registry: &Registry, index_root: &Path) -> Res
         } else {
             Some(Watermark { kind: s.kind.clone(), value: s.watermark.clone() })
         };
-        let preset = manifest_value(&s.manifest_json, "preset");
-        let ctx = IngestCtx { preset: preset.as_deref(), ..Default::default() };
         let new_wm = match ingest_source(adapter, &path, wm, store, index_root, &ctx) {
             Ok((_n, new_wm, _)) => new_wm,
             Err(IngestError::Diverged) => {
@@ -863,6 +879,11 @@ fn ingest_source(
         }
     }
 
+    if let Some(rel) = &entity_via {
+        // Un resultado que entró antes que su uso (otro fichero de la glob, una
+        // sesión reanudada) se quedó en `unknown`: segunda pasada en el índice.
+        store.repair_entity_via(rel)?;
+    }
     if redacted > 0 {
         // Acumulado del índice (no por fuente ni por sync): `sources` lo enseña.
         let prev: usize = store.meta("redacted_total")?.and_then(|v| v.parse().ok()).unwrap_or(0);
