@@ -68,10 +68,19 @@ pub fn materialize(db: &Path, index_root: &Path, name: &str, spec: &CommandSpec)
     let mut out = std::fs::OpenOptions::new().create(true).append(true).open(&cache)?;
     let mut keys_out = std::fs::OpenOptions::new().create(true).append(true).open(&keys_path)?;
     let mut added = 0usize;
+    let redact = spec.options.get("redact").map(String::as_str) != Some("off");
     for rec in &records {
         let line = serde_json::to_string(rec)?;
         let key = id_field.and_then(|f| lookup(rec, f)).unwrap_or_else(|| format!("h:{:016x}", fnv1a64(line.as_bytes())));
         if seen.insert(key.clone()) {
+            // El caché es un fichero en disco: los secretos no llegan ni a él.
+            let line = if redact {
+                let mut r = rec.clone();
+                redact_json(&mut r);
+                serde_json::to_string(&r)?
+            } else {
+                line
+            };
             writeln!(out, "{line}")?;
             writeln!(keys_out, "{key}")?;
             added += 1;
@@ -188,9 +197,49 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     h
 }
 
+/// Redacta un JSON en su sitio: el valor entero bajo una clave sensible
+/// (`password`, `token`…) y, en el resto de textos, lo que tenga forma de
+/// secreto. Devuelve cuántos quitó. En JSON compacto no hay espacios, así que
+/// `chrono_core::redact` sobre la línea entera no vería `"password":"…"`.
+pub(crate) fn redact_json(v: &mut Value) -> usize {
+    match v {
+        Value::String(s) => {
+            let (r, n) = chrono_core::redact(s);
+            if n > 0 {
+                *s = r;
+            }
+            n
+        }
+        Value::Array(a) => a.iter_mut().map(redact_json).sum(),
+        Value::Object(o) => o
+            .iter_mut()
+            .map(|(k, x)| match x {
+                Value::String(s) if chrono_core::redact::sensitive_key(k) && chrono_core::redact::sensitive_value(s) => {
+                    *s = chrono_core::redact::MARK.to_string();
+                    1
+                }
+                _ => redact_json(x),
+            })
+            .sum(),
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redacta_json_por_clave_y_por_forma() {
+        let mut v = serde_json::json!({"user": "ana", "password": "hunter2hunter2", "n": {"api_token": "abc123abc123"},
+            "msg": "dsn postgres://app:s3cr3tpass@db/x", "count": 3, "tokens": "12345678"});
+        assert_eq!(redact_json(&mut v), 3);
+        assert_eq!(v["password"], "<SECRET>");
+        assert_eq!(v["n"]["api_token"], "<SECRET>");
+        assert_eq!(v["msg"], "dsn postgres://app:<SECRET>@db/x");
+        assert_eq!(v["user"], "ana");
+        assert_eq!(v["tokens"], "12345678");
+    }
 
     #[test]
     fn registros_de_array_ruta_objeto_y_ndjson() {

@@ -1025,7 +1025,13 @@ mod tests {
         let other = std::fs::OpenOptions::new().write(true).open(format!("{}.lock", db.display())).unwrap();
         assert!(matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
         drop(held);
-        assert!(other.try_lock().is_ok());
+        // Otros tests del proceso lanzan comandos en paralelo: entre su `fork` y su
+        // `exec` el hijo hereda el descriptor y el cerrojo dura un instante más.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while other.try_lock().is_err() {
+            assert!(std::time::Instant::now() < deadline, "el cerrojo no se soltó");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let _ = std::fs::remove_file(format!("{}.lock", db.display()));
     }
 }

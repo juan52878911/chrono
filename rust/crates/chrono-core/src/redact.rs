@@ -99,6 +99,16 @@ fn contains_ci(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
 }
 
+/// ¿El nombre de clave (de un atributo o un campo JSON) delata un secreto?
+pub fn sensitive_key(k: &str) -> bool {
+    KEYS.iter().any(|s| contains_ci(k.as_bytes(), s.as_bytes()))
+}
+
+/// Valor de una clave sensible que sí se redacta: largo y no solo cifras.
+pub fn sensitive_value(v: &str) -> bool {
+    v.len() >= 8 && v != MARK && !v.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// Redacta un evento en su sitio: título, cuerpo, atributos (entero si la clave
 /// es sensible) y destinos de los enlaces. Devuelve cuántos secretos quitó.
 pub fn redact_event(ev: &mut crate::Event) -> usize {
@@ -117,11 +127,7 @@ pub fn redact_event(ev: &mut crate::Event) -> usize {
         n += fix(&mut l.target);
     }
     for (k, v) in &mut ev.attrs {
-        if v.len() >= 8
-            && v != MARK
-            && KEYS.iter().any(|s| contains_ci(k.as_bytes(), s.as_bytes()))
-            && !v.bytes().all(|b| b.is_ascii_digit())
-        {
+        if sensitive_value(v) && sensitive_key(k) {
             *v = MARK.to_string();
             n += 1;
         } else {

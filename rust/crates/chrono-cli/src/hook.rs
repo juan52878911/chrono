@@ -595,6 +595,9 @@ fn ingest(root: &Path, name: &str, rows: &[Value]) -> R<String> {
         let line = r.to_string();
         let k = format!("{:016x}", chrono_core_hash(&line));
         if seen.insert(k.clone()) {
+            // Lo que devolvió el MCP queda en disco: sin secretos (como el caché de `cmd:`).
+            let mut red = r.clone();
+            let line = if crate::command::redact_json(&mut red) > 0 { red.to_string() } else { line };
             writeln!(out, "{line}").map_err(|e| e.to_string())?;
             writeln!(keys, "{k}").map_err(|e| e.to_string())?;
         }
@@ -1315,6 +1318,65 @@ fn is_not_a_count(word: &str, next: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encuentra_la_lista_de_registros_mas_larga() {
+        let v = json!({"meta": {"n": 2}, "data": {"result": [{"a": 1}, {"a": 2}, {"a": 3}]}, "tags": [{"x": 1}]});
+        assert_eq!(find_records(&v).len(), 3);
+        // Una lista de escalares no son registros.
+        assert!(find_records(&json!({"ids": [1, 2, 3, 4]})).is_empty());
+    }
+
+    #[test]
+    fn resumen_con_cifras_exactas_por_nivel() {
+        let rows: Vec<Value> = (0..10)
+            .map(|i| {
+                let level = if i < 7 { "ERROR" } else if i < 9 { "INFO" } else { "" };
+                let msg = if i < 7 { format!("timeout after {i}ms") } else { "FATAL: disk full".to_string() };
+                json!({"ts": 1_760_000_000_000i64 + i, "level": level, "service": if i % 2 == 0 { "api" } else { "db" }, "msg": msg})
+            })
+            .collect();
+        let s = summary(&rows, "cabecera", Some("jsonl:x"), &[], "", &["service"]);
+        assert!(s.contains("service: api=5, db=5"), "{s}");
+        assert!(s.contains("ERROR: 7× timeout after <NUM>ms"), "{s}");
+        // INFO no se lista; la línea sin nivel se dice aparte, con lo que dice su texto.
+        assert!(!s.contains("INFO:"), "{s}");
+        assert!(s.contains("(1 líneas sin nivel de la fuente, aunque su texto dice FATAL=1"), "{s}");
+        assert!(s.contains("Las 10 filas están en chrono (source=jsonl:x)"), "{s}");
+    }
+
+    #[test]
+    fn solo_intercepta_lecturas_completas_de_ficheros_de_datos() {
+        let dir = std::env::temp_dir().join(format!("chrono-hook-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("app.log");
+        std::fs::write(&f, "a\nb\n").unwrap();
+        let rc = json!({});
+        let p = f.to_string_lossy().to_string();
+        assert_eq!(data_file(&rc, &json!({"file_path": p})).map(|(_, n)| n), Some(4));
+        assert!(data_file(&rc, &json!({"file_path": p, "offset": 10})).is_none());
+        assert!(data_file(&rc, &json!({"file_path": p, "limit": 5})).is_none());
+        let md = dir.join("notas.md");
+        std::fs::write(&md, "x").unwrap();
+        assert!(data_file(&rc, &json!({"file_path": md.to_string_lossy()})).is_none());
+        // Con extensiones propias en la config.
+        assert!(data_file(&json!({"extensions": [".md"]}), &json!({"file_path": md.to_string_lossy()})).is_some());
+        // Por debajo de deny_bytes no se niega la lectura.
+        assert!(read_deny(&json!({"read": {}}), &json!({"file_path": p}), &dir).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn salidas_pequenas_de_mcp_pasan_sin_tocar() {
+        let dir = std::env::temp_dir().join(format!("chrono-hook-rec-{}", std::process::id()));
+        let small = json!([{"type": "text", "text": "[{\"a\":1},{\"a\":2}]"}]);
+        assert!(adapter_records(&json!({}), "mcp__x__q", Some(&small), &dir).unwrap().is_none());
+        // Grande pero con pocos registros: tampoco (min_records).
+        let pad = "x".repeat(40_000);
+        let few = json!([{"type": "text", "text": format!("[{{\"msg\":\"{pad}\"}}]")}]);
+        assert!(adapter_records(&json!({}), "mcp__x__q", Some(&few), &dir).unwrap().is_none());
+        assert!(!dir.exists(), "no debe escribir nada si no intercepta");
+    }
 
     #[test]
     fn verificador_marca_solo_conteos_sin_respaldo() {
