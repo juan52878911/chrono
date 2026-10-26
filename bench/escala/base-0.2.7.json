@@ -1,0 +1,106 @@
+{
+  "version": "chrono 0.2.7",
+  "n": 1000000,
+  "binario_bytes": 2227776,
+  "ingesta": {
+    "s": 25.45,
+    "rss_mb": 618.1,
+    "db_bytes": 584798208,
+    "bytes_por_evento": 584.8
+  },
+  "plantillas": 68,
+  "dbstat_mb": {
+    "events": 266.2,
+    "touches": 32.2,
+    "sqlite_autoindex_touches_1": 30.1,
+    "idx_touches_ent": 29.9,
+    "sqlite_autoindex_events_1": 27.8,
+    "idx_events_level": 22.9,
+    "idx_events_kind": 21.7,
+    "events_fts_data": 20.0,
+    "idx_events_actor": 18.8,
+    "idx_events_srcref_at": 18.3,
+    "idx_events_at": 17.2,
+    "idx_events_sh1": 13.0
+  },
+  "sync_noop_s": 0.004,
+  "cli": {
+    "informe": {
+      "s": 8.816,
+      "rss_mb": 587.7,
+      "bytes": 5007
+    },
+    "top entity": {
+      "s": 0.409,
+      "rss_mb": 140.4,
+      "bytes": 1644
+    },
+    "top attr:host": {
+      "s": 1.31,
+      "rss_mb": 612.8,
+      "bytes": 860
+    },
+    "top level": {
+      "s": 0.078,
+      "rss_mb": 63.1,
+      "bytes": 576
+    },
+    "patterns --level ERROR,FATAL": {
+      "s": 0.421,
+      "rss_mb": 439.9,
+      "bytes": 2601
+    },
+    "patterns --entity svc-3": {
+      "s": 1.432,
+      "rss_mb": 460.4,
+      "bytes": 2730
+    },
+    "patterns": {
+      "s": 0.009,
+      "rss_mb": 10.5,
+      "bytes": 3641
+    },
+    "timeline --bucket 1h": {
+      "s": 0.009,
+      "rss_mb": 11.1,
+      "bytes": 3763
+    },
+    "timeline --bucket 1h --by level": {
+      "s": 0.563,
+      "rss_mb": 493.2,
+      "bytes": 14314
+    },
+    "precede --grep refused --level ERROR": {
+      "s": 0.244,
+      "rss_mb": 453.5,
+      "bytes": 50077
+    },
+    "precede --level FATAL": {
+      "s": 0.31,
+      "rss_mb": 453.7,
+      "bytes": 1342
+    },
+    "events --level FATAL --limit 50": {
+      "s": 0.288,
+      "rss_mb": 453.0,
+      "bytes": 21244
+    },
+    "search refused": {
+      "s": 0.06,
+      "rss_mb": 23.1,
+      "bytes": 4215
+    }
+  },
+  "mcp": {
+    "tools": 23,
+    "esquemas_bytes": 18958,
+    "respuestas_bytes": {
+      "informe {}": 5006,
+      "top {\"dim\": \"entity\"}": 417,
+      "events {\"level\": \"ERROR\"}": 28996,
+      "precede {\"level\": \"ERROR\", \"grep\": \"refused\"}": 20470,
+      "patterns {\"level\": \"ERROR,FATAL\"}": 1093,
+      "timeline {\"by\": \"level\"}": 3876
+    }
+  }
+}
