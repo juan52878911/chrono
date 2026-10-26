@@ -157,14 +157,16 @@ fn cambiar_la_relacion_reindexa_y_sin_cambios_no() {
     env.ok(&["add", &path_s(&data), "--as", "dir"]);
     assert_eq!(env.links("prueba"), ["001", "002"]);
     let events = env.sql("SELECT COUNT(*) FROM events");
-
+    // Los rids se reutilizan al reindexar: lo que lo delata es el aviso.
     let quiet = env.ok(&["sync"]);
+    assert!(!quiet.contains("reindexing"), "un sync sin cambios no reindexa: {quiet}");
     assert_eq!(env.sql("SELECT COUNT(*) FROM events"), events);
     assert_eq!(env.links("prueba"), ["001", "002"], "{quiet}");
 
     env.set_config(&cfg("(resultado)"));
     let out = env.ok(&["sync"]);
     assert_eq!(env.links("prueba"), ["resultado"], "{out}");
+    assert!(out.contains("reindexing"), "cambiar la relación sí reindexa: {out}");
     assert_eq!(env.sql("SELECT COUNT(*) FROM events"), events);
     // Y de nuevo sin cambios: estable.
     env.ok(&["sync"]);
@@ -217,4 +219,41 @@ fn entity_via_con_uso_y_resultado_en_ficheros_distintos() {
     write(&d, "res.jsonl", &format!("{RESULT_LINE}\n"));
     env.ok(&["sync"]);
     assert_eq!(tool_result_entities(&env), ["Bash"]);
+}
+
+#[test]
+fn entity_via_con_el_resultado_leido_antes_que_su_uso() {
+    // La glob lee los ficheros por orden: `a-res` antes que `b-uso`. El resultado
+    // entra sin uso en el índice y la segunda pasada le da la tool.
+    let env = Env::new("via-antes", r#"{"version":2}"#);
+    let d = env.dir().join("datos");
+    write(&d, "a-res.jsonl", &format!("{RESULT_LINE}\n"));
+    write(&d, "b-uso.jsonl", &format!("{USE_LINE}\n"));
+    let pat = path_s(&d.join("*.jsonl"));
+    env.ok(&["add", &pat, "--as", "jsonl", "--preset", "claude-sessions"]);
+    assert_eq!(tool_result_entities(&env), ["Bash"]);
+}
+
+#[test]
+fn tail_no_escribe_una_relacion_nueva_sin_reindexar() {
+    let env = Env::new("tail", r#"{"version":2}"#);
+    let data = env.dir().join("datos");
+    write(&data, "prueba-001.txt", "a");
+    env.ok(&["add", &path_s(&data), "--as", "dir"]);
+    env.set_config(r#"{"version":2,"relations":{"prueba":[{"source":"dir","field":"file","pattern":"prueba-(\\d+)"}]}}"#);
+    // `tail` no termina: se lanza, se le da un ciclo y se mata.
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_chrono"))
+        .args(["tail", "--interval", "1s", "--db", &env.db()])
+        .current_dir(env.dir())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    write(&data, "prueba-002.txt", "b");
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    let _ = child.kill();
+    let _ = child.wait();
+    // El sync siguiente ve el cambio y reindexa: las dos pruebas tienen su clave.
+    env.ok(&["sync"]);
+    assert_eq!(env.links("prueba"), ["001", "002"]);
 }

@@ -313,6 +313,9 @@ fn gaps_errores_de_uso() {
     assert!(t.contains("foo"), "{t}");
     let t = env.fail(&["gaps", "--from", "pruebas", "--to", "resultados foo=1", "--via", "prueba"]);
     assert!(t.contains("foo") && t.contains("--to"), "{t}");
+    // Una fuente que no existe (un typo) no se lee como «todo es hueco».
+    let t = env.fail(&["gaps", "--from", "pruebas", "--to", "resultadoz", "--via", "prueba"]);
+    assert!(t.contains("resultadoz"), "{t}");
     // Dos fuentes en un lado.
     let t = env.fail(&["gaps", "--from", "pruebas resultados", "--to", "resultados", "--via", "prueba"]);
     assert!(t.contains("one source"), "{t}");
@@ -609,11 +612,10 @@ fn comodines_env(tag: &str) -> Env {
 #[test]
 fn join_prefijo_el_guion_bajo_es_literal() {
     let env = comodines_env("like-us");
-    // `v_*` debería casar `v_1` y no `vX2` (en LIKE, `_` es «un carácter»). Con el
-    // `=` exacto no hay duda: `k=v_1` solo trae `v_1`.
+    // `v_*` casa `v_1` y no `vX2`: el prefijo es literal (con LIKE, `_` sería «un carácter»).
     assert_eq!(titles(&env.q(&["events", "--join", "k=v_1"])), ["v_1"]);
     let v = env.q(&["events", "--join", "k=v_*"]);
-    assert!(!titles(&v).contains(&"vX2".to_string()), "el `_` del prefijo no debe ser un comodín: {v}");
+    assert_eq!(titles(&v), ["v_1"], "el `_` del prefijo no es un comodín: {v}");
 }
 
 #[test]

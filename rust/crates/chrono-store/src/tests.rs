@@ -442,6 +442,9 @@ fn un_indice_v6_migra_sus_links_a_targets_internados() {
     // La vista conserva la forma de antes.
     assert_eq!(n("SELECT COUNT(*) FROM links WHERE rel = 'tool_use' AND target = 'toolu_a'"), 2);
     assert_eq!(n("SELECT COUNT(*) FROM links WHERE event_rid = 2"), 2);
+    assert_eq!(n("SELECT COUNT(*) FROM sqlite_master WHERE name = 'links_v6'"), 0, "la tabla vieja no queda");
+    assert_eq!(n("SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'links'"), 1);
+    assert_eq!(n("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('idx_event_links_target', 'idx_link_targets_target')"), 2);
     drop(store);
     // Reabrir no vuelve a migrar.
     Store::open(db.path()).unwrap();

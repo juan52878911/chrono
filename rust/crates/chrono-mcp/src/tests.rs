@@ -166,7 +166,7 @@ fn ping_responde_objeto_vacio() {
 }
 
 #[test]
-fn tools_list_incluye_los_dieciocho_tools() {
+fn tools_list_incluye_todos_los_tools() {
     let (_db, state) = state_with_fixture();
     let resp = call(&state, 3, "tools/list", json!({}));
     let tools = resp["result"]["tools"]
@@ -304,4 +304,52 @@ fn initialize_trae_instrucciones_de_cuando_usar_chrono() {
     let resp = call(&state, 31, "initialize", json!({}));
     let text = resp["result"]["instructions"].as_str().unwrap();
     assert!(text.contains("sources") && text.contains("level"), "{text}");
+}
+
+/// Pruebas P1-P3 en una fuente y el resultado de P1 en otra, unidos por el link
+/// `prueba`; las pruebas son ERROR separadas una hora (tres episodios).
+fn relation_state() -> (TempDb, State) {
+    let db = TempDb::new("relaciones");
+    let mut store = Store::open(db.path()).unwrap();
+    let mk = |id: &str, src: &str, secs: i64, level: &str, key: &str| Event {
+        id: id.into(),
+        source_id: src.into(),
+        kind: "log".into(),
+        at_epoch: secs * 1000,
+        level: level.into(),
+        title: format!("{id} falla"),
+        links: vec![chrono_core::Link { rel: "prueba".into(), target: key.into() }],
+        ..Default::default()
+    };
+    {
+        let mut w = store.writer().unwrap();
+        for (i, k) in ["P1", "P2", "P3"].iter().enumerate() {
+            w.add_event(&mk(&format!("p{i}"), "jsonl:/pruebas", 3600 * (i as i64 + 1), "ERROR", k)).unwrap();
+        }
+        w.add_event(&mk("r0", "jsonl:/resultados", 3700, "", "P1")).unwrap();
+        w.commit().unwrap();
+    }
+    (db, State::with_store(Some(store)))
+}
+
+fn tool_json(state: &State, name: &str, args: Value) -> Value {
+    let resp = call(state, 7, "tools/call", json!({"name": name, "arguments": args}));
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or_else(|| panic!("{resp}"));
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("{name}: {e}: {text}"))
+}
+
+#[test]
+fn tools_call_gaps_correlate_via_y_precede_con_cifras_de_todo() {
+    let (_db, state) = relation_state();
+    let g = tool_json(&state, "gaps", json!({"from": "jsonl:/pruebas", "to": "jsonl:/resultados", "via": "prueba", "limit": 1}));
+    assert_eq!((g["units"].as_i64(), g["covered"].as_i64(), g["missing"].as_i64()), (Some(3), Some(1), Some(2)), "{g}");
+    assert_eq!(g["missing_sample"].as_array().unwrap().len(), 1, "limit solo acota la muestra: {g}");
+    let c = tool_json(&state, "correlate", json!({"id": "p0", "via": "prueba"}));
+    assert_eq!(c["related_total"], 1, "{c}");
+    assert_eq!(c["related"][0]["id"], "r0", "{c}");
+    let p = tool_json(&state, "precede", json!({"level": "ERROR", "limit": 1, "format": "json"}));
+    assert_eq!((p["episodes_total"].as_i64(), p["episodes_returned"].as_i64()), (Some(3), Some(1)), "{p}");
+    let e = tool_json(&state, "events", json!({"join": "prueba=P1", "format": "json"}));
+    let ids: Vec<&str> = e["events"].as_array().unwrap().iter().map(|x| x["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["p0", "r0"], "{e}");
 }
