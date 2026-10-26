@@ -43,7 +43,8 @@ cárgalo (sección 1) o, si no puedes, dilo y usa la otra herramienta solo para 
 - Fuera de un repo, o para no mezclar: `--db /tmp/analisis/index.db` en cada comando.
 - Si los campos no se detectan solos, en `options` del comando (o `source_options`):
   `time_field`, `message_field`, `level_field`, `entity_field` (el servicio), `kind`, `id_field`,
-  `links` (`commit=sha`), `explode`, `level_map` (`true=ERROR`), `where`, `attrs`. `chrono config check`
+  `links` (`commit=sha`), `explode`, `level_map` (`true=ERROR`), `where`, `attrs`, `dims` (attrs por los
+  que se agrupa o filtra a menudo, p. ej. `host,container`: indexadas). `chrono config check`
   valida `.chrono/config.json` y dice qué clave falla y por qué.
 
 ## 2. Preguntar

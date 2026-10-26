@@ -182,6 +182,11 @@ Los secretos (tokens de proveedores, JWT, `Bearer …`, contraseñas en URLs, va
 privadas) se cambian por `<SECRET>` antes de entrar al índice; `sources` dice cuántos. Para guardar una fuente tal
 cual: `"source_options": {"app.log": {"redact": "off"}}`.
 
+Los atributos por los que más se agrupa o filtra (`host`, `container`, `cwd`…) se pueden declarar como dims:
+`"source_options": {"app.log": {"dims": "host,container"}}`. Cada valor se guarda una vez y queda indexado, así
+`top attr:host` y `--attr host:x` no recorren los eventos. Cambiar las dims de una fuente la reindexa en el
+siguiente `sync`.
+
 ---
 
 ## Idioma

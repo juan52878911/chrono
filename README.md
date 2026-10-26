@@ -209,6 +209,10 @@ Secrets (provider tokens, JWTs, `Bearer …`, passwords in URLs, `password=…`-
 replaced by `<SECRET>` before anything reaches the index; `sources` reports how many. To keep a source verbatim:
 `"source_options": {"app.log": {"redact": "off"}}`.
 
+Attributes you rank or filter by often (`host`, `container`, `cwd`…) can be declared as dims:
+`"source_options": {"app.log": {"dims": "host,container"}}`. Each value is stored once and indexed, so
+`top attr:host` and `--attr host:x` don't scan the events. Changing a source's dims reindexes it on the next `sync`.
+
 ---
 
 ## Language
