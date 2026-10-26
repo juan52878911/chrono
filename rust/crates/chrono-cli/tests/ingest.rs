@@ -112,3 +112,40 @@ fn activar_entity_via_a_mano_reindexa_la_fuente() {
     assert!(!out.contains("reindexing"), "{out}");
     assert_eq!(env.sql("SELECT COUNT(*) FROM source_dims WHERE key LIKE 'opt:%'"), ["1"]);
 }
+
+/// `tail` durante un ciclo y se mata (no termina solo).
+fn tail_once(env: &Env, then: impl FnOnce()) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_chrono"))
+        .args(["tail", "--interval", "1s", "--db", &env.db()])
+        .current_dir(env.dir())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    then();
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn tail_deja_rollups_plantillas_y_busqueda_como_un_sync() {
+    let env = Env::new("tail", r#"{"version":2}"#);
+    let log = env.dir().join("app.jsonl");
+    let line = |i: u32, msg: &str| format!(r#"{{"ts":"2024-01-01T00:00:{i:02}Z","level":"ERROR","msg":"{msg} {i}"}}"#) + "\n";
+    write(env.dir(), "app.jsonl", &line(1, "fallo de disco"));
+    env.ok(&["add", &path_s(&log)]);
+    tail_once(&env, || {
+        let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        std::io::Write::write_all(&mut f, (line(2, "fallo de disco") + &line(3, "pinchazo")).as_bytes()).unwrap();
+    });
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["3"]);
+    let max = env.sql("SELECT MAX(rid) FROM events");
+    assert_eq!(env.sql("SELECT value FROM meta WHERE key = 'rollup_max_rowid'"), max, "rollups al día");
+    assert_eq!(env.sql("SELECT value FROM meta WHERE key = 'fts_max_rowid'"), max, "búsqueda al día");
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events_fts WHERE events_fts MATCH 'pinchazo'"), ["1"]);
+    assert_eq!(env.sql("SELECT SUM(count) FROM dim_rollups"), ["3"]);
+    let pats = env.ok(&["patterns"]);
+    assert!(pats.contains("pinchazo"), "{pats}");
+}

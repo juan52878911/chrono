@@ -190,7 +190,7 @@ pub fn init(start: &Path, symbols: bool, as_kind: Option<&str>, db_override: Opt
 
     eprintln!("{}", t("  building search index…", "  construyendo índice de búsqueda…"));
     store.rebuild_fts()?;
-    finalize(&root, &store, &git_path_if_git(src.kind(), &ingest_path), false)?;
+    finalize(&root, &store, &git_path_if_git(src.kind(), &ingest_path), false, false)?;
     write_meta(&store, src, &root)?;
 
     if symbols && src.kind() == "git" {
@@ -271,7 +271,7 @@ pub fn add(db: &Path, start: &Path, symbols: bool, as_kind: Option<&str>, preset
     }
     // Misma lógica para rollups: re-ingesta → reconstrucción completa (los
     // conteos de la fuente borrada ya no valen); fuente nueva → solo el delta.
-    finalize(&index_root, &store, &git_path_if_git(src.kind(), &ingest_path), !already)?;
+    finalize(&index_root, &store, &git_path_if_git(src.kind(), &ingest_path), !already, false)?;
 
     if symbols && src.kind() == "git" {
         ingest_symbols(&ingest_path, &store, None)?;
@@ -339,7 +339,7 @@ pub fn add_glob(db: &Path, pattern: &str, as_kind: Option<&str>, alias: Option<&
     } else {
         store.fts_sync()?;
     }
-    finalize(&index_root, &store, &[], !(already || r.diverged))?;
+    finalize(&index_root, &store, &[], !(already || r.diverged), false)?;
     let total = store.list_sources()?.len();
     eprintln!("{}", t(
         format!("chrono: added {} source of {} files ({} events). Index now has {total} sources.", src.kind(), r.files_total, r.events),
@@ -354,15 +354,28 @@ pub fn add_glob(db: &Path, pattern: &str, as_kind: Option<&str>, alias: Option<&
 pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
     let _lock = lock_ingest(db)?;
     let mut store = Store::open(db)?;
-    let index_root = index_root_of(db);
+    sync_store(&mut store, &index_root_of(db), source_arg, false)
+}
+
+/// El cuerpo de `sync`, con el cerrojo ya tomado. `light` (`tail`, cada pocos
+/// segundos): sin mensajes de progreso y sin `optimize` (FTS `optimize` y
+/// estadísticas cuestan segundos a escala y no cambian ninguna cifra); todo lo
+/// demás igual, así que tras un `tail` el índice queda como tras un `sync`.
+fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, light: bool) -> Result<()> {
+    let index_root = index_root.to_path_buf();
     let registry = build_registry();
+    let say = |msg: String| {
+        if !light {
+            eprintln!("{msg}");
+        }
+    };
 
     let mut sources = store.list_sources()?;
     // Compat: índice anterior a multi-fuente (sin filas en `sources`). Se
     // reconstruye una fuente desde `meta` (repo_path/source_path + kind) para
     // que el primer `sync` tras actualizar se auto-cure.
     if sources.is_empty() {
-        if let Some((id, kind, path, wm)) = legacy_source_from_meta(&store)? {
+        if let Some((id, kind, path, wm)) = legacy_source_from_meta(store)? {
             store.upsert_source(&id, &kind, &path, &wm, &BTreeMap::new(), &now_iso())?;
             sources = store.list_sources()?;
         } else {
@@ -423,11 +436,11 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
             let cfg = chrono_classify_rules::load(&index_root);
             let ctx = IngestCtx { options_keys: gs.options_keys(), preset: gs.preset.as_deref(), group: Some((&s.id, "")) };
             let sides = relation_sides(&cfg, adapter, Path::new(&s.path), &ctx);
-            let changed = reset_if_dims_changed(&store, &s.id, &ingest_dims(adapter, &source_config(&cfg, Path::new(&s.path), &ctx), true, &sides))?;
+            let changed = reset_if_dims_changed(store, &s.id, &ingest_dims(adapter, &source_config(&cfg, Path::new(&s.path), &ctx), true, &sides))?;
             if changed {
-                gs.clear_state(&store)?;
+                gs.clear_state(store)?;
             }
-            let mut r = gs.sync(adapter, &mut store, &index_root)?;
+            let mut r = gs.sync(adapter, store, &index_root)?;
             r.diverged |= changed;
             store.upsert_source(&s.id, &s.kind, &s.path, &r.watermark, &gs.manifest(r.files_total), &now)?;
             diverged_any |= r.diverged;
@@ -456,9 +469,9 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
         let ctx = IngestCtx { preset: preset.as_deref(), ..Default::default() };
         let cfg = chrono_classify_rules::load(&index_root);
         let sides = relation_sides(&cfg, adapter, &path, &ctx);
-        let dims_changed = reset_if_dims_changed(&store, &s.id, &ingest_dims(adapter, &source_config(&cfg, &path, &ctx), false, &sides))?;
+        let dims_changed = reset_if_dims_changed(store, &s.id, &ingest_dims(adapter, &source_config(&cfg, &path, &ctx), false, &sides))?;
         let wm = if dims_changed { None } else { wm };
-        let (n, new_wm, diverged) = match ingest_source(adapter, &path, wm, &mut store, &index_root, &ctx) {
+        let (n, new_wm, diverged) = match ingest_source(adapter, &path, wm, store, &index_root, &ctx) {
             Ok((n, new_wm, _manifest)) => (n, new_wm, false),
             Err(IngestError::Diverged) => {
                 eprintln!("{}", t(
@@ -466,7 +479,7 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
                     format!("  divergencia en {} — se reindexa esa fuente", s.id),
                 ));
                 store.delete_source_events(&s.id)?;
-                let (n, new_wm) = ingest_source(adapter, &path, None, &mut store, &index_root, &ctx)
+                let (n, new_wm) = ingest_source(adapter, &path, None, store, &index_root, &ctx)
                     .map(|(n, new_wm, _)| (n, new_wm))
                     .map_err(|e| e.into_boxed())?;
                 (n, new_wm, true)
@@ -488,7 +501,7 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
                 // Recomputar símbolos del delta (old HEAD..HEAD) si el índice los usa.
                 if symbols_enabled {
                     let since_sha = s.watermark.strip_prefix("sha:").filter(|s| !s.is_empty());
-                    ingest_symbols(&path, &store, since_sha)?;
+                    ingest_symbols(&path, store, since_sha)?;
                 }
             }
         }
@@ -505,11 +518,11 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
 
     // Nada nuevo en ninguna fuente: no se reconstruye FTS ni se compacta.
     if !synced_any {
-        eprintln!("{}", t("sync: 0 new events", "sync: 0 eventos nuevos"));
+        say(t("sync: 0 new events", "sync: 0 eventos nuevos"));
         return Ok(());
     }
 
-    eprintln!("{}", t("  building search index…", "  construyendo índice de búsqueda…"));
+    say(t("  building search index…", "  construyendo índice de búsqueda…"));
     // Una divergencia reescribe rowids arbitrarios: el watermark incremental de
     // FTS ya no es fiable, así que se reconstruye entero. Sin divergencia, solo
     // se indexan las filas nuevas (events.rowid > fts_max_rowid): O(delta).
@@ -518,15 +531,17 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
     } else {
         store.fts_sync()?;
     }
-    finalize(&index_root, &store, &changed_git_paths, !diverged_any)?;
-    eprintln!("{}", t(format!("sync: {total} new events"), format!("sync: {total} eventos nuevos")));
+    finalize(&index_root, store, &changed_git_paths, !diverged_any, light)?;
+    say(t(format!("sync: {total} new events"), format!("sync: {total} eventos nuevos")));
     Ok(())
 }
 
 /// `chrono tail [--interval 2s] [--source/--kind/--level/--grep]`: sigue el
-/// índice como `tail -f`. Cada intervalo ingiere el delta de cada fuente (SIN
-/// el enriquecimiento pesado: ni FTS, ni rollups, ni tamaños/forge de git) e
-/// imprime los eventos NUEVOS en orden cronológico. Bucle infinito; Ctrl-C para
+/// índice como `tail -f`. Cada intervalo hace un `sync` (delta de cada fuente,
+/// FTS, rollups y plantillas al día, reindexado si cambiaron dims u opciones;
+/// solo se salta `optimize`) e imprime los eventos NUEVOS en orden cronológico.
+/// Antes ingería sin `finalize`: `patterns`/`timeline` y `search` no veían lo
+/// que entraba por `tail` hasta el siguiente `sync`. Bucle infinito; Ctrl-C para
 /// parar. Pensado para fuentes que crecen (logs, oslog); para git el atajo de
 /// HEAD evita trabajo si no hay commits nuevos.
 pub fn tail(
@@ -539,7 +554,6 @@ pub fn tail(
 ) -> Result<()> {
     let mut store = Store::open(db)?;
     let index_root = index_root_of(db);
-    let registry = build_registry();
     let interval = Duration::from_millis(interval_ms.clamp(200, 3_600_000) as u64);
 
     // `tail -f`: se sigue SOLO lo nuevo → se arranca desde el máximo at_epoch ya
@@ -560,7 +574,7 @@ pub fn tail(
         {
             // Por vuelta, no durante todo el `tail`: un `sync` de un hook no espera horas.
             let _lock = lock_ingest(db)?;
-            tail_ingest(&mut store, &registry, &index_root)?;
+            sync_store(&mut store, &index_root, None, true)?;
         }
 
         let filter = chrono_metrics::EventFilter {
@@ -589,65 +603,6 @@ pub fn tail(
         let _ = stdout.flush();
         std::thread::sleep(interval);
     }
-}
-
-/// Ingesta del delta de TODAS las fuentes para `tail`: como `sync` pero SIN
-/// enriquecimiento (ni FTS, ni rollups, ni tamaños/forge). Solo mete los
-/// eventos nuevos para poder mostrarlos al instante.
-fn tail_ingest(store: &mut Store, registry: &Registry, index_root: &Path) -> Result<()> {
-    let now = now_iso();
-    let sources = store.list_sources()?;
-    let cfg = chrono_classify_rules::load(index_root);
-    for s in &sources {
-        let Some(adapter) = registry.by_kind(&s.kind) else { continue };
-        // Con otras dims o relaciones que las de la config, solo `sync` puede
-        // releer la fuente entera: `tail` escribiría las nuevas en `source_dims`
-        // y el `sync` siguiente ya no vería el cambio (eventos viejos sin ellas).
-        let glob = GlobSource::from_row(&s.id, &s.manifest_json);
-        let preset = manifest_value(&s.manifest_json, "preset");
-        let ctx = match &glob {
-            Some(gs) => IngestCtx { options_keys: gs.options_keys(), preset: gs.preset.as_deref(), group: Some((&s.id, "")) },
-            None => IngestCtx { preset: preset.as_deref(), ..Default::default() },
-        };
-        let want = ingest_dims(adapter, &source_config(&cfg, Path::new(&s.path), &ctx), glob.is_some(), &relation_sides(&cfg, adapter, Path::new(&s.path), &ctx));
-        if dims_changed(store, &s.id, &want)? {
-            eprintln!("{}", t(
-                format!("  dims or relations of {} changed — skipped; run `chrono sync` to reindex it", s.id),
-                format!("  cambiaron las dims o relaciones de {} — se omite; `chrono sync` la reindexa", s.id),
-            ));
-            continue;
-        }
-        if let Some(gs) = glob {
-            let r = gs.sync(adapter, store, index_root)?;
-            store.upsert_source(&s.id, &s.kind, &s.path, &r.watermark, &gs.manifest(r.files_total), &now)?;
-            continue;
-        }
-        let path = PathBuf::from(&s.path);
-        if s.kind == "git" {
-            if let Ok(head) = chrono_source_git::head_sha(&path) {
-                if s.watermark == format!("sha:{head}") {
-                    continue;
-                }
-            }
-        }
-        let wm = if s.watermark.is_empty() {
-            None
-        } else {
-            Some(Watermark { kind: s.kind.clone(), value: s.watermark.clone() })
-        };
-        let new_wm = match ingest_source(adapter, &path, wm, store, index_root, &ctx) {
-            Ok((_n, new_wm, _)) => new_wm,
-            Err(IngestError::Diverged) => {
-                store.delete_source_events(&s.id)?;
-                ingest_source(adapter, &path, None, store, index_root, &ctx)
-                    .map(|(_n, w, _)| w)
-                    .map_err(|e| e.into_boxed())?
-            }
-            Err(e) => return Err(e.into_boxed()),
-        };
-        store.set_source_watermark(&s.id, &new_wm.value, &now)?;
-    }
-    Ok(())
 }
 
 /// Reconstruye una fila de fuente desde `meta` para índices anteriores a la
@@ -1022,6 +977,7 @@ fn finalize(
     store: &Store,
     git_paths: &[String],
     rollups_incremental: bool,
+    light: bool,
 ) -> Result<()> {
     for path in git_paths {
         finalize_git_sizes_and_deletions(Path::new(path), store)?;
@@ -1064,7 +1020,9 @@ fn finalize(
 
     // Rollups Drain-light (plantillas + conteos por bucket) para `patterns`.
     // Incremental en sync/add (solo el delta); completo en init/divergencia.
-    eprintln!("{}", t("  clustering log templates…", "  agrupando plantillas…"));
+    if !light {
+        eprintln!("{}", t("  clustering log templates…", "  agrupando plantillas…"));
+    }
     if rollups_incremental {
         store.build_rollups_sync(ROLLUP_BUCKET_MS)?;
     } else {
@@ -1074,7 +1032,10 @@ fn finalize(
 
     // ANALYZE completo solo en reconstrucción (init/divergencia): a escala es
     // O(N) y no debe correr en cada sync incremental (PRAGMA optimize basta).
-    store.optimize(!rollups_incremental)?;
+    // `tail` no lo hace: no cambia cifras y costaría segundos en cada vuelta.
+    if !light {
+        store.optimize(!rollups_incremental)?;
+    }
     Ok(())
 }
 
