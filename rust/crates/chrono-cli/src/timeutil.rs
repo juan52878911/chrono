@@ -220,6 +220,21 @@ mod tests {
         }
     }
 
+    /// `--bucket`/`--delta`/`--gap`: desbordes, signos, unicode y unidades raras.
+    #[test]
+    fn duraciones_bordes() {
+        for (s, want) in [(" 5 m ", Some(300_000)), ("1H", Some(3_600_000)), ("2D", Some(172_800_000)), ("1MS", Some(1))] {
+            assert_eq!(parse_duration(s), want, "{s:?}");
+        }
+        for bad in [
+            "1.5h", "1e3", "+", "-1h", "0ms", "-5ms", "ms", "s", "1w", "1y", "1hh", "h1", "5é", "😀", "١h", "9223372036854775807d",
+            "9223372036854775807ms0", "106751991167301d", " ", "\u{0}",
+        ] {
+            assert_eq!(parse_duration(bad), None, "{bad:?} debía rechazarse");
+        }
+        assert_eq!(parse_duration("9223372036854775807ms"), Some(i64::MAX));
+    }
+
     /// Lo que escribe chrono vuelve a entrar igual, en todo el rango.
     #[test]
     fn since_ida_y_vuelta_aleatoria() {
