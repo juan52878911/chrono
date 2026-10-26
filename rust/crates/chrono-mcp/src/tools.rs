@@ -193,9 +193,10 @@ pub fn tool_defs() -> Vec<Value> {
         ),
         tool(
             "events",
-            "Los eventos en orden cronológico con todos los filtros: leer los mensajes reales de una ventana (p.ej. lo que pasó justo antes de un reinicio, o una traza completa de product_service).",
+            "Los eventos en orden cronológico con todos los filtros: leer los mensajes reales de una ventana (p.ej. lo que pasó justo antes de un reinicio, o una traza completa de product_service). Con order=desc, los más recientes primero (lo último que pasó).",
             with_scope(json!({
-                "limit": json!({"type": "integer", "description": "Máximo de eventos (por defecto 25; la cabecera dice el total)"})
+                "limit": json!({"type": "integer", "description": "Máximo de eventos (por defecto 25; la cabecera dice el total)"}),
+                "order": str_prop("asc (por defecto: del más viejo al más nuevo) | desc (los más recientes primero)")
             })),
             &[],
         ),
@@ -222,6 +223,7 @@ pub fn tool_defs() -> Vec<Value> {
             "min/p50/p95/max/suma de un atributo numérico (duración, bytes…) por grupo, con los filtros de siempre.",
             with_scope(json!({
                 "attr": str_prop("Atributo numérico, p.ej. duration_s"),
+                "where_attr": str_prop("Filtro clave:valor sobre los atributos, como `attr` en las demás consultas (aquí `attr` es el numérico): container:db-1 (opcional)"),
                 "by": str_prop("Agrupar por: level | kind | entity | attr:<clave> (opcional)"),
                 "limit": json!({"type": "integer", "description": "Máximo de grupos (por defecto 25)"})
             })),
@@ -358,7 +360,14 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
                 .iter()
                 .map(|b| json!({"bucket_epoch": b.bucket_epoch, "key": b.key, "count": b.count}))
                 .collect();
-            json!({"bucket_ms": bucket_ms, "by": by, "buckets": buckets})
+            let mut out = json!({"bucket_ms": bucket_ms, "by": by, "buckets": buckets});
+            // Los eventos sin tiempo no caben en ningún bucket ni en `total`: se dicen.
+            let untimed = chrono_metrics::untimed_events(conn, &scope)?;
+            if untimed > 0 {
+                out["untimed"] = json!(untimed);
+                out["hints"] = json!([format!("{untimed} eventos que casan con los filtros no tienen tiempo: no están en ningún bucket ni en total")]);
+            }
+            out
         }
         "top" => {
             let dim = arg_str(args, "dim")?;
@@ -377,7 +386,13 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
             };
             let rows = chrono_metrics::top_filtered(conn, dim, since_epoch, &filter, limit)?;
             let items: Vec<Value> = rows.iter().map(|v| json!({"value": v.value, "count": v.count})).collect();
-            json!({"dim": dim, "top": items})
+            let mut out = json!({"dim": dim, "top": items});
+            if let Some(k) = dim.strip_prefix("attr:").filter(|_| rows.is_empty()) {
+                if !chrono_metrics::attr_key_known(conn, k)? {
+                    out["hints"] = json!([format!("ningún evento tiene la attr {k:?}; las que hay: {}", chrono_metrics::attr_keys(conn, 20)?.join(", "))]);
+                }
+            }
+            out
         }
         "sources" => sources(conn)?,
         "informe" => crate::informe::informe(store, args, since_epoch)?,
@@ -424,17 +439,23 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
             let by = args.get("by").and_then(Value::as_str).filter(|s| !s.is_empty());
             let limit = arg_i64(args, "limit", 25).max(1) as usize;
             // Aquí `attr` es el atributo numérico, no el filtro `clave:valor`
-            // de las demás consultas: tomarlo como filtro no casaba nada.
-            let mut filters = args.clone();
-            if let Some(o) = filters.as_object_mut() {
-                o.remove("attr");
-            }
+            // de las demás consultas: el filtro va en `where_attr`.
+            let filters = stats_filters(args);
             let rows = chrono_metrics::stats(conn, attr, by, since_epoch, &scope_from(&filters), limit)?;
             let groups: Vec<Value> = rows
                 .iter()
                 .map(|r| json!({"group": r.group, "count": r.count, "min": r.min, "p50": r.p50, "p95": r.p95, "max": r.max, "sum": r.sum}))
                 .collect();
-            json!({"attr": attr, "by": by, "groups": groups})
+            let mut out = json!({"attr": attr, "by": by, "groups": groups});
+            if rows.is_empty() {
+                let hint = if chrono_metrics::attr_key_known(conn, attr)? {
+                    format!("la attr {attr:?} no tiene valores numéricos en estos eventos (stats solo cuenta números)")
+                } else {
+                    format!("ningún evento tiene la attr {attr:?}; las que hay: {}", chrono_metrics::attr_keys(conn, 20)?.join(", "))
+                };
+                out["hints"] = json!([hint]);
+            }
+            out
         }
         "correlate" if args.get("via").and_then(Value::as_str).is_some_and(|v| !v.trim().is_empty()) => {
             let id = arg_str(args, "id")?;
@@ -452,7 +473,16 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
             let id = arg_str(args, "id")?;
             let delta_ms = arg_i64(args, "delta_secs", 3600).max(1) * 1000;
             let limit = arg_i64(args, "limit", 25).max(1) as usize;
-            correlate(conn, id, delta_ms, limit)?
+            let mut out = correlate(conn, id, delta_ms, limit)?;
+            if out["related"].as_array().is_some_and(Vec::is_empty) && chrono_metrics::other_timed_sources(conn, id)? == Some(0) {
+                let keys = chrono_metrics::event_relation_keys(conn, id)?;
+                let ej = keys.first().map_or("<clave>".to_string(), |k| k.clone());
+                out["hints"] = json!([format!(
+                    "correlate por tiempo solo mira OTRAS fuentes y el índice no tiene otra con tiempo: para relacionar por clave, via={ej}{}",
+                    if keys.is_empty() { String::new() } else { format!(" (claves de este evento: {})", keys.join(", ")) }
+                )]);
+            }
+            out
         }
         "gaps" => {
             let side = |k: &str| -> Result<chrono_metrics::EventScope<'_>> {
@@ -506,7 +536,12 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
                 join: sc.join,
                 infer_level: sc.infer_level,
             };
-            events(conn, &filter, limit)?
+            let newest_first = match args.get("order").and_then(Value::as_str).map(str::trim).unwrap_or("") {
+                "" | "asc" => false,
+                "desc" => true,
+                o => return Err(format!("order no válido: {o:?} (usa asc o desc)").into()),
+            };
+            events(conn, &filter, limit, newest_first)?
         }
         "session_patterns" => {
             let opts = chrono_metrics::SessionPatternsOpts {
@@ -523,8 +558,45 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
     };
     if crate::contract::main_list(name).is_some() {
         let mut result = result;
-        let (head, meta) = crate::contract::header(conn, name, args, &result);
-        crate::contract::enrich(name, &mut result, meta["total"].as_i64().unwrap_or(0));
+        // Los avisos de la herramienta (una attr o un nivel que no existen,
+        // eventos sin tiempo) van con los de la cabecera.
+        let mut hints: Vec<String> =
+            result.as_object_mut().and_then(|o| o.remove("hints")).and_then(|h| serde_json::from_value(h).ok()).unwrap_or_default();
+        if let Some(l) = args.get("level").and_then(Value::as_str).filter(|l| !l.trim().is_empty()) {
+            let infer = args.get("infer_level").and_then(Value::as_bool).unwrap_or(false);
+            let (unknown, known) = chrono_metrics::unknown_levels(conn, l, infer)?;
+            if !unknown.is_empty() {
+                hints.push(format!("ningún evento tiene el nivel {}; los que hay: {}", unknown.join(","), known.join(",")));
+            }
+        }
+        let (mut head, mut meta) = crate::contract::header(conn, name, args, &result);
+        for h in &hints {
+            head.push_str(&format!("\n⚠ {h}"));
+        }
+        if let Some(w) = meta.get_mut("warnings").and_then(Value::as_array_mut) {
+            w.extend(hints.into_iter().map(Value::String));
+        }
+        // `top attr:K`: «(resto)» cuenta solo los eventos CON la attr; los
+        // que no la tienen van aparte en «(sin valor)».
+        let total = meta["total"].as_i64().unwrap_or(0);
+        let mut rest_of = total;
+        let mut without = 0;
+        if let Some(k) = (name == "top").then(|| args.get("dim").and_then(Value::as_str)).flatten().and_then(|d| d.strip_prefix("attr:")) {
+            let mut with_key = args.clone();
+            let attr = match args.get("attr").and_then(Value::as_str).filter(|a| !a.trim().is_empty()) {
+                Some(a) => format!("{a},{k}:*"),
+                None => format!("{k}:*"),
+            };
+            with_key["attr"] = json!(attr);
+            rest_of = crate::contract::coverage(conn, &with_key, since_epoch).0;
+            without = total - rest_of;
+        }
+        crate::contract::enrich(name, &mut result, rest_of);
+        if without > 0 {
+            if let Some(a) = result.get_mut("top").and_then(Value::as_array_mut) {
+                a.push(json!({"value": "(sin valor)", "count": without}));
+            }
+        }
         let depth = args.get("depth").and_then(Value::as_str).unwrap_or(crate::contract::default_depth(name));
         crate::contract::apply_depth(&mut result, depth);
         if args.get("format").and_then(Value::as_str) == Some("json") {
@@ -582,6 +654,19 @@ pub(crate) fn scope_from(args: &Value) -> chrono_metrics::EventScope<'_> {
     }
 }
 
+/// Filtros de `stats`: `attr` es el atributo numérico (como filtro no casaba
+/// nada), así que el filtro `clave:valor` va en `where_attr`.
+pub(crate) fn stats_filters(args: &Value) -> Value {
+    let mut filters = args.clone();
+    if let Some(o) = filters.as_object_mut() {
+        o.remove("attr");
+        if let Some(w) = o.remove("where_attr") {
+            o.insert("attr".into(), w);
+        }
+    }
+    filters
+}
+
 fn sources(conn: &Connection) -> Result<Value> {
     let rows = chrono_metrics::sources(conn)?;
     let vc = |v: &[(String, i64)]| -> Vec<Value> { v.iter().map(|(k, n)| json!({"value": k, "count": n})).collect() };
@@ -606,6 +691,11 @@ fn sources(conn: &Connection) -> Result<Value> {
 }
 
 pub(crate) fn hotspots(conn: &Connection, since_epoch: i64) -> Result<Value> {
+    // Sin git no hay tamaño: el ranking salía con los nombres de tools o
+    // servicios por frecuencia (size 0), que no es lo que mide hotspots.
+    if chrono_metrics::sources_of_kind(conn, "git")? == 0 {
+        return Ok(json!({"hotspots": [], "hints": ["hotspots necesita una fuente git (cambios × tamaño de cada fichero) y este índice no tiene ninguna; para logs o tools, top dim=entity"]}));
+    }
     let rows = chrono_metrics::hotspots(conn, since_epoch, HOTSPOTS_LIMIT, false)?;
     let items: Vec<Value> = rows
         .iter()
@@ -880,8 +970,8 @@ fn trace(conn: &Connection, id: &str, depth: i64, limit: usize) -> Result<Value>
     Ok(json!({"anchor": event_json(&tr.anchor), "chain": chain}))
 }
 
-fn events(conn: &Connection, filter: &chrono_metrics::EventFilter, limit: usize) -> Result<Value> {
-    let rows = chrono_metrics::events(conn, filter, limit)?;
+fn events(conn: &Connection, filter: &chrono_metrics::EventFilter, limit: usize, newest_first: bool) -> Result<Value> {
+    let rows = chrono_metrics::events_ordered(conn, filter, limit, newest_first)?;
     let items: Vec<Value> = rows
         .iter()
         .map(|e| json!({

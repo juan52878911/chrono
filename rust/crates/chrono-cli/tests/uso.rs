@@ -66,3 +66,107 @@ fn flags_que_se_ignoraban() {
     let (ok, _, err) = run(&d.0, &["timeline", "--by", "entity"]);
     assert!(!ok && err.contains("use level or kind"), "{err}");
 }
+
+#[test]
+fn flags_que_no_aplican_al_comando_avisan() {
+    let d = indice("no-aplica");
+    let (ok, _, err) = run(&d.0, &["top", "level", "--by", "kind"]);
+    assert!(ok && err.contains("--by does not apply to top"), "{err}");
+    let (ok, _, err) = run(&d.0, &["search", "evento", "--since", "2026-01-01"]);
+    assert!(ok && err.contains("--since does not apply to search"), "{err}");
+    // Las que sí aplican no avisan.
+    let (ok, _, err) = run(&d.0, &["top", "level", "--since", "2026-01-01", "--level", "ERROR", "--limit", "3", "--compact"]);
+    assert!(ok && err.is_empty(), "{err}");
+    let (ok, _, err) = run(&d.0, &["timeline", "--by", "level", "--bucket", "1h", "--grep", "evento"]);
+    assert!(ok && err.is_empty(), "{err}");
+}
+
+#[test]
+fn events_order_desc_da_lo_mas_reciente() {
+    let d = indice("order");
+    let (ok, out, err) = run(&d.0, &["events", "--order", "desc", "--limit", "2", "--compact"]);
+    assert!(ok, "{err}");
+    let (a, b) = (out.find("evento 29").unwrap_or(usize::MAX), out.find("evento 28").unwrap_or(0));
+    assert!(a < b && !out.contains("evento 0\n"), "{out}");
+    let (ok, _, err) = run(&d.0, &["events", "--order", "nuevo"]);
+    assert!(!ok && err.contains("invalid --order"), "{err}");
+}
+
+#[test]
+fn sources_y_phases_no_se_dan_por_truncadas() {
+    let d = indice("sources");
+    for cmd in ["sources", "phases"] {
+        let (ok, out, err) = run(&d.0, &[cmd]);
+        assert!(ok, "{err}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let tb = &v["token_budget"];
+        assert_eq!((tb["max_items"].clone(), tb["truncated"].clone()), (tb["returned"].clone(), false.into()), "{cmd}: {tb}");
+    }
+}
+
+/// Índice con un log de 3 líneas con tiempo (con `ms` y `region`) y una sin tiempo.
+fn indice_attrs(tag: &str) -> TempDir {
+    let p = std::env::temp_dir().join(format!("chrono-uso-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&p);
+    std::fs::create_dir_all(p.join(".chrono")).unwrap();
+    let dir = TempDir(std::fs::canonicalize(&p).unwrap());
+    let lines = [
+        r#"{"ts":"2026-01-01T00:00:00Z","level":"ERROR","msg":"uno","ms":10,"region":"db-1"}"#,
+        r#"{"ts":"2026-01-01T00:10:00Z","level":"INFO","msg":"dos","ms":30,"region":"db-2"}"#,
+        r#"{"ts":"2026-01-01T00:20:00Z","level":"INFO","msg":"tres","ms":20,"region":"db-1"}"#,
+        r#"{"level":"ERROR","msg":"sin tiempo"}"#,
+    ];
+    std::fs::write(dir.0.join("app.jsonl"), lines.join("\n") + "\n").unwrap();
+    let (ok, _, err) = run(&dir.0, &["add", "app.jsonl", "--db", ".chrono/index.db"]);
+    assert!(ok, "{err}");
+    dir
+}
+
+#[test]
+fn vacios_que_ahora_dicen_por_que() {
+    let d = indice_attrs("vacios");
+    // top attr: con una clave que no existe: vacío, sin error, con aviso.
+    let (ok, out, err) = run(&d.0, &["top", "attr:contenedor", "--compact"]);
+    assert!(ok, "{err}");
+    assert!(out.starts_with("hints: no event has the attribute \"contenedor\"; attributes: ") && out.contains("region"), "{out}");
+    let (ok, out, _) = run(&d.0, &["top", "attr:region", "--compact"]);
+    assert!(ok && !out.contains("hints") && out.contains("db-1\t2"), "{out}");
+    // --level mal escrito: aviso con los niveles que hay.
+    let (ok, _, err) = run(&d.0, &["events", "--level", "eror"]);
+    assert!(ok && err.contains("no event has level eror (levels: ERROR,INFO)"), "{err}");
+    let (ok, _, err) = run(&d.0, &["top", "kind", "--level", "error,info"]);
+    assert!(ok && err.is_empty(), "{err}");
+    // stats de una attr que no existe o no es numérica.
+    let (_, out, _) = run(&d.0, &["stats", "latencia", "--compact"]);
+    assert!(out.contains("hints: no event has the attribute \"latencia\""), "{out}");
+    let (_, out, _) = run(&d.0, &["stats", "region", "--compact"]);
+    assert!(out.contains("hints: the attribute \"region\" has no numeric values"), "{out}");
+    let (_, out, _) = run(&d.0, &["stats", "ms", "--attr", "region:db-1", "--compact"]);
+    assert!(!out.contains("hints") && out.contains("\t2\t10\t"), "{out}");
+    // timeline: los eventos sin tiempo se dicen.
+    let (_, out, _) = run(&d.0, &["timeline", "--compact"]);
+    assert!(out.contains("1 matching events have no time") && out.contains("untimed: 1"), "{out}");
+    let (_, out, _) = run(&d.0, &["timeline", "--level", "INFO", "--compact"]);
+    assert!(!out.contains("untimed"), "{out}");
+    // hotspots sin git y session_patterns sin Nod.
+    let (_, out, _) = run(&d.0, &["hotspots", "--compact"]);
+    assert!(out.starts_with("hints: hotspots needs a git source") && out.contains("hotspots: -"), "{out}");
+    let (_, out, _) = run(&d.0, &["session_patterns", "--compact"]);
+    assert!(out.starts_with("hints: no Nod events in the index"), "{out}");
+    // correlate por tiempo con una sola fuente sugiere --via.
+    let (_, ev, _) = run(&d.0, &["events", "--limit", "1"]);
+    let v: serde_json::Value = serde_json::from_str(&ev).unwrap();
+    let id = v["result"]["events"][0]["id"].as_str().unwrap().to_string();
+    let (ok, out, err) = run(&d.0, &["correlate", &id, "--compact"]);
+    assert!(ok && out.contains("hints: correlate by time only looks at OTHER sources") && out.contains("--via"), "{out}{err}");
+}
+
+#[test]
+fn errores_de_gaps_en_el_idioma_pedido() {
+    let d = indice("gaps-lang");
+    let args = ["gaps", "--from", "app.jsonl", "--to", "app.jsonl", "--via", "tikcet"];
+    let (ok, _, err) = run(&d.0, &args);
+    assert!(!ok && err.contains("unknown relation key") && !err.contains("clave"), "{err}");
+    let (ok, _, err) = run(&d.0, &[&args[..], &["--lang", "es"]].concat());
+    assert!(!ok && err.contains("clave de relación desconocida"), "{err}");
+}

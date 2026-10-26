@@ -81,7 +81,7 @@ Log-native (multi-source). timeline, stats, top, patterns and events share the s
   patterns             Most frequent log templates (Drain-light clustering),
                        e.g. patterns --level FATAL,ERROR,CRITICAL --limit 3.
   trace <id>           Follow an event's links chain (reverts, same ticket/PR, vcs.commit ↔ commit).
-  events               Unified chronological stream across sources.
+  events               Unified chronological stream across sources (--order desc: newest first).
   informe [logs|codigo <file[:A-B]>]
                        START HERE: the whole picture in one call. logs: coverage, per level counts, services
                        and containers per level, top messages per level, peaks, FATAL/CRITICAL episodes and
@@ -186,7 +186,7 @@ Log-native (multi-fuente). timeline, stats, top, patterns y events comparten fil
   patterns             Plantillas de log más frecuentes (clustering Drain-light),
                        p.ej. patterns --level FATAL,ERROR,CRITICAL --limit 3.
   trace <id>           Sigue la cadena de links de un evento (reverts, mismo ticket/PR, vcs.commit ↔ commit).
-  events               Stream cronológico unificado de todas las fuentes.
+  events               Stream cronológico unificado de todas las fuentes (--order desc: lo más reciente primero).
   informe [logs|codigo <fichero[:A-B]>]
                        EMPIEZA AQUÍ: el panorama en una llamada. logs: cobertura, cifras por nivel, servicios y
                        contenedores por nivel, mensajes más repetidos por nivel, picos, episodios FATAL/CRITICAL
@@ -273,6 +273,8 @@ struct Flags {
     session: Option<String>,
     hotspots: Option<String>,
     compact: bool,
+    /// `events --order asc|desc`.
+    order: Option<String>,
     /// `-h`/`--help` en cualquier posición: ayuda del subcomando, sin abrir el índice.
     help: bool,
     /// Flags que no reconoce ninguna consulta (se ignoran, con aviso).
@@ -330,6 +332,10 @@ fn parse_args(args: &[String]) -> Flags {
             "--limit" if i + 1 < args.len() => {
                 i += 1;
                 f.limit = Some(args[i].clone());
+            }
+            "--order" if i + 1 < args.len() => {
+                i += 1;
+                f.order = Some(args[i].clone());
             }
             "--infer-level" => {
                 f.infer_level = true;
@@ -515,6 +521,15 @@ fn refresh_commands(db: &Path, only: Option<&str>) -> Option<PathBuf> {
     found
 }
 
+/// Un error de las consultas en el idioma activo: los de uso de
+/// `chrono-metrics` traen los dos (`Msg`); el resto sale tal cual.
+fn localized(e: Box<dyn std::error::Error + Send + Sync>) -> String {
+    match e.downcast_ref::<chrono_metrics::Msg>() {
+        Some(m) => t(m.en.clone(), m.es.clone()),
+        None => e.to_string(),
+    }
+}
+
 fn fatal(msg: impl std::fmt::Display) -> ! {
     // "chrono: error:" no se traduce (paridad literal con el Go).
     eprintln!("chrono: error: {msg}");
@@ -582,6 +597,92 @@ const COMMANDS: &[&str] = &[
     "bugs", "churn", "tickets", "prs", "branches", "phases", "sources", "search", "similar", "timeline", "stats", "top",
     "patterns", "events", "bench", "explain", "informe", "precede", "correlate", "gaps", "trace", "session_patterns", "show",
 ];
+
+/// Flags de consulta que se pasaron (las de `Flags` con valor), por su nombre.
+fn given_flags(f: &Flags) -> Vec<&'static str> {
+    let s = |o: &Option<String>| o.is_some();
+    [
+        ("--since", s(&f.since)),
+        ("--until", s(&f.until)),
+        ("--bucket", s(&f.bucket)),
+        ("--gap", s(&f.gap)),
+        ("--window", s(&f.window)),
+        ("--before-levels", s(&f.before_levels)),
+        ("--delta", s(&f.delta)),
+        ("--by", s(&f.by)),
+        ("--limit", s(&f.limit)),
+        ("--order", s(&f.order)),
+        ("--infer-level", f.infer_level),
+        ("--any-order", f.any_order),
+        ("--attr", s(&f.attr)),
+        ("--join", s(&f.join)),
+        ("--via", s(&f.via)),
+        ("--from", s(&f.from)),
+        ("--to", s(&f.to)),
+        ("--entity", s(&f.entity)),
+        ("--symbols", f.symbols),
+        ("--source", s(&f.source)),
+        ("--kind", s(&f.kind)),
+        ("--level", s(&f.level)),
+        ("--grep", s(&f.grep)),
+        ("--depth", s(&f.depth)),
+        ("--interval", s(&f.interval)),
+        ("--as", s(&f.as_kind)),
+        ("--preset", s(&f.preset)),
+        ("--name", s(&f.name)),
+        ("--task", s(&f.task)),
+        ("--session", s(&f.session)),
+        ("--hotspots", s(&f.hotspots)),
+    ]
+    .into_iter()
+    .filter_map(|(n, on)| on.then_some(n))
+    .collect()
+}
+
+/// Los filtros comunes (`EventScope`) de las consultas sobre eventos.
+const SCOPE_FLAGS: &[&str] = &["--source", "--grep", "--level", "--kind", "--entity", "--attr", "--join", "--infer-level"];
+
+/// Flags que usa cada consulta, además de `--db`, `--lang` y `--compact`
+/// (`None`: comandos que no son consultas, sin comprobar). Con `true`, también
+/// los filtros comunes.
+fn query_flags(cmd: &str) -> Option<(&'static [&'static str], bool)> {
+    Some(match cmd {
+        "hotspots" | "coupling" | "owners" | "churn" => (&["--since", "--by"], false),
+        "bugs" => (&["--since"], false),
+        "tickets" | "prs" | "phases" | "sources" | "similar" | "bench" | "branches" => (&[], false),
+        "search" | "explain" => (&["--limit"], false),
+        "timeline" => (&["--since", "--until", "--bucket", "--by", "--limit"], true),
+        "stats" => (&["--since", "--until", "--by", "--limit"], true),
+        "top" | "patterns" => (&["--since", "--until", "--limit"], true),
+        "events" => (&["--since", "--until", "--limit", "--order"], true),
+        "informe" => (&["--since", "--until"], true),
+        "precede" => (&["--since", "--until", "--gap", "--window", "--before-levels", "--limit"], true),
+        "correlate" => (&["--delta", "--kind", "--via", "--limit"], false),
+        "gaps" => (&["--since", "--until", "--from", "--to", "--via", "--by", "--any-order", "--limit"], false),
+        "trace" => (&["--depth", "--limit"], false),
+        "session_patterns" => (&["--since", "--task", "--session", "--hotspots", "--limit"], false),
+        "show" => (&["--entity"], false),
+        _ => return None,
+    })
+}
+
+/// Una flag que existe pero no aplica al comando (`top --by`, `search
+/// --since`) se ignoraba en silencio: se avisa como una desconocida.
+fn warn_inapplicable(cmd: &str, f: &Flags) {
+    let Some((own, scope)) = query_flags(cmd) else { return };
+    for flag in given_flags(f) {
+        let applies = own.contains(&flag) || (scope && SCOPE_FLAGS.contains(&flag));
+        if !applies {
+            eprintln!(
+                "{}",
+                t(
+                    format!("chrono: warning: {flag} does not apply to {cmd} (ignored; see chrono {cmd} --help)"),
+                    format!("chrono: aviso: {flag} no aplica a {cmd} (se ignora; ver chrono {cmd} --help)"),
+                )
+            );
+        }
+    }
+}
 
 /// Distancia de edición (Levenshtein) entre dos palabras cortas.
 fn edit_distance(a: &str, b: &str) -> usize {
@@ -700,6 +801,7 @@ fn main() {
         other if !COMMANDS.contains(&other) => unknown_command(other),
         _ => {}
     }
+    warn_inapplicable(cmd, &f);
 
     // Comandos que necesitan un índice existente.
     let db = resolve_db(&f);
@@ -820,7 +922,22 @@ fn main() {
     };
     // Una clave de `--join` que no existe no casaría nada: error, no vacío.
     if let Err(e) = chrono_metrics::check_join(store.conn(), scope.join) {
-        fatal(e);
+        fatal(localized(e));
+    }
+    // Un `--level` mal escrito (`eror`) daba vacío sin más: se avisa con los
+    // que hay (`informe` ya lo dice en su texto).
+    if let Some(l) = scope.level.filter(|l| !l.trim().is_empty() && cmd != "informe" && query_flags(cmd).is_some_and(|(_, sc)| sc)) {
+        if let Ok((unknown, known)) = chrono_metrics::unknown_levels(store.conn(), l, scope.infer_level) {
+            if !unknown.is_empty() {
+                eprintln!(
+                    "{}",
+                    t(
+                        format!("chrono: warning: no event has level {} (levels: {})", unknown.join(","), known.join(",")),
+                        format!("chrono: aviso: ningún evento tiene el nivel {} (niveles: {})", unknown.join(","), known.join(",")),
+                    )
+                );
+            }
+        }
     }
     let out = match cmd {
         "hotspots" => query::hotspots(&store, &window, symbols_only),
@@ -875,7 +992,7 @@ fn main() {
             query::top(&store, &window, &dim, f.until.as_deref(), &scope, f.limit.as_deref())
         }
         "patterns" => query::patterns(&store, &window, f.until.as_deref(), &scope, f.limit.as_deref()),
-        "events" => query::events(&store, &window, f.until.as_deref(), &scope, f.limit.as_deref()),
+        "events" => query::events(&store, &window, f.until.as_deref(), &scope, f.order.as_deref(), f.limit.as_deref()),
         "bench" => query::bench(&store, &db),
         "explain" => {
             let target = require_pos(&f, "explain needs a <file>[:FROM-TO]", "explain necesita un <fichero>[:DESDE-HASTA]");
@@ -959,9 +1076,13 @@ fn main() {
         other => unknown_command(other),
     };
     match out {
-        Ok(j) if f.compact => print!("{}", j.compact()),
+        Ok(j) if f.compact => {
+            // En la tabla, el alias de la fuente (`claude`) en vez de su id acortado.
+            let aliases = chrono_metrics::source_aliases(store.conn()).unwrap_or_default();
+            print!("{}", j.with_source_aliases(&aliases).compact())
+        }
         Ok(j) => print!("{}", j.pretty()),
-        Err(e) => fatal(e),
+        Err(e) => fatal(localized(e)),
     }
 }
 

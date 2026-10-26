@@ -47,6 +47,13 @@ pub struct EventFilter<'a> {
 /// filtros. Solo eventos con `at_epoch > 0` (los sin tiempo no entran en una
 /// vista temporal). `limit` acota (salida "bounded for an AI").
 pub fn events(conn: &Connection, f: &EventFilter, limit: usize) -> Result<Vec<EventRow>> {
+    events_ordered(conn, f, limit, false)
+}
+
+/// Como [`events`]; con `newest_first`, los `limit` MÁS RECIENTES, del más
+/// nuevo al más viejo (`at_epoch` DESC, `id` DESC): «¿qué pasó lo último?» sin
+/// tener que adivinar un `since`.
+pub fn events_ordered(conn: &Connection, f: &EventFilter, limit: usize, newest_first: bool) -> Result<Vec<EventRow>> {
     // Mismas reglas de filtro que `top`/`patterns`/`timeline` (ver `EventScope`).
     let scope = crate::EventScope {
         source: f.source,
@@ -60,6 +67,7 @@ pub fn events(conn: &Connection, f: &EventFilter, limit: usize) -> Result<Vec<Ev
         until_epoch: f.until_epoch,
     };
     let (filters, extra) = scope.sql(3);
+    let dir = if newest_first { "DESC" } else { "ASC" };
     // v5: events.source_ref es entero; el string ("git:/path") se recupera por
     // JOIN a sources. El JOIN es INNER pero todo evento tiene un source_ref
     // válido (lo garantiza el Writer), así que no se pierde ninguna fila.
@@ -69,7 +77,7 @@ pub fn events(conn: &Connection, f: &EventFilter, limit: usize) -> Result<Vec<Ev
          WHERE e.at_epoch > 0
            AND (?1 = 0 OR e.at_epoch >= ?1)
            {filters}
-         ORDER BY e.at_epoch ASC, e.id ASC
+         ORDER BY e.at_epoch {dir}, e.id {dir}
          LIMIT ?2"
     );
     let limit = limit as i64;
@@ -198,5 +206,13 @@ mod tests {
 
         // limit.
         assert_eq!(events(conn, &EventFilter::default(), 2).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn newest_first_da_los_mas_recientes() {
+        let (_db, store) = fixture();
+        let rows = events_ordered(store.conn(), &EventFilter::default(), 2, true).unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["c2", "e1"]);
     }
 }

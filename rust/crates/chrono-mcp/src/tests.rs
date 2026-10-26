@@ -357,7 +357,114 @@ fn tools_call_gaps_correlate_via_y_precede_con_cifras_de_todo() {
     let e = tool_json(&state, "events", json!({"join": "prueba=P1", "format": "json"}));
     let ids: Vec<&str> = e["events"].as_array().unwrap().iter().map(|x| x["id"].as_str().unwrap()).collect();
     assert_eq!(ids, ["p0", "r0"], "{e}");
+    // order=desc: lo más reciente primero.
+    let e = tool_json(&state, "events", json!({"order": "desc", "limit": 2, "format": "json"}));
+    let ids: Vec<&str> = e["events"].as_array().unwrap().iter().map(|x| x["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["p2", "p1"], "{e}");
     // Una clave de join que no existe: error, no vacío.
     let resp = call(&state, 8, "tools/call", json!({"name": "events", "arguments": {"join": "pruebaa=P1"}}));
     assert!(resp["error"]["message"].as_str().unwrap_or("").contains("clave de relación desconocida"), "{resp}");
+}
+
+/// Un log con tres líneas con tiempo (una ERROR) y una ERROR sin tiempo, con
+/// la attr `container` solo en dos eventos.
+fn logs_state() -> (TempDb, State) {
+    let db = TempDb::new("logs");
+    let mut store = Store::open(db.path()).unwrap();
+    let mk = |id: &str, secs: i64, level: &str, container: Option<&str>| Event {
+        id: id.into(),
+        source_id: "jsonl:/app.jsonl".into(),
+        kind: "log".into(),
+        at_epoch: secs * 1000,
+        level: level.into(),
+        title: format!("{id} pasa"),
+        attrs: container
+            .map(|c| [("container".to_string(), c.to_string()), ("ms".to_string(), format!("{}", secs / 360))].into_iter().collect())
+            .unwrap_or_default(),
+        ..Default::default()
+    };
+    {
+        let mut w = store.writer().unwrap();
+        w.add_event(&mk("a", 3600, "ERROR", Some("db-1"))).unwrap();
+        w.add_event(&mk("b", 7200, "INFO", Some("db-2"))).unwrap();
+        w.add_event(&mk("c", 0, "ERROR", None)).unwrap();
+        w.add_event(&mk("d", 7300, "INFO", None)).unwrap();
+        w.commit().unwrap();
+    }
+    (db, State::with_store(Some(store)))
+}
+
+fn tool_text(state: &State, name: &str, args: Value) -> String {
+    let resp = call(state, 7, "tools/call", json!({"name": name, "arguments": args}));
+    resp["result"]["content"][0]["text"].as_str().unwrap_or_else(|| panic!("{resp}")).to_string()
+}
+
+#[test]
+fn timeline_total_cuadra_y_dice_los_eventos_sin_tiempo() {
+    let (_db, state) = logs_state();
+    let t = tool_json(&state, "timeline", json!({"format": "json"}));
+    let sum: i64 = t["buckets"].as_array().unwrap().iter().map(|b| b["count"].as_i64().unwrap()).sum();
+    assert_eq!(t["meta"]["total"].as_i64(), Some(sum), "{t}");
+    assert_eq!(t["untimed"], 1, "{t}");
+    let text = tool_text(&state, "timeline", json!({}));
+    assert!(text.contains("⚠ 1 eventos que casan con los filtros no tienen tiempo"), "{text}");
+    // Con un filtro que no casa la línea sin tiempo, no se dice.
+    let text = tool_text(&state, "timeline", json!({"level": "INFO"}));
+    assert!(!text.contains("sin tiempo") && !text.contains("no tienen tiempo"), "{text}");
+}
+
+#[test]
+fn top_attr_y_level_que_no_existen_avisan() {
+    let (_db, state) = logs_state();
+    let text = tool_text(&state, "top", json!({"dim": "attr:contenedor"}));
+    assert!(text.contains("⚠ ningún evento tiene la attr \"contenedor\"; las que hay: container, ms"), "{text}");
+    let text = tool_text(&state, "events", json!({"level": "eror"}));
+    assert!(text.contains("⚠ ningún evento tiene el nivel eror; los que hay: ERROR,INFO"), "{text}");
+    // Un nivel que existe no avisa; con infer_level, los deducibles tampoco.
+    let text = tool_text(&state, "top", json!({"dim": "kind", "level": "error"}));
+    assert!(!text.contains("⚠"), "{text}");
+    let text = tool_text(&state, "top", json!({"dim": "kind", "level": "FATAL", "infer_level": true}));
+    assert!(!text.contains("ningún evento tiene el nivel"), "{text}");
+}
+
+#[test]
+fn top_attr_resto_solo_con_la_attr_y_sin_valor_aparte() {
+    let (_db, state) = logs_state();
+    let t = tool_json(&state, "top", json!({"dim": "attr:container", "limit": 1, "format": "json"}));
+    let rows: Vec<(String, i64)> =
+        t["top"].as_array().unwrap().iter().map(|r| (r["value"].as_str().unwrap().to_string(), r["count"].as_i64().unwrap())).collect();
+    // 3 con tiempo: a y b con container, d sin él.
+    assert_eq!(rows[1..], [("(resto)".to_string(), 1), ("(sin valor)".to_string(), 1)], "{t}");
+    let t = tool_json(&state, "top", json!({"dim": "level", "limit": 1, "format": "json"}));
+    let last = t["top"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!((last["value"].as_str(), last["count"].as_i64()), (Some("(resto)"), Some(1)), "{t}");
+}
+
+#[test]
+fn stats_filtra_con_where_attr_y_explica_el_vacio() {
+    let (_db, state) = logs_state();
+    let t = tool_json(&state, "stats", json!({"attr": "ms", "where_attr": "container:db-2", "format": "json"}));
+    assert_eq!(t["groups"][0]["count"], 1, "{t}");
+    assert_eq!(t["groups"][0]["max"], 20.0, "{t}");
+    assert_eq!(t["meta"]["total"], 1, "{t}");
+    let text = tool_text(&state, "stats", json!({"attr": "latencia"}));
+    assert!(text.contains("⚠ ningún evento tiene la attr \"latencia\""), "{text}");
+    let text = tool_text(&state, "stats", json!({"attr": "container"}));
+    assert!(text.contains("⚠ la attr \"container\" no tiene valores numéricos"), "{text}");
+}
+
+#[test]
+fn correlate_de_una_sola_fuente_sugiere_via_y_hotspots_sin_git_avisa() {
+    let (_db, state) = logs_state();
+    let c = tool_json(&state, "correlate", json!({"id": "a"}));
+    assert_eq!(c["related"], json!([]), "{c}");
+    assert!(c["hints"][0].as_str().unwrap().contains("via="), "{c}");
+    let h = tool_json(&state, "hotspots", json!({}));
+    assert_eq!(h["hotspots"], json!([]), "{h}");
+    assert!(h["hints"][0].as_str().unwrap().contains("fuente git"), "{h}");
+    // Con git, como siempre y sin aviso.
+    let (_db2, git) = state_with_fixture();
+    let h = tool_json(&git, "hotspots", json!({}));
+    assert_eq!(h["hotspots"][0]["entity"], "src/hot.rs", "{h}");
+    assert!(h.get("hints").is_none(), "{h}");
 }
