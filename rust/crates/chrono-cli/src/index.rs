@@ -322,7 +322,10 @@ pub fn add_glob(db: &Path, pattern: &str, as_kind: Option<&str>, alias: Option<&
         .chain([pattern.as_str()])
         .find_map(|k| cfg.source_options.get(k).and_then(|o| o.get("adapter")).cloned());
     let effective_as = as_kind.map(str::to_string).or(config_adapter);
-    let (src, _, _) = resolve_source(&registry, first, effective_as.as_deref())?;
+    // El tipo sale del primer fichero que se reconozca: uno vacío (un log recién
+    // creado) no dice nada y no debe tumbar el glob entero.
+    let probe = files.iter().find(|f| registry.pick(f).is_some()).unwrap_or(first);
+    let (src, _, _) = resolve_source(&registry, probe, effective_as.as_deref())?;
     let gs = GlobSource {
         id: format!("{}:{pattern}", src.kind()),
         pattern: pattern.clone(),

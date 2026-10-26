@@ -75,7 +75,10 @@ impl Source for JsonlSource {
             return 0;
         }
         let Some(first_line) = cursor::peek_first_nonempty_line(path) else {
-            return 0;
+            // Vacío (un log recién creado): solo una extensión inequívoca lo dice
+            // (`.log`/`.json` no: podría ser texto); confianza baja.
+            let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+            return if matches!(ext.as_deref(), Some("jsonl" | "ndjson")) { 20 } else { 0 };
         };
         let Ok(value) = serde_json::from_str::<Value>(&first_line) else {
             return 0;

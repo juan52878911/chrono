@@ -494,3 +494,31 @@ fn tail_sigue_en_el_indice_nuevo_tras_un_reindex() {
     // reindex) y el evento 2 no llegaba al nuevo.
     assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["2"]);
 }
+
+#[test]
+fn add_de_un_jsonl_vacio_y_glob_con_un_vacio_funcionan_y_sync_lee_lo_que_llega() {
+    let tmp = std::env::temp_dir().join(format!("chrono-vacio-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(tmp.join("logs")).unwrap();
+    let root = std::fs::canonicalize(&tmp).unwrap();
+    let db = root.join("idx/index.db");
+    let db_s = db.to_string_lossy().into_owned();
+    std::fs::write(root.join("logs/app.jsonl"), "").unwrap();
+    std::fs::write(root.join("logs/b.jsonl"), "{\"ts\":\"2026-01-01T00:00:00Z\",\"msg\":\"b\"}\n").unwrap();
+    let chrono = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_chrono")).args(args).current_dir(&root).env("CHRONO_LANG", "en").output().unwrap()
+    };
+    let out = chrono(&["--db", &db_s, "add", "logs/app.jsonl"]);
+    assert!(out.status.success(), "jsonl vacío: {}", String::from_utf8_lossy(&out.stderr));
+    let glob = format!("{}/logs/*.jsonl", root.display());
+    let out = chrono(&["--db", &db_s, "add", &glob, "--name", "g"]);
+    assert!(out.status.success(), "glob con un vacío: {}", String::from_utf8_lossy(&out.stderr));
+    std::fs::write(root.join("logs/app.jsonl"), "{\"ts\":\"2026-01-01T00:00:01Z\",\"msg\":\"a\"}\n").unwrap();
+    let out = chrono(&["--db", &db_s, "sync"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = chrono(&["--db", &db_s, "sources"]);
+    let s = String::from_utf8_lossy(&out.stdout);
+    // app.jsonl (1) + glob (app 1 + b 1).
+    assert!(s.contains("\"events\": 1") && s.contains("\"events\": 2"), "{s}");
+    let _ = std::fs::remove_dir_all(&root);
+}
