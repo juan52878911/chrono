@@ -118,9 +118,10 @@ fn is_known_key(conn: &Connection, key: &str) -> Result<bool> {
     Ok(n != 0)
 }
 
-/// Dims declaradas por las fuentes del índice, ordenadas y sin repetir.
+/// Dims declaradas por las fuentes del índice, ordenadas y sin repetir. Sin las
+/// firmas de relaciones y opciones que el CLI guarda junto a ellas (`rel:`, `opt:`).
 fn declared_dims(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT DISTINCT key FROM source_dims ORDER BY key")?;
+    let mut stmt = conn.prepare(&format!("SELECT DISTINCT key FROM source_dims WHERE {} ORDER BY key", crate::sources::NOT_SIGNATURE))?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }

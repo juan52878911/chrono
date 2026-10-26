@@ -30,6 +30,10 @@ pub struct SourceSummary {
     pub stale_dims_events: i64,
 }
 
+/// `source_dims` guarda, junto a las dims, las firmas de `relations` (`rel:…`) y
+/// de las opciones de la fuente (`opt:…`): no son claves que se puedan consultar.
+pub(crate) const NOT_SIGNATURE: &str = "key NOT GLOB 'rel:*' AND key NOT GLOB 'opt:*'";
+
 /// Una fila por fuente, orden estable por id.
 pub fn sources(conn: &Connection) -> Result<Vec<SourceSummary>> {
     let mut stmt = conn.prepare(
@@ -91,7 +95,7 @@ pub fn sources(conn: &Connection) -> Result<Vec<SourceSummary>> {
              GROUP BY en.key ORDER BY c DESC, en.key LIMIT 15"
         };
         let dims = {
-            let mut st = conn.prepare_cached("SELECT key FROM source_dims WHERE source_ref = ?1 ORDER BY key")?;
+            let mut st = conn.prepare_cached(&format!("SELECT key FROM source_dims WHERE source_ref = ?1 AND {NOT_SIGNATURE} ORDER BY key"))?;
             let rows = st.query_map(params![sref], |r| r.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };

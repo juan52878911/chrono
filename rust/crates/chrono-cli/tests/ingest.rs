@@ -105,6 +105,9 @@ fn activar_entity_via_a_mano_reindexa_la_fuente() {
     assert_eq!(tool_result_entities(&env), ["Bash"], "{out}");
     let quiet = env.ok(&["sync"]);
     assert!(!quiet.contains("reindexing"), "sin cambios no reindexa: {quiet}");
+    // La firma va junto a las dims, pero `sources` solo enseña las dims.
+    let src = env.ok(&["sources"]);
+    assert!(src.contains("sessionId") && !src.contains("opt:"), "{src}");
 
     // Un índice de antes de la firma de opciones no la tiene: se adopta sin reindexar.
     env.sql("DELETE FROM source_dims WHERE key LIKE 'opt:%'");
