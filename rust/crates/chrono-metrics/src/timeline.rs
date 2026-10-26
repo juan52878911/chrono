@@ -183,14 +183,43 @@ pub(crate) fn attr_json(t: &str, key: &str, json_path: &str) -> String {
 /// el parámetro `p`: por `event_dims`, más el JSON solo de las fuentes que tienen
 /// `key` en `attrs` (`attr_keys`). Sin ninguna, el JSON no se lee.
 pub(crate) fn attr_rids_sql(key: &str, p: &str, like: bool) -> String {
-    let op = if like { "LIKE" } else { "=" };
+    // Con `like`, el parámetro ya va escapado con `like_lit`.
+    let (op, esc) = if like { ("LIKE", " ESCAPE '\\'") } else { ("=", "") };
     format!(
-        "SELECT d.event_rid FROM event_dims d JOIN dim_values v ON v.id = d.dim_id WHERE v.key = '{key}' AND v.value {op} {p}
+        "SELECT d.event_rid FROM event_dims d JOIN dim_values v ON v.id = d.dim_id WHERE v.key = '{key}' AND v.value {op} {p}{esc}
          UNION ALL
          SELECT ea.rid FROM events ea WHERE ea.source_ref IN (SELECT source_ref FROM attr_keys WHERE key = '{key}')
-                                        AND {} {op} {p}",
+                                        AND {} {op} {p}{esc}",
         attr_json("ea", key, &format!("'$.{key}'"))
     )
+}
+
+/// Un literal para `LIKE`: `%`, `_` y `\` escapados, con el `ESCAPE` que hay
+/// que poner tras el patrón (vacío si no hacía falta, para no tocar las
+/// consultas de siempre). Sin esto `--grep user_id` casaba `user-id` y
+/// `--grep 100%` cualquier cosa que empezara por `100`.
+pub(crate) fn like_lit(s: &str) -> (String, &'static str) {
+    if !s.contains(['%', '_', '\\']) {
+        return (s.to_string(), "");
+    }
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    (out, " ESCAPE '\\'")
+}
+
+/// Una condición de `attr` (`k:v` o `k=v`) partida por el PRIMER separador:
+/// `k=v:w` es la clave `k` con valor `v:w` (antes se partía por `:` primero y
+/// la clave `k=v` se descartaba sin avisar).
+pub(crate) fn split_attr(cond: &str) -> (&str, &str) {
+    match cond.find([':', '=']) {
+        Some(i) => (cond[..i].trim(), &cond[i + 1..]),
+        None => (cond.trim(), ""),
+    }
 }
 
 /// `,A,B,` en mayúsculas y sin espacios: el parámetro de una lista separada por
@@ -253,7 +282,8 @@ impl EventScope<'_> {
             params.push(value);
         };
         if let Some(g) = self.grep.filter(|g| !g.is_empty()) {
-            push("$t.title LIKE ?N", format!("%{g}%"));
+            let (g, esc) = like_lit(g);
+            push(&format!("$t.title LIKE ?N{esc}"), format!("%{g}%"));
         }
         if let Some(l) = self.level.filter(|l| !l.trim().is_empty()) {
             let expr = level_expr("$t", self.infer_level);
@@ -261,7 +291,10 @@ impl EventScope<'_> {
         }
         if let Some(k) = self.kind.filter(|k| !k.is_empty()) {
             match k.strip_suffix('*') {
-                Some(prefix) => push("$t.kind LIKE ?N", format!("{prefix}%")),
+                Some(prefix) => {
+                    let (prefix, esc) = like_lit(prefix);
+                    push(&format!("$t.kind LIKE ?N{esc}"), format!("{prefix}%"))
+                }
                 None => push("$t.kind = ?N", k.to_string()),
             }
         }
@@ -273,14 +306,16 @@ impl EventScope<'_> {
             );
         }
         for cond in self.attr.unwrap_or("").split(',').map(str::trim).filter(|c| !c.is_empty()) {
-            let (k, v) = cond.split_once(':').or_else(|| cond.split_once('=')).unwrap_or((cond, ""));
+            let (k, v) = split_attr(cond);
             // La clave va en el path JSON: solo caracteres seguros (como en `top attr:`).
-            let k = k.trim();
-            if k.is_empty() || !k.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+            // Los frontales la validan antes (`check_attr`); aquí, por si acaso,
+            // una clave inválida no casa nada en vez de quitar el filtro.
+            if !crate::relate::valid_key(k) {
+                push("0 = ?N", "1".to_string());
                 continue;
             }
             match v.trim().strip_suffix('*') {
-                Some(prefix) => push(&format!("$t.rid IN ({})", attr_rids_sql(k, "?N", true)), format!("{prefix}%")),
+                Some(prefix) => push(&format!("$t.rid IN ({})", attr_rids_sql(k, "?N", true)), format!("{}%", like_lit(prefix).0)),
                 None => push(&format!("$t.rid IN ({})", attr_rids_sql(k, "?N", false)), v.trim().to_string()),
             }
         }

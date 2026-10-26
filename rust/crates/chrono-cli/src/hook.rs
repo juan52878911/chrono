@@ -192,16 +192,20 @@ fn to_ns(v: Option<&str>, default: &str) -> R<i64> {
             return Ok(now_ns);
         }
         let d = rest.strip_prefix('-').and_then(crate::timeutil::parse_duration).ok_or(format!("tiempo no válido: {v}"))?;
-        return Ok(now_ns - d * 1_000_000);
+        return Ok(now_ns.saturating_sub(d.saturating_mul(1_000_000)));
     }
     let (main, offset_secs) = split_offset(v);
     let (base, frac) = match main.split_once('.') {
         Some((b, f)) => (b, f),
         None => (main, ""),
     };
+    // Cifras ASCII: cortar una fracción con `é` en el byte 9 era un panic.
+    if !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("tiempo no válido: {v}"));
+    }
     let ms = crate::timeutil::parse_since(base).ok_or(format!("tiempo no válido: {v}"))?;
     let frac_ns: i64 = format!("{:0<9}", &frac[..frac.len().min(9)]).parse().unwrap_or(0);
-    Ok((ms - offset_secs * 1000) * 1_000_000 + frac_ns)
+    Ok((ms - offset_secs * 1000).saturating_mul(1_000_000).saturating_add(frac_ns))
 }
 
 fn split_offset(v: &str) -> (&str, i64) {
@@ -1461,6 +1465,21 @@ mod tests {
         let now = to_ns(None, "now").unwrap();
         let ago = to_ns(Some("now-1h"), "now").unwrap();
         assert!((now - ago - 3_600_000_000_000).abs() < 2_000_000_000);
+    }
+
+    /// Tiempos de la entrada de una tool (los escribe el modelo): nunca panic.
+    #[test]
+    fn tiempos_raros_no_hacen_panic() {
+        for v in [
+            "2026-10-14T22:00:00.12345678é", "2026-10-14T22:00:00.😀Z", "2026-10-14T22:00:00.1é+02:00",
+            "now-9223372036854775807", "now-99999999999d", "now-", "now+1h", "now-0", "nowé", "T", "-", "+", "Z", ".",
+            "2026-10-14T22:00:00+", "2026-10-14T22:00:00+é", "2026-10-14T22:00:00-99:99", "0000-01-01T00:00:00Z",
+            "9999-12-31T23:59:59.999999999Z", "2026-10-14T", "2026-10-14Té",
+        ] {
+            let r = std::panic::catch_unwind(|| to_ns(Some(v), "now"));
+            assert!(r.is_ok(), "panic con {v:?}");
+        }
+        assert!(to_ns(Some("2026-10-14T22:00:00.12345678é"), "now").is_err());
     }
 
     #[test]

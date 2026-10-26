@@ -269,3 +269,5 @@ mod informe;
 mod tests;
 #[cfg(test)]
 mod tests_contrato;
+#[cfg(test)]
+mod tests_adversario;

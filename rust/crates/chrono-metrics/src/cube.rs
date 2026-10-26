@@ -92,8 +92,9 @@ pub(crate) fn cube(conn: &Connection, since: i64, scope: &EventScope, dims: &[Di
     if let Some(k) = scope.kind.filter(|k| !k.is_empty()) {
         match k.strip_suffix('*') {
             Some(prefix) => {
+                let (prefix, esc) = crate::timeline::like_lit(prefix);
                 let p = bind(format!("{prefix}%"), &mut binds);
-                conds.push(format!("r.kind LIKE {p}"));
+                conds.push(format!("r.kind LIKE {p}{esc}"));
             }
             None => {
                 let p = bind(k.to_string(), &mut binds);

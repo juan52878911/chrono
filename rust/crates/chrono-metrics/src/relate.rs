@@ -50,11 +50,27 @@ fn check_key(conn: &Connection, k: &str) -> Result<()> {
 pub fn check_join(conn: &Connection, join: Option<&str>) -> Result<()> {
     match join.map(str::trim).filter(|j| !j.is_empty()) {
         Some(raw) => {
-            let k = raw.split_once('=').or_else(|| raw.split_once(':')).map_or(raw, |(k, _)| k);
+            let k = raw.split_once(['=', ':']).map_or(raw, |(k, _)| k);
             check_key(conn, k.trim())
         }
         None => Ok(()),
     }
+}
+
+/// Valida las claves de un filtro `attr` (`k:v,k2=v2`): una inválida
+/// (`mi clave:x`) no se puede consultar y quitarla del filtro contaba todos los
+/// eventos sin avisar.
+pub fn check_attr(attr: Option<&str>) -> Result<()> {
+    for cond in attr.unwrap_or("").split(',').map(str::trim).filter(|c| !c.is_empty()) {
+        let (k, _) = crate::timeline::split_attr(cond);
+        if !valid_key(k) {
+            return Err(crate::Msg::err(
+                format!("invalid attr key: {k:?} (letters, digits, _ . -; use key:value, several separated by commas)"),
+                format!("clave de attr no válida: {k:?} (letras, cifras, _ . -; usa clave:valor, varias separadas por comas)"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `(rid, value)` de la clave `key` (ya validada): links ∪ dims.
@@ -92,7 +108,7 @@ pub(crate) fn key_rids_of_event_sql(key: &str, p: &str) -> String {
 /// Cláusula de `EventScope::join` (`K=v`, `K=v*`, `K=@id` o solo `K`) sobre
 /// el alias `t`, con su parámetro (o `None` si no lleva). Clave inválida: `None`.
 pub(crate) fn join_clause(t: &str, raw: &str, param: &str) -> Option<(String, Option<String>)> {
-    let (k, v) = raw.split_once('=').or_else(|| raw.split_once(':')).unwrap_or((raw, ""));
+    let (k, v) = raw.split_once(['=', ':']).unwrap_or((raw, ""));
     let (k, v) = (k.trim(), v.trim());
     if !valid_key(k) {
         return None;
@@ -391,6 +407,8 @@ pub fn gaps(conn: &Connection, from: &EventScope, to: &EventScope, via: &str, by
     }
     check_join(conn, from.join)?;
     check_join(conn, to.join)?;
+    check_attr(from.attr)?;
+    check_attr(to.attr)?;
     // Una fuente que no existe daría «todo es hueco» sin avisar.
     for (side, sc) in [("from", from), ("to", to)] {
         if let Some(src) = sc.source.filter(|s| !s.is_empty()) {

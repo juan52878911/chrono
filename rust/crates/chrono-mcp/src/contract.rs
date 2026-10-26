@@ -136,7 +136,7 @@ pub fn header(conn: &Connection, tool: &str, args: &Value, result: &Value) -> (S
     let args = &count_args;
     let (total, cov) = coverage(conn, args, since_epoch);
     let (list, default_limit) = main_list(tool).unwrap_or(("", 0));
-    let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(default_limit);
+    let limit = crate::tools::arg_i64(args, "limit", default_limit);
     let returned = result.get(list).and_then(Value::as_array).map(|a| a.len() as i64);
     let truncated = matches!(returned, Some(n) if limit > 0 && n >= limit);
     let mut warn = Vec::new();

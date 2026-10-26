@@ -69,7 +69,21 @@ fn normalize_segment(seg: &str) -> String {
     }
     let mut out = String::with_capacity(seg.len());
     let mut run_start: Option<usize> = None;
+    // Un marcador ya puesto (`<NUM>`) sigue la tira en la que está: si no,
+    // plantillizar una plantilla partía `deadbeef<NUM>x` en otra tira y
+    // `deadbeef` pasaba a `<HEX>` (no era idempotente).
+    let mut skip_to = 0;
     for (i, c) in seg.char_indices() {
+        if i < skip_to {
+            continue;
+        }
+        if c == '<' {
+            if let Some(m) = MARKERS.iter().find(|m| seg[i..].starts_with(*m)) {
+                skip_to = i + m.len();
+                run_start.get_or_insert(i);
+                continue;
+            }
+        }
         let word = c.is_alphanumeric() || c == '_';
         match (word, run_start) {
             (true, None) => run_start = Some(i),
@@ -87,6 +101,8 @@ fn normalize_segment(seg: &str) -> String {
     }
     out
 }
+
+const MARKERS: [&str; 5] = ["<NUM>", "<HEX>", "<IP>", "<UUID>", "<TS>"];
 
 /// Una tira de caracteres de palabra: hex (`0x…` o ≥6 con letra y dígito) o
 /// sus dígitos a `<NUM>`.

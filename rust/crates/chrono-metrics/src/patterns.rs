@@ -39,7 +39,8 @@ pub fn patterns_filtered(
     let source_like: Option<String> = source
         .filter(|s| !s.is_empty())
         .map(|s| if s.contains(':') { format!("{s}%") } else { format!("{s}:%") });
-    let grep_like: Option<String> = grep.filter(|g| !g.is_empty()).map(|g| format!("%{g}%"));
+    // Escapado siempre, con `ESCAPE` fijo: la plantilla no usa índice.
+    let grep_like: Option<String> = grep.filter(|g| !g.is_empty()).map(|g| format!("%{}%", crate::timeline::like_lit(g).0));
     let mut stmt = conn.prepare(
         "SELECT template, c, COALESCE((SELECT id FROM events WHERE rid = ex), '') FROM (
              SELECT t.template, SUM(r.count) AS c, MAX(r.last_rid) AS ex
@@ -48,7 +49,7 @@ pub fn patterns_filtered(
              WHERE (?1 = 0 OR r.bucket_epoch >= ?1)
                AND (?3 IS NULL OR r.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?3
                                                    OR json_extract(manifest_json, '$.alias') = ?5))
-               AND (?4 IS NULL OR t.template LIKE ?4)
+               AND (?4 IS NULL OR t.template LIKE ?4 ESCAPE '\\')
              GROUP BY r.template_id
              ORDER BY c DESC, t.template ASC
              LIMIT ?2)
