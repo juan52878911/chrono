@@ -199,6 +199,39 @@ fn cambiar_las_dims_con_un_fichero_borrado_no_pierde_sus_eventos() {
     assert!(!env.ok(&["sources"]).contains("stale_dims_events"));
 }
 
+#[test]
+fn init_sobre_un_indice_viejo_no_pierde_las_fuentes_anadidas() {
+    let env = Env::new("init-viejo", r#"{"version":2}"#);
+    let line = "{\"ts\":\"2024-01-01T00:00:00Z\",\"msg\":\"hola\"}\n";
+    write(env.dir(), "app.jsonl", line);
+    write(env.dir(), "otra.jsonl", line);
+    let app = path_s(&env.dir().join("app.jsonl"));
+    env.ok(&["init", &app]);
+    env.ok(&["add", &path_s(&env.dir().join("otra.jsonl"))]);
+    env.sql("UPDATE meta SET value = '5' WHERE key = 'schema_version'");
+
+    // Con otra fuente además de la de init: no se borra nada y se manda a reindex.
+    let out = env.run(&["init", &app, "--db", &env.db()]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("reindex") && err.contains("otra.jsonl") && !err.contains("from scratch"), "{err}");
+    assert_eq!(env.sql("SELECT value FROM meta WHERE key = 'schema_version'"), ["5"]);
+    assert_eq!(env.sql("SELECT COUNT(*) FROM sources"), ["2"]);
+
+    // De un chrono más nuevo: tampoco se toca.
+    env.sql("UPDATE meta SET value = '99' WHERE key = 'schema_version'");
+    let out = env.run(&["init", &app, "--db", &env.db()]);
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("newer"));
+    assert_eq!(env.sql("SELECT COUNT(*) FROM sources"), ["2"]);
+
+    // Sin más fuentes que la de init, se rehace como siempre.
+    env.sql("DELETE FROM sources WHERE id LIKE '%otra.jsonl'");
+    env.sql("UPDATE meta SET value = '5' WHERE key = 'schema_version'");
+    let out = env.ok(&["init", &app]);
+    assert!(!out.contains("reindex"), "{out}");
+    assert_eq!(env.sql("SELECT value FROM meta WHERE key = 'schema_version'"), ["7"]);
+}
+
 /// `tail` durante un ciclo y se mata (no termina solo).
 fn tail_once(env: &Env, then: impl FnOnce()) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_chrono"))

@@ -166,13 +166,13 @@ pub fn init(start: &Path, symbols: bool, as_kind: Option<&str>, db_override: Opt
     };
 
     let _lock = lock_ingest(&db)?;
-    let mut store = open_or_recreate(&db)?;
+    let source_id = canonical_source_id(src.kind(), &ingest_path);
+    let mut store = open_or_recreate(&db, &source_id, db_override.is_some())?;
     store.reset()?;
     let (n, wm, manifest) =
         ingest_source(src, &ingest_path, None, &mut store, &root, &IngestCtx::default()).map_err(|e| e.into_boxed())?;
 
     // Registra la fuente en la tabla `sources` (primera fuente del índice).
-    let source_id = canonical_source_id(src.kind(), &ingest_path);
     store.upsert_source(
         &source_id,
         src.kind(),
@@ -675,23 +675,61 @@ fn lock_ingest(db: &Path) -> Result<std::fs::File> {
     Ok(f)
 }
 
-/// Abre el índice; si su `schema_version` no es la actual (índice v1 del Go,
-/// por ejemplo), lo borra y lo crea de nuevo: reindex avisado, no migración.
-fn open_or_recreate(db: &Path) -> Result<Store> {
-    match Store::open(db) {
-        Ok(s) => Ok(s),
-        Err(e) if db.exists() => {
-            eprintln!("{}", t(
-                format!("chrono: incompatible index ({e}); rebuilding from scratch"),
-                format!("chrono: índice incompatible ({e}); se reconstruye desde cero"),
-            ));
-            for suffix in ["", "-wal", "-shm"] {
-                let _ = std::fs::remove_file(format!("{}{suffix}", db.display()));
+/// Abre el índice para `init`, que lo rehace con una sola fuente (`source_id`).
+/// Si es de otro esquema:
+/// - de un chrono más nuevo, error (actualizar chrono; no se toca);
+/// - más viejo y con otras fuentes además de esta (añadidas con `add`), error
+///   que manda a `chrono reindex`, que las rehace todas: antes se borraba y se
+///   perdían, con un mensaje que decía a la vez «reindex» y «desde cero»;
+/// - más viejo y sin más fuentes que esta, se borra y se crea de nuevo.
+///
+/// Un fichero que no es un índice (corrupto, otra cosa) se rehace como antes.
+fn open_or_recreate(db: &Path, source_id: &str, explicit_db: bool) -> Result<Store> {
+    let e = match Store::open(db) {
+        Ok(s) => return Ok(s),
+        Err(e) if db.exists() => e,
+        Err(e) => return Err(e),
+    };
+    let msg = match e.downcast_ref::<chrono_store::SchemaMismatch>() {
+        Some(m) if m.is_newer() => return Err(crate::reindex::explain_open_error(&*e, db, explicit_db).unwrap_or_else(|| e.to_string()).into()),
+        Some(m) => {
+            let others: Vec<String> = chrono_store::read_sources_any_version(db)
+                .map_err(|re| format!("{e} ({re})"))?
+                .into_iter()
+                .map(|s| s.id)
+                .filter(|id| id != source_id)
+                .collect();
+            if !others.is_empty() {
+                let cmd = if explicit_db { format!("chrono --db {} reindex", db.display()) } else { "chrono reindex".to_string() };
+                return Err(t(
+                    format!(
+                        "the index {} was built by an older chrono (schema {}) and has {} more source(s) that init would drop ({}).\n\
+                         Rebuild it with all its sources: {cmd}  (or delete it to start over with this one only)",
+                        db.display(), m.found_label(), others.len(), others.join(", ")
+                    ),
+                    format!(
+                        "el índice {} es de una versión anterior de chrono (esquema {}) y tiene {} fuente(s) más que init perdería ({}).\n\
+                         Reconstrúyelo con todas sus fuentes: {cmd}  (o bórralo para empezar solo con esta)",
+                        db.display(), m.found_label(), others.len(), others.join(", ")
+                    ),
+                )
+                .into());
             }
-            Ok(Store::open(db)?)
+            t(
+                format!("chrono: index from an older chrono (schema {}) with no other source; building it again", m.found_label()),
+                format!("chrono: índice de una versión anterior (esquema {}) sin más fuentes; se crea de nuevo", m.found_label()),
+            )
         }
-        Err(e) => Err(e),
+        None => t(
+            format!("chrono: unreadable index ({e}); building it again"),
+            format!("chrono: índice ilegible ({e}); se crea de nuevo"),
+        ),
+    };
+    eprintln!("{msg}");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", db.display()));
     }
+    Store::open(db)
 }
 
 /// De dónde salen las opciones de una ingesta y, en una fuente glob, a qué
