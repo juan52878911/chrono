@@ -11,7 +11,7 @@
 //!   valor es lo que captura; si no, la coincidencia entera.
 //!
 //! Sin alternancia ni referencias hacia atrás. Busca la coincidencia más a la
-//! izquierda, con vuelta atrás acotada por el tamaño del texto.
+//! izquierda, en tiempo lineal en el tamaño del texto (autómata, sin vuelta atrás).
 
 #[derive(Debug, Clone, PartialEq)]
 enum Atom {
@@ -34,12 +34,15 @@ struct Node {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pattern {
     nodes: Vec<Node>,
+    prog: Vec<Inst>,
     start: bool,
     end: bool,
 }
 
-/// Tope de repeticiones de `*`/`+`/`{n,}`: ninguna clave real es más larga.
+/// Tope de repeticiones de `{n}`/`{n,m}`: ninguna clave real es más larga.
 const MAX_REPEAT: usize = 4096;
+/// `*`, `+` y `{n,}`: sin tope.
+const UNBOUNDED: usize = usize::MAX;
 
 fn shorthand(c: char) -> Option<(Vec<(char, char)>, bool)> {
     let digit = vec![('0', '9')];
@@ -146,8 +149,8 @@ impl Pattern {
                 _ => Atom::Lit(c),
             };
             let (min, max) = match chars.get(i) {
-                Some('*') => (0, MAX_REPEAT),
-                Some('+') => (1, MAX_REPEAT),
+                Some('*') => (0, UNBOUNDED),
+                Some('+') => (1, UNBOUNDED),
                 Some('?') => (0, 1),
                 Some('{') => {
                     let close = chars[i..].iter().position(|&c| c == '}').map(|p| i + p);
@@ -156,10 +159,10 @@ impl Pattern {
                     let num = |s: &str| s.trim().parse::<usize>().map_err(|_| format!("posición {i}: repetición {{{body}}} no válida"));
                     let r = match body.split_once(',') {
                         None => (num(&body)?, num(&body)?),
-                        Some((a, b)) if b.trim().is_empty() => (num(a)?, MAX_REPEAT),
+                        Some((a, b)) if b.trim().is_empty() => (num(a)?, UNBOUNDED),
                         Some((a, b)) => (num(a)?, num(b)?),
                     };
-                    if r.0 > r.1 || r.1 > MAX_REPEAT {
+                    if r.0 > MAX_REPEAT || (r.1 != UNBOUNDED && (r.0 > r.1 || r.1 > MAX_REPEAT)) {
                         return Err(format!("posición {i}: repetición {{{body}}} no válida"));
                     }
                     i = close;
@@ -178,7 +181,8 @@ impl Pattern {
         if open {
             return Err("'(' sin ')'".to_string());
         }
-        Ok(Pattern { nodes, start, end })
+        let prog = compile(&nodes);
+        Ok(Pattern { nodes, prog, start, end })
     }
 
     /// Valor de la primera coincidencia (el grupo si lo hay), o `None`.
@@ -194,18 +198,7 @@ impl Pattern {
         let mut out = Vec::new();
         let mut from = 0;
         while from <= chars.len() {
-            let mut hit = None;
-            for s in from..=chars.len() {
-                let mut caps = (None, None);
-                if let Some(e) = self.at(&chars, 0, s, &mut caps) {
-                    hit = Some((s, e, caps));
-                    break;
-                }
-                if self.start {
-                    break;
-                }
-            }
-            let Some((s, e, caps)) = hit else { break };
+            let Some((s, e, caps)) = self.search(&chars, from) else { break };
             let (a, b) = match caps {
                 (Some(a), Some(b)) => (a, b),
                 _ => (s, e),
@@ -221,47 +214,145 @@ impl Pattern {
         out
     }
 
-    fn at(&self, text: &[(usize, char)], ni: usize, pos: usize, caps: &mut (Option<usize>, Option<usize>)) -> Option<usize> {
-        let Some(node) = self.nodes.get(ni) else {
-            return (!self.end || pos == text.len()).then_some(pos);
-        };
-        match &node.atom {
-            Atom::Open => {
-                let prev = caps.0.replace(pos);
-                let r = self.at(text, ni + 1, pos, caps);
-                if r.is_none() {
-                    caps.0 = prev;
-                }
-                r
+    /// La coincidencia más a la izquierda desde `from` (`(inicio, fin,
+    /// grupo)`), con la misma preferencia que una vuelta atrás voraz pero en
+    /// tiempo lineal: simulación del autómata con hilos por prioridad (Pike).
+    /// La vuelta atrás era exponencial con repeticiones seguidas (`\w*\w*!`)
+    /// y costaba `n × 4096` en un título largo que no casaba.
+    fn search(&self, text: &[(usize, char)], from: usize) -> Option<(usize, usize, Caps)> {
+        let n = self.prog.len();
+        let (mut clist, mut nlist) = (Threads::new(n), Threads::new(n));
+        let mut matched = None;
+        let mut pos = from;
+        loop {
+            if matched.is_none() && (!self.start || pos == from) {
+                self.add(&mut clist, 0, pos, Thread { start: pos, caps: (None, None) });
             }
-            Atom::Close => {
-                let prev = caps.1.replace(pos);
-                let r = self.at(text, ni + 1, pos, caps);
-                if r.is_none() {
-                    caps.1 = prev;
+            for i in 0..clist.list.len() {
+                let (pc, th) = clist.list[i];
+                match self.prog[pc] {
+                    Inst::Match => {
+                        if !self.end || pos == text.len() {
+                            // Los hilos de menos prioridad sobran.
+                            matched = Some((th.start, pos, th.caps));
+                            break;
+                        }
+                    }
+                    Inst::Char(k) => {
+                        if pos < text.len() && matches(&self.nodes[k].atom, text[pos].1) {
+                            self.add(&mut nlist, pc + 1, pos + 1, th);
+                        }
+                    }
+                    _ => {}
                 }
-                r
             }
-            atom => {
-                let mut n = 0;
-                while n < node.max && pos + n < text.len() && matches(atom, text[pos + n].1) {
-                    n += 1;
+            if pos >= text.len() || (nlist.list.is_empty() && (matched.is_some() || self.start)) {
+                break;
+            }
+            std::mem::swap(&mut clist, &mut nlist);
+            nlist.clear();
+            pos += 1;
+        }
+        matched
+    }
+
+    /// Añade el hilo en `pc` siguiendo saltos y marcas que no consumen, en
+    /// orden de prioridad (pila explícita: sin recursión que desborde).
+    fn add(&self, list: &mut Threads, pc: usize, pos: usize, th: Thread) {
+        let mut stack = vec![(pc, th)];
+        while let Some((pc, mut th)) = stack.pop() {
+            if list.seen[pc] == list.gen {
+                continue;
+            }
+            list.seen[pc] = list.gen;
+            match self.prog[pc] {
+                Inst::Jmp(x) => stack.push((x, th)),
+                Inst::Split(x, y) => {
+                    stack.push((y, th));
+                    stack.push((x, th));
                 }
-                loop {
-                    if n < node.min {
-                        return None;
+                Inst::Save(g) => {
+                    if g == 0 {
+                        th.caps.0 = Some(pos);
+                    } else {
+                        th.caps.1 = Some(pos);
                     }
-                    if let Some(e) = self.at(text, ni + 1, pos + n, caps) {
-                        return Some(e);
+                    stack.push((pc + 1, th));
+                }
+                Inst::Char(_) | Inst::Match => list.list.push((pc, th)),
+            }
+        }
+    }
+}
+
+type Caps = (Option<usize>, Option<usize>);
+
+#[derive(Debug, Clone, Copy)]
+struct Thread {
+    start: usize,
+    caps: Caps,
+}
+
+/// Hilos vivos en una posición, sin repetir instrucción (gana el primero).
+struct Threads {
+    list: Vec<(usize, Thread)>,
+    seen: Vec<u32>,
+    gen: u32,
+}
+
+impl Threads {
+    fn new(n: usize) -> Threads {
+        Threads { list: Vec::new(), seen: vec![0; n], gen: 1 }
+    }
+    fn clear(&mut self) {
+        self.list.clear();
+        self.gen += 1;
+    }
+}
+
+/// Instrucciones del autómata: `Char(k)` consume un carácter que case con el
+/// átomo del nodo `k`; `Split(x, y)` prefiere `x`.
+#[derive(Debug, Clone, PartialEq)]
+enum Inst {
+    Char(usize),
+    Split(usize, usize),
+    Jmp(usize),
+    Save(u8),
+    Match,
+}
+
+fn compile(nodes: &[Node]) -> Vec<Inst> {
+    let mut prog = Vec::new();
+    for (k, node) in nodes.iter().enumerate() {
+        match node.atom {
+            Atom::Open => prog.push(Inst::Save(0)),
+            Atom::Close => prog.push(Inst::Save(1)),
+            _ => {
+                for _ in 0..node.min {
+                    prog.push(Inst::Char(k));
+                }
+                if node.max == UNBOUNDED {
+                    let l = prog.len();
+                    prog.push(Inst::Split(l + 1, l + 3));
+                    prog.push(Inst::Char(k));
+                    prog.push(Inst::Jmp(l));
+                } else {
+                    let mut splits = Vec::new();
+                    for _ in node.min..node.max {
+                        splits.push(prog.len());
+                        prog.push(Inst::Split(prog.len() + 1, 0));
+                        prog.push(Inst::Char(k));
                     }
-                    if n == 0 {
-                        return None;
+                    let end = prog.len();
+                    for s in splits {
+                        prog[s] = Inst::Split(s + 1, end);
                     }
-                    n -= 1;
                 }
             }
         }
     }
+    prog.push(Inst::Match);
+    prog
 }
 
 fn matches(atom: &Atom, c: char) -> bool {
@@ -318,5 +409,105 @@ mod tests {
         for bad in ["(a(b))", "(a)(b)", "a)", "(ab", "[ab", "*a", "(a)+", "a{3,1}", "a\\"] {
             assert!(Pattern::parse(bad).is_err(), "{bad} debería fallar");
         }
+    }
+
+    /// La vuelta atrás de antes, como referencia: el autómata tiene que dar
+    /// exactamente lo mismo (inicio, fin y grupo) en textos cortos.
+    fn reference<'t>(p: &Pattern, text: &'t str) -> Vec<&'t str> {
+        fn at(p: &Pattern, text: &[(usize, char)], ni: usize, pos: usize, caps: &mut super::Caps) -> Option<usize> {
+            let Some(node) = p.nodes.get(ni) else {
+                return (!p.end || pos == text.len()).then_some(pos);
+            };
+            match &node.atom {
+                super::Atom::Open | super::Atom::Close => {
+                    let open = node.atom == super::Atom::Open;
+                    let prev = if open { caps.0.replace(pos) } else { caps.1.replace(pos) };
+                    let r = at(p, text, ni + 1, pos, caps);
+                    if r.is_none() {
+                        if open {
+                            caps.0 = prev;
+                        } else {
+                            caps.1 = prev;
+                        }
+                    }
+                    r
+                }
+                atom => {
+                    let mut n = 0;
+                    while n < node.max && pos + n < text.len() && super::matches(atom, text[pos + n].1) {
+                        n += 1;
+                    }
+                    loop {
+                        if n < node.min {
+                            return None;
+                        }
+                        if let Some(e) = at(p, text, ni + 1, pos + n, caps) {
+                            return Some(e);
+                        }
+                        if n == 0 {
+                            return None;
+                        }
+                        n -= 1;
+                    }
+                }
+            }
+        }
+        let chars: Vec<(usize, char)> = text.char_indices().collect();
+        let byte = |q: usize| chars.get(q).map_or(text.len(), |c| c.0);
+        let mut out = Vec::new();
+        let mut from = 0;
+        while from <= chars.len() {
+            let mut hit = None;
+            for s in from..=chars.len() {
+                let mut caps = (None, None);
+                if let Some(e) = at(p, &chars, 0, s, &mut caps) {
+                    hit = Some((s, e, caps));
+                    break;
+                }
+                if p.start {
+                    break;
+                }
+            }
+            let Some((s, e, caps)) = hit else { break };
+            let (a, b) = match caps {
+                (Some(a), Some(b)) => (a, b),
+                _ => (s, e),
+            };
+            if b > a {
+                out.push(&text[byte(a)..byte(b)]);
+            }
+            if p.start {
+                break;
+            }
+            from = if e > s { e } else { s + 1 };
+        }
+        out
+    }
+
+    #[test]
+    fn el_automata_da_lo_mismo_que_la_vuelta_atras() {
+        let mut x: u64 = 0x5eed_0006;
+        let mut rnd = |n: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n as u64) as usize
+        };
+        let piezas = [
+            "a", "b", "ab", ".", r"\d", r"\w", r"\s", r"\D", "[ab]", "[^a]", "[a-c0-9]", "*", "+", "?", "{2}", "{1,3}",
+            "{0,}", "(", ")", "^", "$", "-", "1", " ",
+        ];
+        let letras = ["a", "b", "c", "1", "2", " ", "-", "ñ"];
+        let mut probados = 0;
+        for _ in 0..30_000 {
+            let src: String = (0..rnd(8) + 1).map(|_| piezas[rnd(piezas.len())]).collect();
+            let Ok(p) = Pattern::parse(&src) else { continue };
+            probados += 1;
+            for _ in 0..8 {
+                let t: String = (0..rnd(12)).map(|_| letras[rnd(letras.len())]).collect();
+                assert_eq!(p.find_all(&t), reference(&p, &t), "patrón {src:?} sobre {t:?}");
+            }
+        }
+        assert!(probados > 3000, "{probados}");
     }
 }
