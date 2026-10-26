@@ -34,7 +34,11 @@ cárgalo (sección 1) o, si no puedes, dilo y usa la otra herramienta solo para 
   Sesiones de Claude Code: `chrono add '~/.claude/projects/**/*.jsonl' --as jsonl --name claude
   --preset claude-sessions` (una tool = un evento; entidad = la tool, ERROR si falló; sin el input
   ni el contenido, salvo la primera línea de los errores). Qué precede a un fallo:
-  `precede` con `level=ERROR entity=Bash before_levels=*`.
+  `precede` con `level=ERROR entity=Bash before_levels=*` (`join=sessionId`: solo lo de la misma sesión).
+- **Relacionar fuentes por clave**: `relations` en `.chrono/config.json` (versión 2) declara de dónde sale
+  una clave en cada fuente (campo, `link:<rel>` o patrón sobre la ruta/el título, p. ej.
+  `{"relations": {"prueba": [{"source": "pruebas", "field": "file", "pattern": "prueba-(\\d+)"}, …]}}`;
+  `chrono config check` la valida). Una dim (`sessionId`) o un link (`ticket`, `tool_use`) ya son claves.
 - **Inventario de una carpeta** (PDF, imágenes, audio…): `chrono add <carpeta> --as dir`: un evento
   por fichero con tipo, formato, tamaño y fechas; la carpeta es la entidad
   (`top attr:type`, `stats size --by attr:type`). No lee el contenido.
@@ -68,6 +72,9 @@ En el CLI son `--since`, `--until`, `--level`… y siempre `--compact`.
 | Una traza o excepción completa | `events` entity=<svc> since=<ts> limit=80 | `chrono events --entity <svc> --since <ts> --limit 80` |
 | Latencias, tamaños, duraciones | `stats` attr=duration_s by=entity | `chrono stats duration_s --by entity` |
 | Qué hubo en OTRAS fuentes alrededor | `correlate` id=<evento> delta_secs=1800 | `chrono correlate <id> --delta 30m --kind commit` |
+| Qué comparte una clave con un evento (misma sesión, sha, prueba) | `correlate` id=<evento> via=<clave> | `chrono correlate <id> --via <clave>` |
+| Los eventos de una clave | `events` join=<clave>=<valor> | `chrono events --join <clave>=<valor>` |
+| X sin Y (pruebas sin resultado, sesiones sin commit) | `gaps` from="<fuente> kind=…" to=<fuente> via=<clave> by=<unidad> | `chrono gaps --from <fuente> --to <fuente> --via <clave> --by <unidad>` |
 
 Patrones de trabajo:
 - **Cifras**: siempre de `top`/`patterns`/`timeline`, nunca contando líneas de `events` o de Loki.
