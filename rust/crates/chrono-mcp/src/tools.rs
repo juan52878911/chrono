@@ -49,7 +49,7 @@ fn with_scope(own: Value) -> Value {
         "format": str_prop("text (por defecto: tabla compacta con cabecera total/coverage/truncated/index/q) | json"),
         "depth": str_prop("counts (solo cifras) | summary (sin sub-tablas por fila) | full. Por defecto summary en precede, full en el resto"),
         "attr": str_prop("Atributo clave:valor, p. ej. container:crm_aura_sandbox_postgres (valor con * = prefijo; varios con coma) (opcional)"),
-        "join": str_prop("Relación por clave entre fuentes: K=valor, K=prefijo*, K=@<id> (los que comparten un valor de K con ese evento) o K (los que la tienen). K es una relación de la config (relations), un link (ticket, tool_use…) o una dim (sessionId…) (opcional)")
+        "join": str_prop("Clave de relación (relations, link o dim): K=valor | K=prefijo* | K=@<id> (comparte valor con ese evento) | K (opcional)")
     });
     if let (Some(p), Some(o)) = (props.as_object_mut(), own.as_object()) {
         for (k, v) in o {
