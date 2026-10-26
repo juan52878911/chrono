@@ -248,6 +248,7 @@ pub fn tool_defs() -> Vec<Value> {
                 "to": str_prop("Lado Y, p. ej. \"git\""),
                 "via": str_prop("Clave que une los dos lados"),
                 "by": str_prop("Unidad que se cuenta, si no es la propia clave (p. ej. sessionId) (opcional)"),
+                "any_order": json!({"type": "boolean", "description": "Cubre un to aunque sea anterior al primer from de la unidad (por defecto false: solo en o después)"}),
                 "since": since_prop(),
                 "limit": json!({"type": "integer", "description": "Muestra de unidades sin pareja (por defecto 25; las cifras son de todas)"})
             }),
@@ -455,10 +456,17 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
             let via = arg_str(args, "via")?;
             let by = args.get("by").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
             let limit = arg_i64(args, "limit", 25).max(1) as usize;
-            let g = chrono_metrics::gaps(conn, &from, &to, via, by, since_epoch, limit)?;
+            let any_order = args.get("any_order").and_then(Value::as_bool).unwrap_or(false);
+            let o = chrono_metrics::GapsOpts { since_epoch, any_order, limit };
+            let g = chrono_metrics::gaps(conn, &from, &to, via, by, &o)?;
             let sample: Vec<Value> =
                 g.sample.iter().map(|u| json!({"unit": u.unit, "events": u.events, "first_at": u.first_at, "last_at": u.last_at})).collect();
-            json!({"via": via, "by": by, "units": g.units, "covered": g.covered, "missing": g.missing, "to_values": g.to_values, "missing_sample": sample})
+            let criterion = if any_order {
+                "cubierta si algún evento de to tiene el valor, antes o después (any_order)"
+            } else {
+                "cubierta si un evento de to con el valor está en o después del primer evento de from de la unidad"
+            };
+            json!({"via": via, "by": by, "order": if any_order { "any" } else { "to_after_first_from" }, "criterion": criterion, "units": g.units, "covered": g.covered, "missing": g.missing, "to_values": g.to_values, "missing_sample": sample})
         }
         "patterns" => {
             let limit = arg_i64(args, "limit", 25).max(1) as usize;

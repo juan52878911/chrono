@@ -74,7 +74,7 @@ En el CLI son `--since`, `--until`, `--level`… y siempre `--compact`.
 | Qué hubo en OTRAS fuentes alrededor | `correlate` id=<evento> delta_secs=1800 | `chrono correlate <id> --delta 30m --kind commit` |
 | Qué comparte una clave con un evento (misma sesión, sha, prueba) | `correlate` id=<evento> via=<clave> | `chrono correlate <id> --via <clave>` |
 | Los eventos de una clave | `events` join=<clave>=<valor> | `chrono events --join <clave>=<valor>` |
-| X sin Y (pruebas sin resultado, sesiones sin commit) | `gaps` from="<fuente> kind=…" to=<fuente> via=<clave> by=<unidad> | `chrono gaps --from <fuente> --to <fuente> --via <clave> --by <unidad>` |
+| X sin Y (pruebas sin resultado, sesiones sin commit; solo cubre un Y posterior al primer X, any_order=true para cualquiera) | `gaps` from="<fuente> kind=…" to=<fuente> via=<clave> by=<unidad> | `chrono gaps --from <fuente> --to <fuente> --via <clave> --by <unidad> [--any-order]` |
 
 Patrones de trabajo:
 - **Cifras**: siempre de `top`/`patterns`/`timeline`, nunca contando líneas de `events` o de Loki.

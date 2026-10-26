@@ -822,6 +822,7 @@ pub fn gaps(
     to: Option<&str>,
     via: Option<&str>,
     by: Option<&str>,
+    any_order: bool,
     limit: Option<&str>,
 ) -> Result<Json> {
     let need = |v: Option<&str>, flag: &str| -> Result<String> {
@@ -839,7 +840,8 @@ pub fn gaps(
     }
     let (fs, ts) = (side(&from_raw, "from")?, side(&to_raw, "to")?);
     let limit = parse_limit(limit, 25)?;
-    let g = chrono_metrics::gaps(store.conn(), &fs, &ts, &via, by, w.since_epoch, limit)?;
+    let o = chrono_metrics::GapsOpts { since_epoch: w.since_epoch, any_order, limit };
+    let g = chrono_metrics::gaps(store.conn(), &fs, &ts, &via, by, &o)?;
     let sample: Vec<Json> = g
         .sample
         .iter()
@@ -857,6 +859,18 @@ pub fn gaps(
         .set("to", Json::str(&to_raw))
         .set("via", Json::str(&via))
         .set("by", by.map_or(Json::Null, Json::str))
+        .set("order", Json::str(if any_order { "any" } else { "to_after_first_from" }))
+        .set(
+            "criterion",
+            Json::str(&if any_order {
+                t("covered if any --to event has the value, before or after (--any-order)", "cubierta si algún evento de --to tiene el valor, antes o después (--any-order)")
+            } else {
+                t(
+                    "covered if a --to event with the value is at or after the unit's first --from event (--any-order: in any order)",
+                    "cubierta si un evento de --to con el valor está en o después del primer evento de --from de la unidad (--any-order: en cualquier orden)",
+                )
+            }),
+        )
         .set("units", Json::Int(g.units))
         .set("covered", Json::Int(g.covered))
         .set("missing", Json::Int(g.missing))

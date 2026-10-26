@@ -204,7 +204,8 @@ pub struct GapUnit {
 pub struct Gaps {
     /// Unidades distintas en el lado `from` (valores de `via`, o de `by`).
     pub units: i64,
-    /// Las que tienen algún valor de `via` también en el lado `to`.
+    /// Las que tienen algún valor de `via` también en el lado `to` (por
+    /// defecto, en un evento `to` en o después del primer `from` de la unidad).
     pub covered: i64,
     /// `units - covered`: el hueco.
     pub missing: i64,
@@ -214,15 +215,28 @@ pub struct Gaps {
     pub sample: Vec<GapUnit>,
 }
 
+/// Opciones de [`gaps`].
+#[derive(Debug, Clone, Default)]
+pub struct GapsOpts {
+    /// Acota el lado `from` (`0` = sin límite).
+    pub since_epoch: i64,
+    /// Cubre cualquier `to` con el valor, aunque sea ANTERIOR al primer `from`
+    /// de la unidad (un commit de antes de la edición). Por defecto, no.
+    pub any_order: bool,
+    pub limit: usize,
+}
+
 /// `gaps --from A --to B --via K [--by U]`: las claves `K` del lado `from`
 /// que ningún evento del lado `to` tiene («pruebas sin resultado»). Con `by`,
 /// la unidad es el valor de `U` (p. ej. `sessionId`): una sesión cuenta como
 /// cubierta si ALGUNA de sus claves `K` aparece en `to` («sesiones sin
-/// commit»). Exacto: cuenta todas las unidades; `limit` solo acota la muestra.
-/// `since` acota el lado `from`; en `to` vale cualquier momento (un resultado
-/// anterior a la ventana también cubre). Un evento de `from` sin valor de `by`
-/// no es unidad.
-pub fn gaps(conn: &Connection, from: &EventScope, to: &EventScope, via: &str, by: Option<&str>, since_epoch: i64, limit: usize) -> Result<Gaps> {
+/// commit»). Por defecto importa el orden: solo cubre un evento `to` en o
+/// después del primer evento `from` de la unidad (un `to` sin tiempo no
+/// cubre); con `any_order`, cualquiera. Exacto: cuenta todas las unidades;
+/// `limit` solo acota la muestra. `since` acota el lado `from`; en `to` vale
+/// cualquier momento (con orden, lo anterior al `from` ya no cubre). Un evento
+/// de `from` sin valor de `by` no es unidad.
+pub fn gaps(conn: &Connection, from: &EventScope, to: &EventScope, via: &str, by: Option<&str>, o: &GapsOpts) -> Result<Gaps> {
     check_key(via)?;
     if let Some(b) = by {
         check_key(b)?;
@@ -241,25 +255,30 @@ pub fn gaps(conn: &Connection, from: &EventScope, to: &EventScope, via: &str, by
             }
         }
     }
-    let (ff, fp) = from.sql(2);
-    let (tf, tp) = to.sql(2 + fp.len());
+    let (ff, fp) = from.sql(3);
+    let (tf, tp) = to.sql(3 + fp.len());
     let vals = key_values_sql(via);
     let unit_join = match by {
         Some(b) => format!("JOIN ({}) u ON u.rid = e.rid", key_values_sql(b)),
         None => String::new(),
     };
     let unit = if by.is_some() { "u.value" } else { "kv.value" };
-    // `f`: (unidad, valor, rid) del lado from; `t`: valores del lado to.
+    // `f`: (unidad, valor, rid) del lado from; `fu`: primer `from` de cada
+    // unidad; `t`: valores del lado to con su último momento (hay un `to` en o
+    // después del primer `from` si el último lo está).
     let ctes = format!(
         "WITH f AS (SELECT {unit} AS unit, kv.value AS value, e.rid AS rid, e.at_epoch AS at_epoch
                     FROM events e JOIN ({vals}) kv ON kv.rid = e.rid {unit_join}
                     WHERE (?1 = 0 OR e.at_epoch >= ?1) {ff}),
-              t AS (SELECT DISTINCT kv.value AS value
+              fu AS (SELECT unit, MIN(at_epoch) AS first FROM f GROUP BY unit),
+              t AS (SELECT kv.value AS value, MAX(e.at_epoch) AS last
                     FROM events e JOIN ({vals}) kv ON kv.rid = e.rid
-                    WHERE 1 {tf}),
-              cov AS (SELECT DISTINCT f.unit FROM f JOIN t ON t.value = f.value)"
+                    WHERE 1 {tf} GROUP BY kv.value),
+              cov AS (SELECT DISTINCT f.unit FROM f JOIN t ON t.value = f.value JOIN fu ON fu.unit = f.unit
+                      WHERE ?2 OR t.last >= fu.first)"
     );
-    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&since_epoch];
+    let any_order = o.any_order as i64;
+    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&o.since_epoch, &any_order];
     for p in fp.iter().chain(&tp) {
         bound.push(p);
     }
@@ -268,7 +287,7 @@ pub fn gaps(conn: &Connection, from: &EventScope, to: &EventScope, via: &str, by
         rusqlite::params_from_iter(bound.iter()),
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    let lim = limit as i64;
+    let lim = o.limit as i64;
     let n = bound.len() + 1;
     bound.push(&lim);
     // Sin tiempo (at_epoch 0) da '' en vez de 1970.

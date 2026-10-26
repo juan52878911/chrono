@@ -326,6 +326,56 @@ fn gaps_errores_de_uso() {
     assert!(t.contains("x'y"), "{t}");
 }
 
+/// `ediciones` (dim `sesion`, clave `ruta`) y `commits` (clave `ruta`):
+///   ediciones: S1 a.rs 10:00 · S2 b.rs 10:00, c.rs 12:00
+///   commits:   a.rs 09:00 (ANTES de la edición) · c.rs 11:00 (después del primer evento de S2)
+fn orden_env(tag: &str) -> Env {
+    let env = Env::new(
+        tag,
+        json!({
+            "version": 2,
+            "source_options": {"ediciones": {"dims": "sesion"}},
+            "relations": {"ruta": [
+                {"source": "ediciones", "field": "ruta"},
+                {"source": "commits", "field": "ruta"}]}
+        }),
+    );
+    let e = |ts: &str, n: u32, sesion: &str, ruta: &str| line(ts, &format!("edit-{n}"), json!({"sesion": sesion, "ruta": ruta}));
+    env.add_source(
+        "ediciones",
+        &[e("2026-01-01T10:00:00Z", 1, "S1", "a.rs"), e("2026-01-01T10:00:01Z", 2, "S2", "b.rs"), e("2026-01-01T12:00:00Z", 3, "S2", "c.rs")],
+    );
+    env.add_source(
+        "commits",
+        &[line("2026-01-01T09:00:00Z", "commit-a", json!({"ruta": "a.rs"})), line("2026-01-01T11:00:00Z", "commit-c", json!({"ruta": "c.rs"}))],
+    );
+    env
+}
+
+#[test]
+fn gaps_por_defecto_un_to_anterior_al_from_no_cubre() {
+    let env = orden_env("gaps-orden");
+    let args = ["gaps", "--from", "ediciones", "--to", "commits", "--via", "ruta"];
+    // Por clave: a.rs se commiteó ANTES de editarse (no cubre); c.rs, a las 11:00,
+    // es anterior a su edición de las 12:00 (tampoco); b.rs, sin commit.
+    let v = env.q(&args);
+    assert_eq!(v["result"]["order"], "to_after_first_from", "{v}");
+    assert!(v["result"]["criterion"].as_str().unwrap().contains("--any-order"), "{v}");
+    assert_eq!((v["result"]["units"].as_i64(), v["result"]["covered"].as_i64()), (Some(3), Some(0)), "{v}");
+    let v = env.q(&[&args[..], &["--any-order"]].concat());
+    assert_eq!(v["result"]["order"], "any", "{v}");
+    assert_eq!(v["result"]["covered"], 2, "a.rs y c.rs, en cualquier orden: {v}");
+
+    // Por sesión: el primer evento de S2 (10:00:01) es anterior al commit de c.rs
+    // (11:00), así que S2 queda cubierta; S1 no (su commit es de las 09:00).
+    let by = [&args[..], &["--by", "sesion"]].concat();
+    let v = env.q(&by);
+    assert_eq!((v["result"]["units"].as_i64(), v["result"]["covered"].as_i64()), (Some(2), Some(1)), "{v}");
+    assert_eq!(sample_units(&v), ["S1"]);
+    let v = env.q(&[&by[..], &["--any-order"]].concat());
+    assert_eq!(v["result"]["covered"], 2, "{v}");
+}
+
 // ───────────────────────── correlate --via ─────────────────────────
 
 /// Clave `ticket` (links) en dos fuentes; cada evento puede traer `ticket` y `ticket2`.

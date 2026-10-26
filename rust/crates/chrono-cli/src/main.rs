@@ -95,6 +95,7 @@ Log-native (multi-source). timeline, stats, top, patterns and events share the s
                        «X without Y»: K values on side A that no event on side B has (tests without
                        a result, sessions without a commit with --by sessionId). A side is a source
                        (name, kind or id) plus kind=, level=, entity=, grep=, attr= (space separated).
+                       Only a B event at or after the unit's first A event covers it (--any-order: any).
 
 Process × outcome (Nod sessions + git):
   session_patterns     Per task and per session: tokens, cost, agent vs human
@@ -188,6 +189,7 @@ Log-native (multi-fuente). timeline, stats, top, patterns y events comparten fil
                        «X sin Y»: los valores de K del lado A que ningún evento del lado B tiene
                        (pruebas sin resultado; sesiones sin commit con --by sessionId). Un lado es una
                        fuente (nombre, tipo o id) más kind=, level=, entity=, grep=, attr= (con espacios).
+                       Solo cubre un evento de B en o después del primero de A en esa unidad (--any-order: cualquiera).
 
 Proceso × resultado (sesiones de Nod + git):
   session_patterns     Por tarea y por sesión: tokens, costo, tiempo del agente
@@ -234,6 +236,7 @@ struct Flags {
     from: Option<String>,
     to: Option<String>,
     infer_level: bool,
+    any_order: bool,
     symbols: bool,
     source: Option<String>,
     kind: Option<String>,
@@ -305,6 +308,7 @@ fn parse_args(args: &[String]) -> Flags {
             "--infer-level" => {
                 f.infer_level = true;
             }
+            "--any-order" => f.any_order = true,
             "--attr" if i + 1 < args.len() => {
                 i += 1;
                 f.attr = Some(args[i].clone());
@@ -722,7 +726,16 @@ fn main() {
                 None => query::correlate(&store, &id, f.delta.as_deref(), f.kind.as_deref(), f.limit.as_deref()),
             }
         }
-        "gaps" => query::gaps(&store, &window, f.from.as_deref(), f.to.as_deref(), f.via.as_deref(), f.by.as_deref(), f.limit.as_deref()),
+        "gaps" => query::gaps(
+            &store,
+            &window,
+            f.from.as_deref(),
+            f.to.as_deref(),
+            f.via.as_deref(),
+            f.by.as_deref(),
+            f.any_order,
+            f.limit.as_deref(),
+        ),
         "trace" => {
             let id = require_pos(&f, "trace needs an <id>", "trace necesita un <id>");
             query::trace(&store, &id, f.depth.as_deref(), f.limit.as_deref())

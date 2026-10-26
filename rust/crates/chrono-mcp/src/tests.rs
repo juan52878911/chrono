@@ -307,7 +307,8 @@ fn initialize_trae_instrucciones_de_cuando_usar_chrono() {
 }
 
 /// Pruebas P1-P3 en una fuente y el resultado de P1 en otra, unidos por el link
-/// `prueba`; las pruebas son ERROR separadas una hora (tres episodios).
+/// `prueba`; las pruebas son ERROR separadas una hora (tres episodios). El
+/// resultado de P2 es ANTERIOR a la prueba: solo cubre con `any_order`.
 fn relation_state() -> (TempDb, State) {
     let db = TempDb::new("relaciones");
     let mut store = Store::open(db.path()).unwrap();
@@ -327,6 +328,7 @@ fn relation_state() -> (TempDb, State) {
             w.add_event(&mk(&format!("p{i}"), "jsonl:/pruebas", 3600 * (i as i64 + 1), "ERROR", k)).unwrap();
         }
         w.add_event(&mk("r0", "jsonl:/resultados", 3700, "", "P1")).unwrap();
+        w.add_event(&mk("r1", "jsonl:/resultados", 100, "", "P2")).unwrap();
         w.commit().unwrap();
     }
     (db, State::with_store(Some(store)))
@@ -344,6 +346,9 @@ fn tools_call_gaps_correlate_via_y_precede_con_cifras_de_todo() {
     let g = tool_json(&state, "gaps", json!({"from": "jsonl:/pruebas", "to": "jsonl:/resultados", "via": "prueba", "limit": 1}));
     assert_eq!((g["units"].as_i64(), g["covered"].as_i64(), g["missing"].as_i64()), (Some(3), Some(1), Some(2)), "{g}");
     assert_eq!(g["missing_sample"].as_array().unwrap().len(), 1, "limit solo acota la muestra: {g}");
+    assert_eq!(g["order"], "to_after_first_from", "{g}");
+    let g = tool_json(&state, "gaps", json!({"from": "jsonl:/pruebas", "to": "jsonl:/resultados", "via": "prueba", "any_order": true}));
+    assert_eq!((g["covered"].as_i64(), g["order"].as_str()), (Some(2), Some("any")), "{g}");
     let c = tool_json(&state, "correlate", json!({"id": "p0", "via": "prueba"}));
     assert_eq!(c["related_total"], 1, "{c}");
     assert_eq!(c["related"][0]["id"], "r0", "{c}");
