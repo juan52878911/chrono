@@ -160,6 +160,7 @@ pub fn init(start: &Path, symbols: bool, as_kind: Option<&str>, db_override: Opt
         }
     };
 
+    let _lock = lock_ingest(&db)?;
     let mut store = open_or_recreate(&db)?;
     store.reset()?;
     let (n, wm, manifest) =
@@ -217,6 +218,7 @@ pub(crate) fn index_root_of(db: &Path) -> PathBuf {
 /// ingerido. Si la fuente ya estaba, la re-ingiere (borra sus eventos primero),
 /// así `add` es idempotente.
 pub fn add(db: &Path, start: &Path, symbols: bool, as_kind: Option<&str>) -> Result<()> {
+    let _lock = lock_ingest(db)?;
     let mut store = Store::open(db)?;
     let index_root = index_root_of(db);
     let registry = build_registry();
@@ -278,6 +280,7 @@ pub fn add(db: &Path, start: &Path, symbols: bool, as_kind: Option<&str>) -> Res
 /// `path`, si se pasa), ingiriendo el delta desde el watermark de cada una. Si
 /// una fuente diverge (rebase/force-push, log rotado), reindexa SOLO esa fuente.
 pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
+    let _lock = lock_ingest(db)?;
     let mut store = Store::open(db)?;
     let index_root = index_root_of(db);
     let registry = build_registry();
@@ -453,7 +456,11 @@ pub fn tail(
 
     let mut stdout = std::io::stdout();
     loop {
-        tail_ingest(&mut store, &registry, &index_root)?;
+        {
+            // Por vuelta, no durante todo el `tail`: un `sync` de un hook no espera horas.
+            let _lock = lock_ingest(db)?;
+            tail_ingest(&mut store, &registry, &index_root)?;
+        }
 
         let filter = chrono_metrics::EventFilter {
             since_epoch: since,
@@ -554,6 +561,28 @@ impl From<Box<dyn std::error::Error + Send + Sync>> for IngestError {
     fn from(e: Box<dyn std::error::Error + Send + Sync>) -> Self {
         IngestError::Other(e)
     }
+}
+
+/// Cerrojo de ingesta: `<db>.lock` con un cerrojo exclusivo del SO (se suelta
+/// al cerrar el fichero, también si el proceso muere). Varios worktrees
+/// comparten el índice de la raíz y sus hooks lanzan `sync` a la vez; sin esto
+/// el segundo chocaba con la transacción larga del primero (`database is
+/// locked` tras el `busy_timeout`) o repetía el mismo delta. Las consultas no
+/// lo toman: leen del WAL sin bloquear.
+fn lock_ingest(db: &Path) -> Result<std::fs::File> {
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(format!("{}.lock", db.display()))?;
+    if let Err(std::fs::TryLockError::WouldBlock) = f.try_lock() {
+        eprintln!("{}", t(
+            "chrono: another ingest is running on this index; waiting for it",
+            "chrono: hay otra ingesta en curso sobre este índice; se espera a que termine",
+        ));
+        f.lock()?;
+    }
+    Ok(f)
 }
 
 /// Abre el índice; si su `schema_version` no es la actual (índice v1 del Go,
@@ -971,4 +1000,21 @@ fn write_meta(store: &Store, source: &dyn Source, root: &Path) -> Result<()> {
     store.set_meta("source_id", &format!("{kind}:{}", abs.to_string_lossy()))?;
     store.set_meta("source_kind", kind)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn el_cerrojo_de_ingesta_excluye_a_un_segundo_escritor() {
+        let db = std::env::temp_dir().join(format!("chrono-lock-test-{}.db", std::process::id()));
+        let held = lock_ingest(&db).unwrap();
+        // Otra apertura (como la de un segundo `sync`) no puede tomarlo mientras dure.
+        let other = std::fs::OpenOptions::new().write(true).open(format!("{}.lock", db.display())).unwrap();
+        assert!(matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
+        drop(held);
+        assert!(other.try_lock().is_ok());
+        let _ = std::fs::remove_file(format!("{}.lock", db.display()));
+    }
 }
