@@ -35,7 +35,7 @@ pub use churn::{churn, ChurnRow};
 pub use correlate::{Correlation, EventRef, correlate, correlate_kinds};
 pub use coupling::{coupling, Coupled};
 pub use cube::count_events;
-pub use events::{events, EventFilter, EventRow};
+pub use events::{events, events_ordered, EventFilter, EventRow};
 pub use explain::{co_changes, commit_facts, explain, parse_target, utc_date, Blamed, CoChange, CommitFacts, ExplainedCommit, Explanation, FixCertainty, TicketRef};
 pub use hotspots::{hotspots, hotspots_of_type, Hotspot};
 pub use owners::{owners, Owner};

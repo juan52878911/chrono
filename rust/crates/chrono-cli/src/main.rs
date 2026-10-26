@@ -81,7 +81,7 @@ Log-native (multi-source). timeline, stats, top, patterns and events share the s
   patterns             Most frequent log templates (Drain-light clustering),
                        e.g. patterns --level FATAL,ERROR,CRITICAL --limit 3.
   trace <id>           Follow an event's links chain (reverts, same ticket/PR, vcs.commit ↔ commit).
-  events               Unified chronological stream across sources.
+  events               Unified chronological stream across sources (--order desc: newest first).
   informe [logs|codigo <file[:A-B]>]
                        START HERE: the whole picture in one call. logs: coverage, per level counts, services
                        and containers per level, top messages per level, peaks, FATAL/CRITICAL episodes and
@@ -186,7 +186,7 @@ Log-native (multi-fuente). timeline, stats, top, patterns y events comparten fil
   patterns             Plantillas de log más frecuentes (clustering Drain-light),
                        p.ej. patterns --level FATAL,ERROR,CRITICAL --limit 3.
   trace <id>           Sigue la cadena de links de un evento (reverts, mismo ticket/PR, vcs.commit ↔ commit).
-  events               Stream cronológico unificado de todas las fuentes.
+  events               Stream cronológico unificado de todas las fuentes (--order desc: lo más reciente primero).
   informe [logs|codigo <fichero[:A-B]>]
                        EMPIEZA AQUÍ: el panorama en una llamada. logs: cobertura, cifras por nivel, servicios y
                        contenedores por nivel, mensajes más repetidos por nivel, picos, episodios FATAL/CRITICAL
@@ -273,6 +273,8 @@ struct Flags {
     session: Option<String>,
     hotspots: Option<String>,
     compact: bool,
+    /// `events --order asc|desc`.
+    order: Option<String>,
     /// `-h`/`--help` en cualquier posición: ayuda del subcomando, sin abrir el índice.
     help: bool,
     /// Flags que no reconoce ninguna consulta (se ignoran, con aviso).
@@ -330,6 +332,10 @@ fn parse_args(args: &[String]) -> Flags {
             "--limit" if i + 1 < args.len() => {
                 i += 1;
                 f.limit = Some(args[i].clone());
+            }
+            "--order" if i + 1 < args.len() => {
+                i += 1;
+                f.order = Some(args[i].clone());
             }
             "--infer-level" => {
                 f.infer_level = true;
@@ -605,6 +611,7 @@ fn given_flags(f: &Flags) -> Vec<&'static str> {
         ("--delta", s(&f.delta)),
         ("--by", s(&f.by)),
         ("--limit", s(&f.limit)),
+        ("--order", s(&f.order)),
         ("--infer-level", f.infer_level),
         ("--any-order", f.any_order),
         ("--attr", s(&f.attr)),
@@ -646,7 +653,8 @@ fn query_flags(cmd: &str) -> Option<(&'static [&'static str], bool)> {
         "search" | "explain" => (&["--limit"], false),
         "timeline" => (&["--since", "--until", "--bucket", "--by", "--limit"], true),
         "stats" => (&["--since", "--until", "--by", "--limit"], true),
-        "top" | "patterns" | "events" => (&["--since", "--until", "--limit"], true),
+        "top" | "patterns" => (&["--since", "--until", "--limit"], true),
+        "events" => (&["--since", "--until", "--limit", "--order"], true),
         "informe" => (&["--since", "--until"], true),
         "precede" => (&["--since", "--until", "--gap", "--window", "--before-levels", "--limit"], true),
         "correlate" => (&["--delta", "--kind", "--via", "--limit"], false),
@@ -969,7 +977,7 @@ fn main() {
             query::top(&store, &window, &dim, f.until.as_deref(), &scope, f.limit.as_deref())
         }
         "patterns" => query::patterns(&store, &window, f.until.as_deref(), &scope, f.limit.as_deref()),
-        "events" => query::events(&store, &window, f.until.as_deref(), &scope, f.limit.as_deref()),
+        "events" => query::events(&store, &window, f.until.as_deref(), &scope, f.order.as_deref(), f.limit.as_deref()),
         "bench" => query::bench(&store, &db),
         "explain" => {
             let target = require_pos(&f, "explain needs a <file>[:FROM-TO]", "explain necesita un <fichero>[:DESDE-HASTA]");

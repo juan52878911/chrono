@@ -357,6 +357,10 @@ fn tools_call_gaps_correlate_via_y_precede_con_cifras_de_todo() {
     let e = tool_json(&state, "events", json!({"join": "prueba=P1", "format": "json"}));
     let ids: Vec<&str> = e["events"].as_array().unwrap().iter().map(|x| x["id"].as_str().unwrap()).collect();
     assert_eq!(ids, ["p0", "r0"], "{e}");
+    // order=desc: lo más reciente primero.
+    let e = tool_json(&state, "events", json!({"order": "desc", "limit": 2, "format": "json"}));
+    let ids: Vec<&str> = e["events"].as_array().unwrap().iter().map(|x| x["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["p2", "p1"], "{e}");
     // Una clave de join que no existe: error, no vacío.
     let resp = call(&state, 8, "tools/call", json!({"name": "events", "arguments": {"join": "pruebaa=P1"}}));
     assert!(resp["error"]["message"].as_str().unwrap_or("").contains("clave de relación desconocida"), "{resp}");

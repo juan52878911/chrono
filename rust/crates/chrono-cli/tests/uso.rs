@@ -82,6 +82,17 @@ fn flags_que_no_aplican_al_comando_avisan() {
 }
 
 #[test]
+fn events_order_desc_da_lo_mas_reciente() {
+    let d = indice("order");
+    let (ok, out, err) = run(&d.0, &["events", "--order", "desc", "--limit", "2", "--compact"]);
+    assert!(ok, "{err}");
+    let (a, b) = (out.find("evento 29").unwrap_or(usize::MAX), out.find("evento 28").unwrap_or(0));
+    assert!(a < b && !out.contains("evento 0\n"), "{out}");
+    let (ok, _, err) = run(&d.0, &["events", "--order", "nuevo"]);
+    assert!(!ok && err.contains("invalid --order"), "{err}");
+}
+
+#[test]
 fn sources_y_phases_no_se_dan_por_truncadas() {
     let d = indice("sources");
     for cmd in ["sources", "phases"] {

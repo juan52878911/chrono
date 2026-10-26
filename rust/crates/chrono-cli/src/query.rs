@@ -481,15 +481,22 @@ fn until_epoch(until: Option<&str>) -> Result<i64> {
 
 /// `events`: stream cronológico unificado de todas las fuentes, filtrable por
 /// `--source`/`--kind`/`--level`/`--grep` y la ventana `--since`/`--until`.
+/// `--order desc`: los más recientes primero.
 pub fn events(
     store: &Store,
     w: &Window,
     until: Option<&str>,
     scope: &chrono_metrics::EventScope,
+    order: Option<&str>,
     limit: Option<&str>,
 ) -> Result<Json> {
     const DEFAULT_LIMIT: usize = 100;
     let limit = parse_limit(limit, DEFAULT_LIMIT)?;
+    let newest_first = match order.map(str::trim).unwrap_or("") {
+        "" | "asc" => false,
+        "desc" => true,
+        o => return Err(t(format!("invalid --order: {o:?} (use asc or desc)"), format!("--order no válido: {o:?} (usa asc o desc)")).into()),
+    };
     let filter = chrono_metrics::EventFilter {
         since_epoch: w.since_epoch,
         until_epoch: until_epoch(until)?,
@@ -502,7 +509,7 @@ pub fn events(
         join: scope.join,
         infer_level: scope.infer_level,
     };
-    let rows = chrono_metrics::events(store.conn(), &filter, limit)?;
+    let rows = chrono_metrics::events_ordered(store.conn(), &filter, limit, newest_first)?;
     let items: Vec<Json> = rows
         .iter()
         .map(|e| {
@@ -516,7 +523,8 @@ pub fn events(
         })
         .collect();
     let n = items.len();
-    envelope(store, "events", w, limit, n, Json::obj().set("events", Json::Arr(items)))
+    let result = Json::obj().set("order", Json::str(if newest_first { "desc" } else { "asc" })).set("events", Json::Arr(items));
+    envelope(store, "events", w, limit, n, result)
 }
 
 /// `patterns`: plantillas de log más frecuentes (Drain-light, desde rollups).

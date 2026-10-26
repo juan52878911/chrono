@@ -68,7 +68,7 @@ En el CLI son `--since`, `--until`, `--level`… y siempre `--compact`.
 | Qué escupe un servicio | `patterns` entity=product_service | `chrono patterns --entity product_service` |
 | Desde cuándo / picos / incidentes | `timeline` grep="<mensaje>" bucket_secs=600 | `chrono timeline --grep "<mensaje>" --bucket 10m` |
 | Cuántas veces pasó X, cuándo y qué lo precede | `precede` grep="<mensaje de X>" attr=container:<nombre> | `chrono precede --grep "<mensaje>" --attr container:<nombre>` |
-| Qué pasó justo antes de X | `events` entity=postgres until=<ts> limit=30 | `chrono events --entity postgres --until <ts>` |
+| Qué pasó justo antes de X (o lo último que pasó) | `events` entity=postgres until=<ts> order=desc limit=30 | `chrono events --entity postgres --until <ts> --order desc --limit 30` |
 | Una traza o excepción completa | `events` entity=<svc> since=<ts> limit=80 | `chrono events --entity <svc> --since <ts> --limit 80` |
 | Latencias, tamaños, duraciones | `stats` attr=duration_s by=entity | `chrono stats duration_s --by entity` |
 | Qué hubo en OTRAS fuentes alrededor | `correlate` id=<evento> delta_secs=1800 | `chrono correlate <id> --delta 30m --kind commit` |

@@ -193,9 +193,10 @@ pub fn tool_defs() -> Vec<Value> {
         ),
         tool(
             "events",
-            "Los eventos en orden cronológico con todos los filtros: leer los mensajes reales de una ventana (p.ej. lo que pasó justo antes de un reinicio, o una traza completa de product_service).",
+            "Los eventos en orden cronológico con todos los filtros: leer los mensajes reales de una ventana (p.ej. lo que pasó justo antes de un reinicio, o una traza completa de product_service). Con order=desc, los más recientes primero (lo último que pasó).",
             with_scope(json!({
-                "limit": json!({"type": "integer", "description": "Máximo de eventos (por defecto 25; la cabecera dice el total)"})
+                "limit": json!({"type": "integer", "description": "Máximo de eventos (por defecto 25; la cabecera dice el total)"}),
+                "order": str_prop("asc (por defecto: del más viejo al más nuevo) | desc (los más recientes primero)")
             })),
             &[],
         ),
@@ -506,7 +507,12 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
                 join: sc.join,
                 infer_level: sc.infer_level,
             };
-            events(conn, &filter, limit)?
+            let newest_first = match args.get("order").and_then(Value::as_str).map(str::trim).unwrap_or("") {
+                "" | "asc" => false,
+                "desc" => true,
+                o => return Err(format!("order no válido: {o:?} (usa asc o desc)").into()),
+            };
+            events(conn, &filter, limit, newest_first)?
         }
         "session_patterns" => {
             let opts = chrono_metrics::SessionPatternsOpts {
@@ -879,8 +885,8 @@ fn trace(conn: &Connection, id: &str, depth: i64, limit: usize) -> Result<Value>
     Ok(json!({"anchor": event_json(&tr.anchor), "chain": chain}))
 }
 
-fn events(conn: &Connection, filter: &chrono_metrics::EventFilter, limit: usize) -> Result<Value> {
-    let rows = chrono_metrics::events(conn, filter, limit)?;
+fn events(conn: &Connection, filter: &chrono_metrics::EventFilter, limit: usize, newest_first: bool) -> Result<Value> {
+    let rows = chrono_metrics::events_ordered(conn, filter, limit, newest_first)?;
     let items: Vec<Value> = rows
         .iter()
         .map(|e| json!({
