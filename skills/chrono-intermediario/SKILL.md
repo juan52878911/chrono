@@ -1,11 +1,13 @@
 ---
 name: chrono-intermediario
-description: "Configurar chrono como intermediario entre las herramientas y el modelo: analiza los MCP y los ficheros de datos del proyecto, decide en cuáles conviene interceptar (salidas grandes de logs, filas o registros que hay que contar) y con qué límites, y escribe .chrono/intermediario.json. Usar cuando se pida «pon chrono de intermediario», «que chrono resuma lo que devuelven los MCP», al conectar un MCP de observabilidad, base de datos o CI que devuelve muchas líneas, o cuando una herramienta corte sus resultados (p. ej. Loki a 100 líneas)."
+description: "Configurar chrono como intermediario entre las herramientas y el modelo: analiza los MCP y los ficheros de datos del proyecto, decide en cuáles conviene interceptar (salidas grandes de logs, filas o registros que hay que contar) y con qué límites, y escribe la clave "intermediario" de .chrono/config.json. Usar cuando se pida «pon chrono de intermediario», «que chrono resuma lo que devuelven los MCP», al conectar un MCP de observabilidad, base de datos o CI que devuelve muchas líneas, o cuando una herramienta corte sus resultados (p. ej. Loki a 100 líneas)."
 ---
 
 # chrono como intermediario
 
-El plugin trae dos hooks que no hacen NADA hasta que exista `.chrono/intermediario.json`:
+El plugin trae dos hooks que no hacen NADA hasta que exista la clave `intermediario` en
+`.chrono/config.json` (o el fichero antiguo `.chrono/intermediario.json`, que se sigue leyendo si
+falta la clave):
 
 - **PostToolUse (herramientas MCP)**: si una regla casa con la herramienta y la salida pasa sus
   límites, la SUSTITUYE por cifras exactas (niveles, servicios, contenedores, mensajes más
@@ -18,7 +20,7 @@ El plugin trae dos hooks que no hacen NADA hasta que exista `.chrono/intermediar
   (`auto_index`, por defecto sí): lo siguiente que se pregunte ya está en chrono. La salida solo se
   sustituye si venía truncada.
 
-- **Stop (verificador de cifras, APAGADO por defecto)**: con `"verify": true` en este fichero o
+- **Stop (verificador de cifras, APAGADO por defecto)**: con `"verify": true` en esa config o
   `CHRONO_VERIFY=1`, si la sesión usó chrono y la respuesta final da conteos que no
   salen de ninguna salida de chrono (ni de un agregado pequeño de otra consulta), pide UNA vez que se
   comprueben o se marquen como estimación. Ignora fechas, horas, versiones, IPs, duraciones, puertos y
@@ -64,7 +66,10 @@ Mira también si el proyecto tiene ficheros de datos grandes (`find . -size +200
 | `index_max_lines` (loki) | 200000 | Tope del indexado de fondo |
 | `read.extensions` | `.log .jsonl .ndjson .csv .tsv` | Solo esos tipos |
 
-## 4. Escribir `.chrono/intermediario.json`
+## 4. Escribir `intermediario` en `.chrono/config.json`
+
+Lo que sigue va como valor de `"intermediario"` (junto a `"version": 1` y el resto de la config).
+Si ya hay un `.chrono/intermediario.json`, muévelo ahí y bórralo. Después, `chrono config check`.
 
 ```json
 {
@@ -95,7 +100,7 @@ Mira también si el proyecto tiene ficheros de datos grandes (`find . -size +200
   tenga sentido.
 - Explica al usuario, en una tabla corta, qué herramientas quedan interceptadas, con qué límites y
   por qué el resto no.
-- Desactivar: `"enabled": false`, borrar el fichero, o `CHRONO_INTERMEDIARIO=0`.
+- Desactivar: `"enabled": false`, quitar la clave `intermediario`, o `CHRONO_INTERMEDIARIO=0`.
   Diagnóstico: `CHRONO_INTERMEDIARIO_LOG=/tmp/intermediario.log`.
 
 > El intermediario es parte del binario (`chrono hook`, ≥ 0.2.3, lo instala el plugin) y usa `curl` para Loki.

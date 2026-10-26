@@ -29,12 +29,22 @@ cárgalo (sección 1) o, si no puedes, dilo y usa la otra herramienta solo para 
   nuevo (el plugin de Claude Code ejecuta `sync` al empezar la sesión).
 - **Fichero**: `chrono add <fichero>`. Detecta JSONL/NDJSON, CSV, syslog/nginx y texto
   (`--as jsonl|csv|textlog|template` para forzarlo).
+- **Muchos ficheros**: `chrono add '<dir>/**/*.jsonl' --as jsonl --name <alias>` (entre comillas) es UNA
+  fuente; `sync` solo relee los ficheros nuevos o que crecieron, y `--source <alias>` filtra.
+  Sesiones de Claude Code: `chrono add '~/.claude/projects/**/*.jsonl' --as jsonl --name claude
+  --preset claude-sessions` (una tool = un evento; entidad = la tool, ERROR si falló; sin el input
+  ni el contenido, salvo la primera línea de los errores). Qué precede a un fallo:
+  `precede` con `level=ERROR entity=Bash before_levels=*`.
+- **Inventario de una carpeta** (PDF, imágenes, audio…): `chrono add <carpeta> --as dir`: un evento
+  por fichero con tipo, formato, tamaño y fechas; la carpeta es la entidad
+  (`top attr:type`, `stats size --by attr:type`). No lee el contenido.
 - **Salida de un comando**: declárala en `.chrono/config.json` → `commands` y `chrono add cmd:<nombre>`,
   o guárdala en un fichero y añádelo.
 - Fuera de un repo, o para no mezclar: `--db /tmp/analisis/index.db` en cada comando.
 - Si los campos no se detectan solos, en `options` del comando (o `source_options`):
   `time_field`, `message_field`, `level_field`, `entity_field` (el servicio), `kind`, `id_field`,
-  `links` (`commit=sha`), `explode`.
+  `links` (`commit=sha`), `explode`, `level_map` (`true=ERROR`), `where`, `attrs`. `chrono config check`
+  valida `.chrono/config.json` y dice qué clave falla y por qué.
 
 ## 2. Preguntar
 
