@@ -48,14 +48,18 @@ pub struct Common {
     /// En cuántos episodios aparece en la ventana previa (de TODOS, no solo
     /// de los devueltos).
     pub episodes: i64,
-    /// Frecuencia base (P-MSR-3): fracción de las ventanas del mismo tamaño en
-    /// el periodo que contienen la plantilla (con cualquier nivel), desde los
-    /// `rollups` de 60 s. `None` si la plantilla no está en los rollups o con `join`
-    /// (la base de todo el índice no es la de dentro de una clave).
+    /// Episodios cuya ventana previa fue activa para las fuentes de la
+    /// plantilla (al menos un evento suyo): la población de `expected`.
+    pub active_episodes: Option<i64>,
+    /// Frecuencia base (P-MSR-3): de las ventanas del mismo tamaño en el periodo
+    /// en que las fuentes de la plantilla tuvieron actividad, la fracción que
+    /// contiene la plantilla (con cualquier nivel), desde los `rollups` de 60 s.
+    /// `None` si la plantilla no está en los rollups o con `join` (la base de
+    /// todo el índice no es la de dentro de una clave).
     pub base_rate: Option<f64>,
-    /// `base_rate × episodios`: en cuántos estaría por azar.
+    /// `base_rate × active_episodes`: en cuántos estaría por azar.
     pub expected: Option<f64>,
-    /// `(episodes / episodios) / base_rate`: >1, aparece antes más que por azar.
+    /// `(episodes / active_episodes) / base_rate`: >1, aparece antes más que por azar.
     pub lift: Option<f64>,
 }
 
@@ -296,14 +300,17 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
     // Con clave, la base temporal de todo el índice no es la de dentro de una
     // sesión o traza: sin frecuencia base por clave, ni esperado ni lift.
     let rates = if join.is_some() { HashMap::new() } else { base_rates(conn, &templates, o.window_ms, o.since_epoch, o.anchor.until_epoch)? };
-    let total = episodes_total as f64;
     let mut commons: Vec<Common> = candidates
         .into_iter()
         .map(|((level, template), n)| {
-            let base_rate = rates.get(&template).copied().filter(|r| *r > 0.0);
-            let expected = base_rate.map(|r| r * total);
-            let lift = base_rate.map(|r| (n as f64 / total) / r);
-            Common { level, template, episodes: n, base_rate, expected, lift }
+            let base = rates.get(&template).filter(|b| b.rate > 0.0);
+            // Lo esperado se compara con los episodios cuya ventana previa fue
+            // activa para la fuente de la plantilla (en los demás no podía estar).
+            let active = base.map(|b| episodes.iter().filter(|(ep, _)| b.is_active(ep.start_epoch)).count().max(n as usize) as i64);
+            let base_rate = base.map(|b| b.rate);
+            let expected = base_rate.zip(active).map(|(r, a)| r * a as f64);
+            let lift = base_rate.zip(active).map(|(r, a)| (n as f64 / a as f64) / r);
+            Common { level, template, episodes: n, active_episodes: active, base_rate, expected, lift }
         })
         .collect();
     // Primero lo que más episodios explica POR ENCIMA del azar: una plantilla
@@ -323,12 +330,53 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
     Ok(Preceded { episodes, episodes_total, common: commons, anchors_without_key })
 }
 
+/// Frecuencia base de una plantilla (P-MSR-3) y dónde vale.
+struct Base {
+    /// Fracción de las ventanas ACTIVAS que contienen la plantilla.
+    rate: f64,
+    /// Finales de ventana activos (unión de intervalos `[s, e)`, ordenados):
+    /// aquellos en que alguna fuente de la plantilla tuvo al menos un evento.
+    active: std::rc::Rc<Vec<(i64, i64)>>,
+}
+
+impl Base {
+    /// ¿La ventana que acaba en `end` es activa?
+    fn is_active(&self, end: i64) -> bool {
+        let i = self.active.partition_point(|&(_, e)| e <= end);
+        self.active.get(i).is_some_and(|&(s, _)| s <= end)
+    }
+}
+
+/// Une los intervalos de finales de ventana que cubre cada bucket ocupado
+/// (`[b, b+bucket+window)`, recortados a `[lo, hi)`). `bs` ordenados.
+fn cover(bs: &[i64], bucket: i64, window_ms: i64, lo: i64, hi: i64) -> Vec<(i64, i64)> {
+    let mut out: Vec<(i64, i64)> = Vec::new();
+    for &b in bs {
+        let (s, e) = (b.max(lo), (b + bucket + window_ms).min(hi));
+        if e <= s {
+            continue;
+        }
+        match out.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => out.push((s, e)),
+        }
+    }
+    out
+}
+
+fn span(iv: &[(i64, i64)]) -> i64 {
+    iv.iter().map(|(s, e)| e - s).sum()
+}
+
 /// Frecuencia base de cada plantilla: la fracción de las ventanas de
 /// `window_ms` (su final recorriendo el periodo) que contienen al menos un
-/// evento con ella, desde `rollups`. Un bucket ocupado `[b, b+bucket)` cubre
-/// los finales de ventana en `[b, b+bucket+window)`; se unen los intervalos.
-/// O(buckets de esas plantillas), sin tocar `events`.
-fn base_rates(conn: &Connection, templates: &[&str], window_ms: i64, since: i64, until: i64) -> Result<HashMap<String, f64>> {
+/// evento con ella, desde `rollups`, contada solo sobre las ventanas en que
+/// las fuentes de la plantilla tuvieron actividad (al menos un evento). Sobre
+/// todo el periodo, una fuente a ráfagas (sesiones de Claude: horas sin nada)
+/// daba una base baja y casi todo salía con lift > 1. Un bucket ocupado
+/// `[b, b+bucket)` cubre los finales de ventana en `[b, b+bucket+window)`; se
+/// unen los intervalos. O(buckets de esas fuentes), sin tocar `events`.
+fn base_rates(conn: &Connection, templates: &[&str], window_ms: i64, since: i64, until: i64) -> Result<HashMap<String, Base>> {
     let mut out = HashMap::new();
     if templates.is_empty() {
         return Ok(out);
@@ -372,37 +420,45 @@ fn base_rates(conn: &Connection, templates: &[&str], window_ms: i64, since: i64,
     if ids.is_empty() {
         return Ok(out);
     }
-    let mut buckets: HashMap<&str, Vec<i64>> = HashMap::new();
-    let mut stmt = conn.prepare("SELECT template_id, bucket_epoch FROM rollups WHERE bucket_epoch > 0 AND bucket_epoch < ?1 AND bucket_epoch + ?2 + ?3 > ?4")?;
-    for row in stmt.query_map(rusqlite::params![hi, bucket, window_ms, lo], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
-        let (tid, b) = row?;
+    // Buckets de cada plantilla y las fuentes en que aparece.
+    let mut buckets: HashMap<&str, (Vec<i64>, std::collections::BTreeSet<i64>)> = HashMap::new();
+    let range = "bucket_epoch > 0 AND bucket_epoch < ?1 AND bucket_epoch + ?2 + ?3 > ?4";
+    let mut stmt = conn.prepare(&format!("SELECT template_id, bucket_epoch, source_ref FROM rollups WHERE {range}"))?;
+    for row in stmt.query_map(rusqlite::params![hi, bucket, window_ms, lo], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))? {
+        let (tid, b, src) = row?;
         if let Some(t) = ids.get(&tid) {
-            buckets.entry(t.as_str()).or_default().push(b);
+            let e = buckets.entry(t.as_str()).or_default();
+            e.0.push(b);
+            e.1.insert(src);
         }
     }
-    let span = (hi - lo) as f64;
-    for (t, mut bs) in buckets {
+    // Ventanas activas por conjunto de fuentes (casi siempre una, compartida).
+    let mut active_of: HashMap<Vec<i64>, std::rc::Rc<Vec<(i64, i64)>>> = HashMap::new();
+    let mut src_stmt = conn.prepare(&format!("SELECT DISTINCT bucket_epoch FROM rollups WHERE source_ref = ?5 AND {range}"))?;
+    for (t, (mut bs, srcs)) in buckets {
+        let srcs: Vec<i64> = srcs.into_iter().collect();
+        let active = match active_of.get(&srcs) {
+            Some(a) => a.clone(),
+            None => {
+                let mut all: Vec<i64> = Vec::new();
+                for s in &srcs {
+                    for b in src_stmt.query_map(rusqlite::params![hi, bucket, window_ms, lo, s], |r| r.get::<_, i64>(0))? {
+                        all.push(b?);
+                    }
+                }
+                all.sort_unstable();
+                all.dedup();
+                let a = std::rc::Rc::new(cover(&all, bucket, window_ms, lo, hi));
+                active_of.insert(srcs, a.clone());
+                a
+            }
+        };
         bs.sort_unstable();
         bs.dedup();
-        let (mut covered, mut cur): (i64, Option<(i64, i64)>) = (0, None);
-        for b in bs {
-            let (s, e) = (b.max(lo), (b + bucket + window_ms).min(hi));
-            if e <= s {
-                continue;
-            }
-            cur = match cur {
-                Some((cs, ce)) if s <= ce => Some((cs, ce.max(e))),
-                Some((cs, ce)) => {
-                    covered += ce - cs;
-                    Some((s, e))
-                }
-                None => Some((s, e)),
-            };
+        let (covered, total) = (span(&cover(&bs, bucket, window_ms, lo, hi)), span(&active));
+        if total > 0 {
+            out.insert(t.to_string(), Base { rate: (covered as f64 / total as f64).min(1.0), active });
         }
-        if let Some((cs, ce)) = cur {
-            covered += ce - cs;
-        }
-        out.insert(t.to_string(), (covered as f64 / span).min(1.0));
     }
     Ok(out)
 }
@@ -506,6 +562,40 @@ mod tests {
         assert!(hb.base_rate.unwrap() > 0.9, "{hb:?}");
         assert!(disk.lift.unwrap() > 3.0 * hb.lift.unwrap(), "{disk:?} {hb:?}");
         assert_eq!(r.common[0].template, disk.template, "el ubicuo deja de salir primero: {:?}", r.common);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn la_base_sale_de_las_ventanas_activas_de_la_fuente() {
+        let (path, mut store) = temp_store("lift-rafagas");
+        {
+            let mut w = store.writer().unwrap();
+            // Una fuente a ráfagas (como las sesiones): 10 ráfagas de 10 min cada 10 h.
+            // Dentro de cada una, un `ruido` cada minuto, una caída en el minuto 8 y
+            // un `disco lento` 20 s antes. Fuera, nada: sobre todo el periodo el ruido
+            // parecería raro (lift ≈ 50) aunque sale antes de todo mientras hay actividad.
+            for r in 0..10i64 {
+                let t0 = 36_000 * (r + 1);
+                for m in 0..10 {
+                    w.add_event(&ev(&format!("r{r}-{m}"), t0 + 60 * m + 5, "WARNING", "app", "WARNING: ruido")).unwrap();
+                }
+                w.add_event(&ev(&format!("d{r}"), t0 + 460, "WARNING", "app", "WARNING: disco lento")).unwrap();
+                w.add_event(&ev(&format!("a{r}"), t0 + 480, "FATAL", "db", "FATAL: shutting down")).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        store.build_rollups(60_000).unwrap();
+        store.set_meta("rollup_bucket_ms", "60000").unwrap();
+        let o = PrecedeOpts { anchor: EventScope { level: Some("FATAL"), ..Default::default() }, ..Default::default() };
+        let r = precede(store.conn(), &o).unwrap();
+        assert_eq!(r.episodes_total, 10);
+        let by = |t: &str| r.common.iter().find(|c| c.template.contains(t)).unwrap_or_else(|| panic!("{t}: {:?}", r.common));
+        let (ruido, disco) = (by("ruido"), by("disco"));
+        assert_eq!((ruido.episodes, disco.episodes), (10, 10));
+        assert_eq!(ruido.active_episodes, Some(10), "{ruido:?}");
+        assert!(ruido.lift.unwrap() < 1.5, "el ruido de la ráfaga no precede más que por azar: {ruido:?}");
+        assert!(disco.lift.unwrap() > 3.0, "{disco:?}");
+        assert_eq!(r.common[0].template, disco.template, "{:?}", r.common);
         let _ = std::fs::remove_file(&path);
     }
 

@@ -564,7 +564,7 @@ pub(crate) fn join_key(args: &Value) -> Option<&str> {
 pub(crate) fn common_json(c: &chrono_metrics::Common, total: usize) -> Value {
     let r2 = |x: f64| (x * 100.0).round() / 100.0;
     json!({"before_episodes": format!("{}/{}", c.episodes, total), "level": c.level, "template": c.template,
-           "expected": c.expected.map(|x| (x * 10.0).round() / 10.0), "lift": c.lift.map(r2)})
+           "active_episodes": c.active_episodes, "expected": c.expected.map(|x| (x * 10.0).round() / 10.0), "lift": c.lift.map(r2)})
 }
 
 pub(crate) fn scope_from(args: &Value) -> chrono_metrics::EventScope<'_> {

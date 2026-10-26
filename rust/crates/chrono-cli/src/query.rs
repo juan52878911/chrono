@@ -709,6 +709,7 @@ pub fn precede(
                 .set("before_episodes", Json::str(&format!("{}/{}", c.episodes, total)))
                 .set("level", Json::str(&c.level))
                 .set("template", Json::str(&c.template))
+                .set("active_episodes", c.active_episodes.map_or(Json::Null, Json::Int))
                 .set("expected", opt(c.expected, 10.0))
                 .set("lift", opt(c.lift, 100.0))
         })
