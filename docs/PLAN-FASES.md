@@ -15,7 +15,75 @@ solo ejecutable Rust estático, sin modelos ni runtimes dentro (hoy pesa 2,2 MB)
 
 Las cifras marcadas como *objetivo* son estimaciones que valida la fase correspondiente.
 
-## Estado (2026-10-26, tras F4)
+## Estado (2026-10-26, tras F4 y sus pendientes)
+
+**Pendientes de F2–F4 resueltos → 0.7.0 (esquema v7, sin reindex).** Sin dependencias nuevas. Tests 523 → **583**,
+en verde en macOS y en Linux (contenedor `rust:1.90` en trycorepc). Detalle en las decisiones 31 a 36 de
+`DECISIONS.md`.
+- **Relaciones.** `gaps` por defecto solo cubre con un `to` en o después del primer `from` de la unidad
+  (`--any-order` para el criterio de antes); `grep=` admite espacios, `--until` acota los dos lados,
+  `from_without_key` cuenta los `from` sin valor de la clave y `units_without_time` las unidades sin ningún `from`
+  con tiempo. `precede --join`: un ancla con varios valores cuenta en cada uno y `anchors_without_key` las que no
+  tienen ninguno; `anchors_without_time` y `precursors_total` dicen lo que queda fuera. `--join`, `--via` y `--by`
+  con una clave que no existe dan error. La frecuencia base del lift sale de las ventanas en que la fuente de la
+  plantilla tuvo actividad (`active_episodes`), no de todo el periodo: en las sesiones, con `precede --level ERROR
+  --entity Bash`, «File has not been read yet» baja de lift **4,74 a 0,96**. `gaps` tool_use → tool_result por
+  tool_use: 133 476 unidades, 133 467 cubiertas y **9** sin resultado, justo la diferencia entre los dos kinds.
+- **Ingesta y robustez.** Las opciones de una fuente (`entity_via`, `explode`, `attrs`, `links`…) entran en su
+  firma: cambiarlas reindexa como cambiar una dim. Glob: un fichero se compara además por ctime y por una huella de
+  lo ya leído (entero hasta 64 MB; por encima, primeros y últimos 64 KB): reescrito con el mismo tamaño y mtime, o
+  editado en medio, se relee entero. Cambiar dims u opciones con parte de la fuente irrecuperable no reindexa:
+  avisa de cuántos eventos se perderían y `sources` cuenta los que conservan las de antes (`stale_dims_events`).
+  `sync` y `tail` siguen con las demás fuentes si una falla, salen con error al final y `sources` enseña
+  `sync_error`. `init` no borra las fuentes añadidas con `add` ni un índice que no puede abrir (uno dañado se aparta
+  como `.corrupt.bak`); en un repo sin commits deja la fuente git vacía y `sync` la lee al primer commit; en una rama
+  huérfana lo dice. Una attr con punto se lee primero como clave literal, como una dim. `patterns` con solo fuente
+  o texto sale del cubo o de `events`, exacto, como con nivel.
+- **Concurrencia y reindex.** `chrono reindex` rehace el índice con las mismas fuentes (git, logs, globs,
+  comandos); el error de esquema viejo da el comando exacto. Va entero bajo el cerrojo de ingesta (reentrante) y deja
+  una marca `<db>.reindexing`: si se corta, los demás comandos lo avisan, las ingestas se niegan y el siguiente
+  `reindex` reanuda desde la copia, que no se pisa; si salen menos eventos que antes, la copia se conserva. En un
+  índice v5 real del repo: 71 → 71 eventos. La migración v6→v7 desde dos procesos: el segundo espera y relee la
+  versión. Un índice nuevo crea su esquema en una transacción (sin falso «esquema ?» con aperturas a la vez),
+  `open_read` no crea ficheros y la espera agotada de una migración lo dice. `tail` hace un `sync` en cada vuelta
+  (rollups, plantillas, búsqueda, reindexado) sin `optimize`, pagina por `rid` y, como el MCP, reabre el índice si
+  cambia el fichero. El cerrojo de `loki_index` del hook es un `flock` (antes un directorio que bloqueaba para
+  siempre si el proceso moría).
+- **UX de CLI y MCP.** `-h`/`--help` en cualquier subcomando sin abrir el índice; comando mal escrito con
+  sugerencia; aviso de flags desconocidas o que no aplican (`top --by`, `search --since`). `result.hints` cuando un
+  vacío tiene explicación (attr o nivel inexistente, `stats` no numérico, `hotspots` sin git, `correlate` de una
+  fuente, `session_patterns` sin Nod, eventos sin tiempo); por MCP salen como `⚠` en la cabecera. `top <dim>` acepta
+  una dim declarada sin `attr:` y una desconocida lista las que hay. `events --order desc` (MCP `order=desc`).
+  `search --limit` se respeta, `informe --level`, `--compact` usa el alias de la fuente. Por MCP, `total` de `stats`
+  correcto (y con `where_attr`), `(resto)` de `top attr:` solo con la attr y `(sin valor)` aparte. `sources`,
+  `phases`, `tickets`, `show` y `bench`: `max_items` = lo devuelto, sin `truncated`. Errores de `gaps` y de claves en
+  el idioma de `--lang`.
+- **Bench en frío a 1M** (trycorepc, mediana de 7, 0.6.0 frente a 0.7.0): ingesta 20,3 → 19,8 s; `informe` 1,76 →
+  1,72 s; `precede` FATAL 0,267 → 0,264 s; `events` FATAL 0,210 → 0,201 s; `patterns` sin filtros 12 → 25 ms (ahora
+  sale del cubo o de `events`, exacto); el resto igual.
+- **Sesiones reales de Claude** (copia congelada, 1 939 ficheros, 266 943 eventos): 0.6.0 y 0.7.0 dan idénticos
+  `sources`, `top`, `patterns`, `timeline`, `informe` y `events`. Solo cambia lo buscado: `search` respeta `--limit`,
+  `stats --help` es ayuda, el lift de `precede` y el campo `order` en `events`.
+- Esquemas MCP 23,1 → 24,6 KB (24 tools; F5 los consolida).
+- Auditorías (`auditor-silencios`, `auditor-cerrojos`, `auditor-senales`) sobre la ronda; corregido: `init` borraba
+  las fuentes de `add` o un índice que no podía abrir; un fallo en una fuente paraba el `sync` entero; en `gaps`, un
+  `from` sin tiempo fijaba el primero; los ficheros de la glob fuera del estado no contaban como irrecuperables; en
+  `precede`, las anclas sin tiempo y los precursores fuera de `common` no se contaban y la ventana del último evento
+  no salía activa (la tapaba un `max`); el cerrojo de `loki_index`; aperturas simultáneas de un índice nuevo; dos
+  `reindex` a la vez se apartaban el índice uno a otro; `tail` seguía escribiendo en la copia tras un `reindex` y
+  perdía eventos del mismo instante al paginar; el recuento de `stale_dims_events` recorría la fuente aunque no
+  hubiera ninguno (`informe` a 1M).
+
+Sin verificar o pendiente:
+- Con `--join` sigue sin lift: falta una frecuencia base por clave.
+- Glob por encima de 64 MB: una edición en medio seguida de un append no se ve (la huella no cubre el medio).
+- Lo ya indexado de una fuente irrecuperable conserva las dims u opciones de antes (se cuenta, no se arregla).
+- `Pattern` hace vuelta atrás sin memo (venía de F4).
+- `informe` sigue contando cada episodio con una consulta (1,72 s a 1M): falta el barrido ordenado.
+- `token_budget.truncated` sigue siendo `returned >= max` en las listas con `limit`.
+- `top attr:k` con filtros sigue uniendo `event_dims` con `events` por rid (venía de F3).
+- Un resultado ya agregado en rollups cuyo uso llega en un `sync` posterior sigue en `unknown` (venía de F4).
+- Esquemas MCP en ~24,6 KB hasta F5.
 
 **F4 hecha → 0.6.0 (esquema v7, se migra al abrir).** Binario 2 361 120 → 2 427 712 B (+3 %), sin dependencias
 nuevas. Detalle en la decisión 30 de `DECISIONS.md`.
@@ -66,13 +134,14 @@ nuevas. Detalle en la decisión 30 de `DECISIONS.md`.
 
 Sin verificar o pendiente:
 - La frecuencia base es temporal sobre todo el periodo: en fuentes a ráfagas (sesiones) casi todo sale con lift > 1.
-  Con `--join` no hay lift (falta una base por clave).
+  Con `--join` no hay lift (falta una base por clave). (La base, resuelta en 0.7.0 con ventanas activas; con `--join` sigue)
 - `gaps` no mira el orden (un commit anterior a la edición también cubre), ni admite espacios en `grep=` de un lado,
-  ni `--until`; un evento de `from` sin valor de `--by` no es unidad (sin aviso).
-- `precede --join` agrupa un ancla con varios valores por el menor y descarta sin contar las anclas sin clave.
-- `--join` con una clave que no existe devuelve vacío sin avisar (`gaps`, `--via` y `precede` sí dan error).
+  ni `--until`; un evento de `from` sin valor de `--by` no es unidad (sin aviso). (resuelto en 0.7.0)
+- `precede --join` agrupa un ancla con varios valores por el menor y descarta sin contar las anclas sin clave. (resuelto en 0.7.0)
+- `--join` con una clave que no existe devuelve vacío sin avisar (`gaps`, `--via` y `precede` sí dan error). (resuelto en 0.7.0)
 - Activar `entity_via` a mano en una fuente ya indexada no reindexa; un resultado ya agregado en rollups cuyo uso llega
   en un `sync` posterior sigue en `unknown`. La migración v6→v7 de dos procesos a la vez: el segundo falla (con error).
+  (Resueltos en 0.7.0 el reindexado por `entity_via` y la migración a la vez; lo de `unknown` sigue)
 - `Pattern` hace vuelta atrás sin memo: un patrón como `.*.*.*x` sobre un título largo es polinómico.
 - `informe` paga +1,1 s por contar todos los episodios: un solo barrido ordenado en vez de una consulta por episodio.
 - `token_budget.truncated` es `returned >= max`: con exactamente `limit` unidades dice truncado sin estarlo (venía de antes).
@@ -111,14 +180,16 @@ nuevas. Detalle en la decisión 29 de `DECISIONS.md`.
 
 Sin verificar o pendiente:
 - Los tiempos son de una máquina con load 4-7 (otras sesiones): repetir `make bench` en frío para cifras finas.
+  (resuelto en 0.7.0: bench en frío en trycorepc)
 - `top attr:k` con filtros (p. ej. `--level ERROR`) une `event_dims` con `events` por rid: 0,5 s a 1M, sin cubo.
 - `links` sigue en texto (54 MB de 166 en las sesiones): candidato a internar targets en F4 junto a `relations`.
+  (resuelto en 0.6.0)
 - De las auditorías, sin tocar (venían de antes o son raros): `patterns` con solo fuente/`grep` lee `rollups`, que
   no comprueban su watermark ni cuentan eventos sin tiempo, y puede no coincidir con `patterns` con nivel; `tail`
   ingiere sin `finalize` y sin mirar si cambiaron las dims; cambiar las dims de una fuente que ya no se puede
   releer entera (log rotado, caché `cmd` truncada) pierde lo que no se relea, con solo un aviso; una clave con
-  punto (`message.model`) como attr se lee como ruta anidada (como dim funciona).
-- `correlate` entre sesiones y git sigue sin probar (venía de F2).
+  punto (`message.model`) como attr se lee como ruta anidada (como dim funciona). (resueltos los cuatro en 0.7.0)
+- `correlate` entre sesiones y git sigue sin probar (venía de F2). (resuelto en 0.6.0)
 - La cuenta de Trycore no tuvo cupo (tope de 5 h a 0); todo se hizo en esta sesión.
 
 **F2 hecha → 0.4.0.** Binario 2 244 368 → 2 311 152 B (+3 %), sin dependencias nuevas.
@@ -160,13 +231,14 @@ Lo que salió al hacerlo:
 Sin verificar o pendiente:
 - La carpeta real de 2,2 GB no se identificó (`~/archivo-pruebas-oriuno` pesa 279 MB y es de Trycore: no
   se usó); `dir` se midió con `rust/target` y `~/.claude/projects`.
-- `correlate` entre sesiones y git (fila del preset) no se probó.
+- `correlate` entre sesiones y git (fila del preset) no se probó. (resuelto en 0.6.0)
 - `precede` sigue topando en 50 episodios por defecto (P-MSR-3, F4); con `limit` alto y `depth=counts`
-  o `summary` las cifras salen completas.
-- La cabecera de `stats` por MCP dice `total=0` aunque haya grupos.
+  o `summary` las cifras salen completas. (resuelto en 0.6.0)
+- La cabecera de `stats` por MCP dice `total=0` aunque haya grupos. (resuelto en 0.7.0)
 - `entity_join` vive en el cursor: un resultado cuyo uso quedó antes del watermark (un `sync` a mitad de
-  un turno) se queda en `unknown`. En la ingesta completa hubo 0.
+  un turno) se queda en `unknown`. En la ingesta completa hubo 0. (resuelto en 0.6.0 con `entity_via`)
 - El cambio se detecta por tamaño + mtime: un fichero reescrito con el mismo tamaño y mtime no se relee.
+  (resuelto en 0.7.0: ctime y huella)
 - Los títulos de error son el único contenido de las sesiones que entra en el índice: en los 1 075
   distintos no hubo credenciales (un falso positivo `sk-…` dentro de una ruta). No hizo falta fixture real.
 - La cuenta de Trycore no tuvo cupo (0 hasta las 12:40); todo se hizo en esta sesión.
