@@ -89,6 +89,7 @@ fn build_registry() -> Registry {
     r.register(Box::new(chrono_source_oslog::OsLogSource::new()));
     r.register(Box::new(chrono_source_template::TemplateSource::new()));
     r.register(Box::new(chrono_source_nod::NodSource::new()));
+    r.register(Box::new(chrono_source_delega::DelegaSource::new()));
     r
 }
 
@@ -419,15 +420,21 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-/// `chrono tail [--interval 2s] [--source/--kind/--level/--grep]`: sigue el
-/// índice como `tail -f`. Cada intervalo ingiere el delta de cada fuente (SIN
-/// el enriquecimiento pesado: ni FTS, ni rollups, ni tamaños/forge de git) e
-/// imprime los eventos NUEVOS en orden cronológico. Bucle infinito; Ctrl-C para
-/// parar. Pensado para fuentes que crecen (logs, oslog); para git el atajo de
-/// HEAD evita trabajo si no hay commits nuevos.
+/// `chrono tail [--interval 2s] [--source delega,nod] [--kind/--level/--grep] [--since]`:
+/// sigue el índice como `tail -f`. Cada intervalo ingiere el delta de las fuentes
+/// (solo las de `--source`, si se pasa; SIN el enriquecimiento pesado: ni FTS, ni
+/// rollups, ni tamaños/forge de git) e imprime los eventos NUEVOS, una línea por
+/// evento y al momento (se vacía la salida tras cada línea): sirve de monitor único
+/// para un orquestador (`chrono tail --source delega,nod --level WARN,ERROR`).
+/// Bucle infinito; Ctrl-C para parar.
+///
+/// «Nuevo» es por fila insertada (rowid), no por hora: un aviso de delega con hora
+/// anterior al último evento de Nod se imprime igual. Con `since_epoch > 0`, antes
+/// de seguir imprime lo ya indexado desde esa hora.
 pub fn tail(
     db: &Path,
     interval_ms: i64,
+    since_epoch: i64,
     source: Option<&str>,
     kind: Option<&str>,
     level: Option<&str>,
@@ -438,57 +445,69 @@ pub fn tail(
     let registry = build_registry();
     let interval = Duration::from_millis(interval_ms.clamp(200, 3_600_000) as u64);
 
-    // `tail -f`: se sigue SOLO lo nuevo → se arranca desde el máximo at_epoch ya
-    // presente (0 si el índice está vacío, en cuyo caso se mostrará todo).
-    let mut since: i64 = store
-        .conn()
-        .query_row("SELECT COALESCE(MAX(at_epoch), 0) FROM events", [], |r| r.get(0))
-        .unwrap_or(0);
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut last_rowid: i64 = if since_epoch > 0 {
+        0
+    } else {
+        store.conn().query_row("SELECT COALESCE(MAX(rowid), 0) FROM events", [], |r| r.get(0)).unwrap_or(0)
+    };
 
     eprintln!("{}", t(
         format!("chrono tail: following every {interval_ms} ms — Ctrl-C to stop"),
         format!("chrono tail: siguiendo cada {interval_ms} ms — Ctrl-C para parar"),
     ));
 
+    let scope = chrono_metrics::EventScope { source, kind, level, grep, ..Default::default() };
+    let (filters, params) = scope.sql_public(3);
+    let sql = format!(
+        "SELECT e.rowid, e.at, e.level, s.kind, e.title FROM events e JOIN sources s ON s.ref = e.source_ref
+         WHERE e.rowid > ?1 AND e.at_epoch >= ?2 {filters}
+         ORDER BY e.at_epoch, e.rowid"
+    );
     let mut stdout = std::io::stdout();
     loop {
-        tail_ingest(&mut store, &registry, &index_root)?;
-
-        let filter = chrono_metrics::EventFilter {
-            since_epoch: since,
-            until_epoch: 0,
-            source,
-            kind,
-            level,
-            grep,
-            entity: None,
-            attr: None,
-            infer_level: false,
-        };
-        let rows = chrono_metrics::events(store.conn(), &filter, 1000)?;
-        for r in &rows {
-            if seen.insert(r.id.clone()) {
-                let lvl: &str = if r.level.is_empty() { "-" } else { r.level.as_str() };
-                let src = r.source_id.split(':').next().unwrap_or(&r.source_id);
-                let _ = writeln!(stdout, "{}  {:5}  [{src}]  {}", r.at, lvl, r.title);
-                if r.at_epoch > since {
-                    since = r.at_epoch;
-                }
+        tail_ingest(&mut store, &registry, &index_root, source)?;
+        let max_rowid: i64 = store.conn().query_row("SELECT COALESCE(MAX(rowid), 0) FROM events", [], |r| r.get(0))?;
+        let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&last_rowid, &since_epoch];
+        for p in &params {
+            bound.push(p);
+        }
+        let mut stmt = store.conn().prepare_cached(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(bound), |r| {
+            Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?))
+        })?;
+        for row in rows {
+            let (at, lvl, src, title) = row?;
+            let lvl = if lvl.is_empty() { "-".to_string() } else { lvl };
+            // Una línea por evento y vaciado inmediato: un Monitor la ve al instante.
+            if writeln!(stdout, "{at}  {lvl:5}  [{src}]  {title}").and_then(|_| stdout.flush()).is_err() {
+                return Ok(()); // la tubería se cerró (el monitor terminó)
             }
         }
-        let _ = stdout.flush();
+        drop(stmt);
+        last_rowid = max_rowid;
         std::thread::sleep(interval);
     }
 }
 
-/// Ingesta del delta de TODAS las fuentes para `tail`: como `sync` pero SIN
+/// ¿Entra la fuente `id`/`kind` en el filtro `--source` (lista de kinds o un id/prefijo)?
+fn source_selected(filter: Option<&str>, id: &str, kind: &str) -> bool {
+    let Some(f) = filter.map(str::trim).filter(|f| !f.is_empty()) else { return true };
+    if f.contains(':') {
+        return id.starts_with(f);
+    }
+    f.split(',').map(str::trim).any(|k| k == kind)
+}
+
+/// Ingesta del delta de las fuentes para `tail`: como `sync` pero SIN
 /// enriquecimiento (ni FTS, ni rollups, ni tamaños/forge). Solo mete los
-/// eventos nuevos para poder mostrarlos al instante.
-fn tail_ingest(store: &mut Store, registry: &Registry, index_root: &Path) -> Result<()> {
+/// eventos nuevos para poder mostrarlos al instante. Con `--source`, solo esas.
+fn tail_ingest(store: &mut Store, registry: &Registry, index_root: &Path, filter: Option<&str>) -> Result<()> {
     let now = now_iso();
     let sources = store.list_sources()?;
     for s in &sources {
+        if !source_selected(filter, &s.id, &s.kind) {
+            continue;
+        }
         let Some(adapter) = registry.by_kind(&s.kind) else { continue };
         let path = PathBuf::from(&s.path);
         if s.kind == "git" {
@@ -608,7 +627,7 @@ fn ingest_source(
     let classifier = RulesClassifier::new(cfg);
     // Nod es telemetría del PROCESO (sesiones con agentes), no cambios del
     // repo: no se clasifica (un tool `fix_*` o un prompt no son un fix).
-    let classify = source.kind() != "nod";
+    let classify = !matches!(source.kind(), "nod" | "delega");
 
     let mut cur: Box<dyn Cursor> = match source.open(path, watermark, &source_cfg) {
         Ok(c) => c,

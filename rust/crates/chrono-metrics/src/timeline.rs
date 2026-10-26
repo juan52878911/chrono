@@ -191,9 +191,15 @@ impl EventScope<'_> {
             sql.push_str(&format!(" AND {}", clause.replace("?N", &format!("?{n}")).replace("$t", t)));
             params.push(value);
         };
-        if let Some(s) = self.source.filter(|s| !s.is_empty()) {
-            let like = if s.contains(':') { format!("{s}%") } else { format!("{s}:%") };
-            push("$t.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?N)", like);
+        if let Some(s) = self.source.filter(|s| !s.trim().is_empty()) {
+            let items: Vec<&str> = s.split(',').map(str::trim).filter(|x| !x.is_empty()).collect();
+            if items.len() > 1 && items.iter().all(|x| !x.contains(':')) {
+                // Lista de kinds (`delega,nod`): cualquiera de ellos.
+                push("$t.source_ref IN (SELECT ref FROM sources WHERE instr(?N, ',' || kind || ',') > 0)", comma_list(s, false));
+            } else {
+                let like = if s.contains(':') { format!("{s}%") } else { format!("{s}:%") };
+                push("$t.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?N)", like);
+            }
         }
         if let Some(g) = self.grep.filter(|g| !g.is_empty()) {
             push("$t.title LIKE ?N", format!("%{g}%"));
@@ -202,7 +208,19 @@ impl EventScope<'_> {
             let expr = level_expr("$t", self.infer_level);
             push(&format!("instr(?N, ',' || UPPER({expr}) || ',') > 0"), comma_list(l, true));
         }
-        if let Some(k) = self.kind.filter(|k| !k.is_empty()) {
+        if let Some(k) = self.kind.filter(|k| k.contains(',')) {
+            // Lista (`delega.*,nod.job.*`): exactos o prefijos con `*`, cualquiera de ellos.
+            let items: Vec<String> = k
+                .split(',')
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(|x| format!("\"{}\"", x.replace('\\', "\\\\").replace('"', "\\\"")))
+                .collect();
+            push(
+                "EXISTS (SELECT 1 FROM json_each(?N) j WHERE (substr(j.value, -1) = '*' AND $t.kind LIKE substr(j.value, 1, length(j.value) - 1) || '%') OR $t.kind = j.value)",
+                format!("[{}]", items.join(",")),
+            );
+        } else if let Some(k) = self.kind.filter(|k| !k.is_empty()) {
             match k.strip_suffix('*') {
                 Some(prefix) => push("$t.kind LIKE ?N", format!("{prefix}%")),
                 None => push("$t.kind = ?N", k.to_string()),

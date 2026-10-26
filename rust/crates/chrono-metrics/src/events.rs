@@ -196,4 +196,21 @@ mod tests {
         // limit.
         assert_eq!(events(conn, &EventFilter::default(), 2).unwrap().len(), 2);
     }
+
+    #[test]
+    fn listas_de_fuentes_y_de_kinds() {
+        let (_db, store) = fixture();
+        let conn = store.conn();
+        let ids = |f: &EventFilter| events(conn, f, 100).unwrap().iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+        // `--source git,jsonl`: cualquiera de los dos kinds de fuente.
+        let f = EventFilter { source: Some("git, jsonl"), ..Default::default() };
+        assert_eq!(ids(&f), vec!["c1", "d1", "e1", "c2"]);
+        let f = EventFilter { source: Some("git,csv"), ..Default::default() };
+        assert_eq!(ids(&f), vec!["c1", "c2"]);
+        // `--kind commit,lo*`: exacto o prefijo.
+        let f = EventFilter { kind: Some("comm*,log"), ..Default::default() };
+        assert_eq!(ids(&f).len(), 4);
+        let f = EventFilter { kind: Some("lo*,deploy"), level: Some("ERROR,WARN"), ..Default::default() };
+        assert_eq!(ids(&f), vec!["e1"]);
+    }
 }

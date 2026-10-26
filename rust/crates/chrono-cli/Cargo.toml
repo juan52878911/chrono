@@ -26,6 +26,8 @@ chrono-source-changelog = { path = "../chrono-source-changelog" }
 chrono-source-oslog = { path = "../chrono-source-oslog" }
 chrono-source-template = { path = "../chrono-source-template" }
 chrono-source-nod = { path = "../chrono-source-nod" }
+chrono-source-delega = { path = "../chrono-source-delega" }
+rusqlite = { version = "0.32", features = ["bundled"] }
 chrono-mcp = { path = "../chrono-mcp" }
 # Salida JSON de las fuentes de comando (`command.rs`); ya es dependencia de los adaptadores.
 serde_json = "1"

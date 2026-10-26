@@ -55,6 +55,7 @@ dependencies = [
  "chrono-metrics",
  "chrono-source-changelog",
  "chrono-source-csv",
+ "chrono-source-delega",
  "chrono-source-git",
  "chrono-source-jsonl",
  "chrono-source-nod",
@@ -63,6 +64,7 @@ dependencies = [
  "chrono-source-textlog",
  "chrono-store",
  "chrono-tracker-github",
+ "rusqlite",
  "serde_json",
 ]
 
@@ -104,6 +106,14 @@ name = "chrono-source-csv"
 version = "0.2.7"
 dependencies = [
  "chrono-core",
+]
+
+[[package]]
+name = "chrono-source-delega"
+version = "0.2.7"
+dependencies = [
+ "chrono-core",
+ "serde_json",
 ]
 
 [[package]]

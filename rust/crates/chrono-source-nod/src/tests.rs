@@ -346,3 +346,37 @@ fn include_command_pone_el_comando_en_el_titulo() {
     assert_eq!(con, titles(&opts), "determinista");
     assert!(titles(&SourceConfig::default()).iter().all(|t| t == "tool.call Bash"), "apagada por defecto");
 }
+
+#[test]
+fn sobres_de_delega_trabajo_y_decision() {
+    let env = |host: &str| {
+        format!(
+            r#"{{"nod":1,"source":{{"instance":"delega-mac","run":"r1","host":"{host}","profile":"work","privacy":"completo"}},"events":[
+{{"ts":1793035375000,"seq":1,"type":"job.launch","job":"20261026-1","data":{{"node":"pc1","summary":"Arreglar login\nsegunda línea","brief":"no entra"}}}},
+{{"ts":1793035400000,"seq":2,"type":"decision.request","data":{{"job":"20261026-1","id":"d1","question":"¿A o B?"}}}},
+{{"ts":1793035500000,"seq":3,"type":"job.alert","job":"20261026-1","data":{{"alert":"stall","level":"error"}}}},
+{{"ts":1793035600000,"seq":4,"type":"job.end","job":"20261026-1","data":{{"rc":1,"cost_usd":0.5}}}}]}}"#
+        )
+        .replace('\n', "")
+            + "\n"
+    };
+    let t = Temp::new(&env("delega"));
+    let evs = drain(&mut open(&t.0));
+    assert_eq!(evs.len(), 4);
+    assert_eq!(evs[0].kind, "nod.job.launch");
+    assert_eq!(evs[0].title, "job.launch 20261026-1: Arreglar login");
+    assert_eq!(evs[0].attrs["session"], "20261026-1");
+    assert_eq!(evs[0].attrs["job"], "20261026-1");
+    assert_eq!(evs[0].touches[0].entity, "20261026-1");
+    assert!(!evs[0].attrs.contains_key("brief") && !evs[0].attrs.contains_key("summary"));
+    assert_eq!(evs[1].kind, "nod.decision.request");
+    assert_eq!(evs[1].level, "WARN");
+    assert_eq!(evs[1].attrs["id"], "d1");
+    assert!(!format!("{:?}", evs[1]).contains("¿A o B?"));
+    assert_eq!(evs[2].level, "ERROR");
+    assert_eq!(evs[2].title, "job.alert 20261026-1 stall");
+    assert_eq!(evs[3].level, "WARN");
+    // Los mismos tipos de otro host no se aceptan.
+    let t = Temp::new(&env("claude"));
+    assert!(drain(&mut open(&t.0)).is_empty());
+}
