@@ -7,7 +7,7 @@
       "name": "chrono",
       "source": "./",
       "description": "Skills y servidor MCP de chrono: historia de git (hotspots, acoplamiento, dueños, bugs, explain), datos masivos (logs, JSONL, CSV) y CI/CD (GitHub Actions u otros vía comandos), con respuestas deterministas y compactas.",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "category": "development",
       "keywords": ["git", "blame", "logs", "ci", "observability"]
     }
