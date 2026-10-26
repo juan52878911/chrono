@@ -38,6 +38,9 @@ const INDEX_REL: &str = ".chrono/index.db";
 /// sesión, y el servidor no debe quedarse ciego hasta reiniciarse.
 pub struct State {
     store: std::cell::OnceCell<Store>,
+    /// Por qué no se pudo abrir el índice que hay (p. ej. otra versión de
+    /// esquema): las tools lo dicen en vez de pedir un `chrono init`.
+    open_error: std::cell::RefCell<Option<String>>,
     db: Option<PathBuf>,
     /// Buscar el índice (si falta) en cada llamada. Los tests lo apagan para no
     /// encontrar el índice real del repo donde corren.
@@ -52,15 +55,27 @@ impl State {
         if let Some(s) = store {
             let _ = cell.set(s);
         }
-        State { store: cell, db: None, discover: false }
+        State { store: cell, open_error: Default::default(), db: None, discover: false }
     }
 
     pub fn store(&self) -> Option<&Store> {
         if self.store.get().is_none() && self.discover {
-            let s = open_or_discover(self.db.clone())?;
-            let _ = self.store.set(s);
+            match open_or_discover(self.db.clone()) {
+                Ok(s) => {
+                    let _ = self.store.set(s?);
+                }
+                Err(e) => {
+                    *self.open_error.borrow_mut() = Some(e);
+                    return None;
+                }
+            }
         }
         self.store.get()
+    }
+
+    /// El error de la última vez que se intentó abrir el índice, si lo hubo.
+    pub fn open_error(&self) -> Option<String> {
+        self.open_error.borrow().clone()
     }
 }
 
@@ -68,7 +83,7 @@ impl State {
 /// de E/S. Nunca falla por falta de índice: `db` ausente o inválido deja
 /// `State` sin store y el servidor sigue sirviendo `tools/list` etc.
 pub fn serve(db: Option<PathBuf>) -> Result<()> {
-    let state = State { store: std::cell::OnceCell::new(), db, discover: true };
+    let state = State { store: std::cell::OnceCell::new(), open_error: Default::default(), db, discover: true };
 
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
@@ -87,21 +102,29 @@ pub fn serve(db: Option<PathBuf>) -> Result<()> {
 }
 
 /// Abre el índice explícito, o lo autodescubre subiendo desde el cwd. Nunca
-/// propaga error: si no hay fichero, o si `Store::open_read` falla, se queda sin
-/// store (se loguea a stderr) en vez de abortar el arranque del servidor.
-fn open_or_discover(db: Option<PathBuf>) -> Option<Store> {
-    let path = db.or_else(discover_db)?;
+/// aborta el servidor: sin fichero es `Ok(None)`, y si `Store::open_read` falla
+/// devuelve el motivo (se loguea a stderr) para que las tools lo digan.
+fn open_or_discover(db: Option<PathBuf>) -> std::result::Result<Option<Store>, String> {
+    let Some(path) = db.or_else(discover_db) else { return Ok(None) };
     if !path.is_file() {
-        return None;
+        return Ok(None);
     }
     match Store::open_read(&path) {
-        Ok(store) => Some(store),
+        Ok(store) => Ok(Some(store)),
         Err(err) => {
-            eprintln!(
-                "chrono-mcp: no se pudo abrir el índice {}: {err}",
-                path.display()
-            );
-            None
+            let msg = match err.downcast_ref::<chrono_store::SchemaMismatch>() {
+                Some(m) if !m.is_newer() => format!(
+                    "chrono: el índice {p} es de una versión anterior de chrono (esquema {}; esta versión necesita el v{}). \
+                     Reconstrúyelo con las mismas fuentes: chrono --db {p} reindex",
+                    m.found_label(),
+                    m.want,
+                    p = path.display()
+                ),
+                Some(_) => format!("chrono: {err}"),
+                None => format!("chrono: no se pudo abrir el índice {}: {err}", path.display()),
+            };
+            eprintln!("{msg}");
+            Err(msg)
         }
     }
 }

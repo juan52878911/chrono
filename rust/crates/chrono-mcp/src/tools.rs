@@ -291,7 +291,7 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
 
     let store = match state.store() {
         Some(s) => s,
-        None => return Ok(text_content(no_index_text())),
+        None => return Ok(text_content(state.open_error().unwrap_or_else(no_index_text))),
     };
     run_tool(store, name, args)
 }

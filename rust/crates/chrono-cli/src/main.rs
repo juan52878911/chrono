@@ -15,6 +15,7 @@ mod config;
 mod index;
 mod json;
 mod query;
+mod reindex;
 mod symbols;
 mod timeutil;
 
@@ -40,6 +41,8 @@ Index:
                        --as <kind> forces the adapter (e.g. --as template, config-defined;
                        --as nod for a Nod event file that is still empty).
   sync [path]          Process only the delta since the last watermark (all sources).
+  reindex              Rebuild the index from scratch with the same sources (git, logs, globs,
+                       commands), e.g. after a chrono upgrade that changes the index schema.
   config check         Validate .chrono/config.json: each problem with its key path.
 
 Queries (JSON with `schema_version`, `entity`/`id`; add --compact for a plain-text table of `result`
@@ -139,6 +142,8 @@ Uso:
                        --as <kind> fuerza el adaptador (p.ej. --as template, definido por config;
                        --as nod para un fichero de eventos de Nod aún vacío).
   sync [ruta]          Procesa solo el delta desde la última marca (todas las fuentes).
+  reindex              Reconstruye el índice desde cero con las mismas fuentes (git, logs, globs,
+                       comandos), p. ej. tras actualizar chrono a una versión con otro esquema.
   config check         Valida .chrono/config.json: cada problema con la ruta de su clave.
 
 Consulta (JSON con `schema_version`, `entity`/`id`; con --compact, una tabla de texto solo con
@@ -534,6 +539,16 @@ fn resolve_db(f: &Flags) -> PathBuf {
     })
 }
 
+/// `fatal` de un error al abrir el índice: si es de otra versión de esquema,
+/// lo dice en lenguaje de usuario con el comando para reconstruirlo.
+fn fatal_open(e: Box<dyn std::error::Error + Send + Sync>, db: &Path, f: &Flags) -> ! {
+    let r: &(dyn std::error::Error + 'static) = &*e;
+    match reindex::explain_open_error(r, db, f.db.is_some()) {
+        Some(msg) => fatal(msg),
+        None => fatal(e),
+    }
+}
+
 fn require_pos(f: &Flags, msg_en: &str, msg_es: &str) -> String {
     f.pos.get(1).cloned().unwrap_or_else(|| fatal(t(msg_en, msg_es)))
 }
@@ -645,12 +660,23 @@ fn main() {
             }
         };
         if let Err(e) = index::sync(&db, repo) {
+            fatal_open(e, &db, &f);
+        }
+        return;
+    }
+    if cmd == "reindex" {
+        if let Err(e) = reindex::run(&db) {
             fatal(e);
         }
         return;
     }
     if cmd == "add" {
         let path = require_pos(&f, "add needs a <path> (a repo or a log file)", "add necesita una <ruta> (un repo o un fichero de log)");
+        // Con `--db` a un directorio que aún no existe, se crea (como en
+        // `init --db`); antes salía un «No such file or directory» sin más.
+        if let Some(parent) = db.parent().filter(|d| !d.as_os_str().is_empty() && !d.exists()) {
+            std::fs::create_dir_all(parent).unwrap_or_else(|e| fatal(format!("{}: {e}", parent.display())));
+        }
         // `add cmd:<nombre>`: ejecuta el comando de la config y añade su caché.
         let (path, as_kind) = match path.strip_prefix(command::PREFIX) {
             Some(name) => match refresh_commands(&db, Some(name)) {
@@ -670,7 +696,7 @@ fn main() {
             index::add(&db, Path::new(&path), f.symbols, as_kind.as_deref(), f.preset.as_deref())
         };
         if let Err(e) = r {
-            fatal(e);
+            fatal_open(e, &db, &f);
         }
         return;
     }
@@ -688,12 +714,12 @@ fn main() {
             f.level.as_deref(),
             f.grep.as_deref(),
         ) {
-            fatal(e);
+            fatal_open(e, &db, &f);
         }
         return;
     }
 
-    let store = chrono_store::Store::open_read(&db).unwrap_or_else(|e| fatal(e));
+    let store = chrono_store::Store::open_read(&db).unwrap_or_else(|e| fatal_open(e, &db, &f));
     let window = query::Window::from_flag(f.since.as_deref()).unwrap_or_else(|e| fatal(e));
 
     // `--by symbol` cambia el alcance de las consultas de entidades a símbolos

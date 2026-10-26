@@ -70,12 +70,7 @@ impl Store {
             if version.as_deref() == Some("6") {
                 migrate_v6_links(&conn)?;
             } else if version.as_deref() != Some(want.as_str()) {
-                return Err(format!(
-                    "chrono-store: schema_version del índice es {:?}, se requiere {} \
-                     (reindexa: borra el índice o usa Store::reset)",
-                    version, SCHEMA_VERSION
-                )
-                .into());
+                return Err(crate::SchemaMismatch::new(version).into());
             }
         }
 

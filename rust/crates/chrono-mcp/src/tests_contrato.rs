@@ -106,3 +106,16 @@ fn top_por_mcp_acepta_la_dim_declarada_sin_prefijo() {
     let err = crate::run_tool_text(&store, "top", &json!({"dim": "nada"})).unwrap_err().to_string();
     assert!(err.contains("level, kind, actor, entity") && err.contains("cwd"), "{err}");
 }
+
+#[test]
+fn indice_de_otro_esquema_las_tools_dicen_como_reconstruirlo() {
+    let (db, store) = fixture("esquema");
+    store.set_meta("schema_version", "5").unwrap();
+    drop(store);
+    let state = crate::State { store: Default::default(), open_error: Default::default(), db: Some(db.0.clone()), discover: true };
+    let r = crate::tools::call_tool(&state, &json!({"name": "sources", "arguments": {}})).unwrap();
+    let text = r["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("esquema v5") && text.contains("v7"), "{text}");
+    assert!(text.contains(&format!("chrono --db {} reindex", db.0.display())), "{text}");
+    assert!(!text.contains("chrono init"), "no es que falte el índice: {text}");
+}
