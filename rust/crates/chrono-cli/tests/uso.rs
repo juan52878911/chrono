@@ -104,6 +104,63 @@ fn sources_y_phases_no_se_dan_por_truncadas() {
     }
 }
 
+/// Índice con un log de 3 líneas con tiempo (con `ms` y `region`) y una sin tiempo.
+fn indice_attrs(tag: &str) -> TempDir {
+    let p = std::env::temp_dir().join(format!("chrono-uso-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&p);
+    std::fs::create_dir_all(p.join(".chrono")).unwrap();
+    let dir = TempDir(std::fs::canonicalize(&p).unwrap());
+    let lines = [
+        r#"{"ts":"2026-01-01T00:00:00Z","level":"ERROR","msg":"uno","ms":10,"region":"db-1"}"#,
+        r#"{"ts":"2026-01-01T00:10:00Z","level":"INFO","msg":"dos","ms":30,"region":"db-2"}"#,
+        r#"{"ts":"2026-01-01T00:20:00Z","level":"INFO","msg":"tres","ms":20,"region":"db-1"}"#,
+        r#"{"level":"ERROR","msg":"sin tiempo"}"#,
+    ];
+    std::fs::write(dir.0.join("app.jsonl"), lines.join("\n") + "\n").unwrap();
+    let (ok, _, err) = run(&dir.0, &["add", "app.jsonl", "--db", ".chrono/index.db"]);
+    assert!(ok, "{err}");
+    dir
+}
+
+#[test]
+fn vacios_que_ahora_dicen_por_que() {
+    let d = indice_attrs("vacios");
+    // top attr: con una clave que no existe: vacío, sin error, con aviso.
+    let (ok, out, err) = run(&d.0, &["top", "attr:contenedor", "--compact"]);
+    assert!(ok, "{err}");
+    assert!(out.starts_with("hints: no event has the attribute \"contenedor\"; attributes: ") && out.contains("region"), "{out}");
+    let (ok, out, _) = run(&d.0, &["top", "attr:region", "--compact"]);
+    assert!(ok && !out.contains("hints") && out.contains("db-1\t2"), "{out}");
+    // --level mal escrito: aviso con los niveles que hay.
+    let (ok, _, err) = run(&d.0, &["events", "--level", "eror"]);
+    assert!(ok && err.contains("no event has level eror (levels: ERROR,INFO)"), "{err}");
+    let (ok, _, err) = run(&d.0, &["top", "kind", "--level", "error,info"]);
+    assert!(ok && err.is_empty(), "{err}");
+    // stats de una attr que no existe o no es numérica.
+    let (_, out, _) = run(&d.0, &["stats", "latencia", "--compact"]);
+    assert!(out.contains("hints: no event has the attribute \"latencia\""), "{out}");
+    let (_, out, _) = run(&d.0, &["stats", "region", "--compact"]);
+    assert!(out.contains("hints: the attribute \"region\" has no numeric values"), "{out}");
+    let (_, out, _) = run(&d.0, &["stats", "ms", "--attr", "region:db-1", "--compact"]);
+    assert!(!out.contains("hints") && out.contains("\t2\t10\t"), "{out}");
+    // timeline: los eventos sin tiempo se dicen.
+    let (_, out, _) = run(&d.0, &["timeline", "--compact"]);
+    assert!(out.contains("1 matching events have no time") && out.contains("untimed: 1"), "{out}");
+    let (_, out, _) = run(&d.0, &["timeline", "--level", "INFO", "--compact"]);
+    assert!(!out.contains("untimed"), "{out}");
+    // hotspots sin git y session_patterns sin Nod.
+    let (_, out, _) = run(&d.0, &["hotspots", "--compact"]);
+    assert!(out.starts_with("hints: hotspots needs a git source") && out.contains("hotspots: -"), "{out}");
+    let (_, out, _) = run(&d.0, &["session_patterns", "--compact"]);
+    assert!(out.starts_with("hints: no Nod events in the index"), "{out}");
+    // correlate por tiempo con una sola fuente sugiere --via.
+    let (_, ev, _) = run(&d.0, &["events", "--limit", "1"]);
+    let v: serde_json::Value = serde_json::from_str(&ev).unwrap();
+    let id = v["result"]["events"][0]["id"].as_str().unwrap().to_string();
+    let (ok, out, err) = run(&d.0, &["correlate", &id, "--compact"]);
+    assert!(ok && out.contains("hints: correlate by time only looks at OTHER sources") && out.contains("--via"), "{out}{err}");
+}
+
 #[test]
 fn errores_de_gaps_en_el_idioma_pedido() {
     let d = indice("gaps-lang");

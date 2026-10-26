@@ -92,8 +92,36 @@ fn envelope_with(
         .set("result", result))
 }
 
+/// Pone `hints` (avisos para leer el resultado: una attr que no existe, un
+/// índice sin git…) al principio del resultado, si hay: en `--compact` es lo
+/// primero que se lee.
+fn with_hints(result: Json, hints: Vec<String>) -> Json {
+    match result {
+        Json::Obj(mut fields) if !hints.is_empty() => {
+            fields.insert(0, ("hints".to_string(), Json::Arr(hints.iter().map(|h| Json::str(h)).collect())));
+            Json::Obj(fields)
+        }
+        other => other,
+    }
+}
+
+/// Aviso de una attr que no tiene ningún evento, con las que hay.
+fn unknown_attr_hint(store: &Store, key: &str) -> Result<String> {
+    let keys = chrono_metrics::attr_keys(store.conn(), 20)?.join(", ");
+    Ok(t(format!("no event has the attribute {key:?}; attributes: {keys}"), format!("ningún evento tiene la attr {key:?}; las que hay: {keys}")))
+}
+
 pub fn hotspots(store: &Store, w: &Window, symbols_only: bool) -> Result<Json> {
     const LIMIT: usize = 25;
+    // Sin git no hay tamaño: el ranking salía con los nombres de tools o
+    // servicios por frecuencia (size 0), que no es lo que mide hotspots.
+    if chrono_metrics::sources_of_kind(store.conn(), "git")? == 0 {
+        let hint = t(
+            "hotspots needs a git source (changes × size of each file) and this index has none; for logs or tools: chrono top entity",
+            "hotspots necesita una fuente git (cambios × tamaño de cada fichero) y este índice no tiene ninguna; para logs o tools: chrono top entity",
+        );
+        return envelope(store, "hotspots", w, LIMIT, 0, with_hints(Json::obj().set("hotspots", Json::Arr(vec![])), vec![hint]));
+    }
     let rows = chrono_metrics::hotspots(store.conn(), w.since_epoch, LIMIT, symbols_only)?;
     let items: Vec<Json> = rows
         .iter()
@@ -626,11 +654,22 @@ pub fn timeline(
         .collect();
     let n = items.len();
     let until_json = if until_epoch == 0 { Json::Null } else { Json::str(&epoch_to_iso8601(until_epoch)) };
-    let result = Json::obj()
+    let mut result = Json::obj()
         .set("bucket_ms", Json::Int(bucket_ms))
         .set("by", group_by.map_or(Json::Null, Json::str))
         .set("until", until_json)
         .set("buckets", Json::Arr(items));
+    // Los eventos sin tiempo no caben en ningún bucket: se dicen aparte.
+    let untimed = chrono_metrics::untimed_events(store.conn(), scope)?;
+    if untimed > 0 {
+        result = with_hints(
+            result.set("untimed", Json::Int(untimed)),
+            vec![t(
+                format!("{untimed} matching events have no time and are in no bucket"),
+                format!("{untimed} eventos que casan no tienen tiempo y no están en ningún bucket"),
+            )],
+        );
+    }
     envelope(store, "timeline", w, limit, n, result)
 }
 
@@ -662,7 +701,16 @@ pub fn top(
         .map(|v| Json::obj().set("value", Json::str(&v.value)).set("count", Json::Int(v.count)))
         .collect();
     let n = items.len();
-    envelope(store, "top", w, limit, n, Json::obj().set("dim", Json::str(dim)).set("top", Json::Arr(items)))
+    // `attr:K` con una K que no existe da vacío: no es error (`informe` pide
+    // `attr:container` en cualquier índice), pero se dice.
+    let mut hints = Vec::new();
+    if let Some(k) = dim.strip_prefix("attr:").filter(|_| rows.is_empty()) {
+        if !chrono_metrics::attr_key_known(store.conn(), k)? {
+            hints.push(unknown_attr_hint(store, k)?);
+        }
+    }
+    let result = Json::obj().set("dim", Json::str(dim)).set("top", Json::Arr(items));
+    envelope(store, "top", w, limit, n, with_hints(result, hints))
 }
 
 /// `precede`: episodios de lo que casan los filtros y qué los precede.
@@ -794,7 +842,25 @@ pub fn correlate(store: &Store, id: &str, delta: Option<&str>, kind: Option<&str
         .set("delta_ms", Json::Int(delta_ms))
         .set("anchor", event_ref_json(&corr.anchor))
         .set("related", Json::Arr(related));
-    envelope(store, "correlate", &w, limit, n, result)
+    // Por tiempo solo se miran OTRAS fuentes: con una sola, siempre vacío.
+    let mut hints = Vec::new();
+    if n == 0 && chrono_metrics::other_timed_sources(store.conn(), id)? == Some(0) {
+        let keys = chrono_metrics::event_relation_keys(store.conn(), id)?;
+        let ej = keys.first().map_or("<key>".to_string(), |k| k.clone());
+        let list = keys.join(", ");
+        hints.push(if keys.is_empty() {
+            t(
+                format!("correlate by time only looks at OTHER sources and the index has no other with time; to relate by a key: --via {ej}"),
+                format!("correlate por tiempo solo mira OTRAS fuentes y el índice no tiene otra con tiempo; para relacionar por clave: --via {ej}"),
+            )
+        } else {
+            t(
+                format!("correlate by time only looks at OTHER sources and the index has no other with time; to relate by a key: --via {ej} (this event's keys: {list})"),
+                format!("correlate por tiempo solo mira OTRAS fuentes y el índice no tiene otra con tiempo; para relacionar por clave: --via {ej} (claves de este evento: {list})"),
+            )
+        });
+    }
+    envelope(store, "correlate", &w, limit, n, with_hints(result, hints))
 }
 
 /// `correlate <id> --via K`: lo que comparte la clave `K` con el evento, de
@@ -1136,7 +1202,15 @@ pub fn session_patterns(
         .set("sessions_total", Json::Int(sp.sessions_total as i64))
         .set("sessions", Json::Arr(sessions))
         .set("notes", strs(&sp.notes, sp.notes.len()));
-    envelope(store, "session_patterns", w, limit, returned, result)
+    // Sin Nod todo sale a cero: se dice delante, no solo en `notes` al final.
+    let mut hints = Vec::new();
+    if sp.events_scanned == 0 {
+        hints.push(t(
+            "no Nod events in the index: every figure is 0 (add them with: chrono add <events.jsonl> --as nod)",
+            "no hay eventos Nod en el índice: todas las cifras son 0 (añádelos con: chrono add <events.jsonl> --as nod)",
+        ));
+    }
+    envelope(store, "session_patterns", w, limit, returned, with_hints(result, hints))
 }
 
 /// `stats <attr>`: min/p50/p95/max/suma de un atributo numérico por grupo
@@ -1169,7 +1243,18 @@ pub fn stats(
         .collect();
     let n = items.len();
     let result = Json::obj().set("attr", Json::str(attr)).set("by", by.map_or(Json::Null, Json::str)).set("groups", Json::Arr(items));
-    envelope(store, "stats", w, limit, n, result)
+    let mut hints = Vec::new();
+    if rows.is_empty() {
+        hints.push(if chrono_metrics::attr_key_known(store.conn(), attr)? {
+            t(
+                format!("the attribute {attr:?} has no numeric values in these events (stats only counts numbers)"),
+                format!("la attr {attr:?} no tiene valores numéricos en estos eventos (stats solo cuenta números)"),
+            )
+        } else {
+            unknown_attr_hint(store, attr)?
+        });
+    }
+    envelope(store, "stats", w, limit, n, with_hints(result, hints))
 }
 
 /// `explain <fichero>[:desde-hasta]`: por qué un trozo de código está así.

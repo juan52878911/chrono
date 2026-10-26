@@ -924,6 +924,21 @@ fn main() {
     if let Err(e) = chrono_metrics::check_join(store.conn(), scope.join) {
         fatal(localized(e));
     }
+    // Un `--level` mal escrito (`eror`) daba vacío sin más: se avisa con los
+    // que hay (`informe` ya lo dice en su texto).
+    if let Some(l) = scope.level.filter(|l| !l.trim().is_empty() && cmd != "informe" && query_flags(cmd).is_some_and(|(_, sc)| sc)) {
+        if let Ok((unknown, known)) = chrono_metrics::unknown_levels(store.conn(), l, scope.infer_level) {
+            if !unknown.is_empty() {
+                eprintln!(
+                    "{}",
+                    t(
+                        format!("chrono: warning: no event has level {} (levels: {})", unknown.join(","), known.join(",")),
+                        format!("chrono: aviso: ningún evento tiene el nivel {} (niveles: {})", unknown.join(","), known.join(",")),
+                    )
+                );
+            }
+        }
+    }
     let out = match cmd {
         "hotspots" => query::hotspots(&store, &window, symbols_only),
         "coupling" => {

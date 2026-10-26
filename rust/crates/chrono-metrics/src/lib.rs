@@ -8,6 +8,7 @@
 //! (segundos UTC; 0 = sin límite) que filtra `events.at_epoch >= since_epoch`.
 
 mod bugs;
+mod checks;
 mod churn;
 mod correlate;
 mod coupling;
@@ -31,6 +32,7 @@ mod top;
 mod trace;
 
 pub use bugs::{bugs, BugArea, BugCategory, Bugs};
+pub use checks::{attr_key_known, attr_keys, event_relation_keys, other_timed_sources, sources_of_kind, unknown_levels, untimed_events};
 pub use churn::{churn, ChurnRow};
 pub use correlate::{Correlation, EventRef, correlate, correlate_kinds};
 pub use coupling::{coupling, Coupled};
