@@ -101,30 +101,33 @@ fn candidatos_por_bandas(conn: &Connection, id: &str, target: u64, max_dist: u32
     let b3 = (target & 0xFFFF) as i64;
 
     // Las expresiones del WHERE son textualmente las de los índices
-    // `idx_events_sh0..3`, condición para que SQLite use la OR-optimization.
-    let mut stmt = conn.prepare(
-        "SELECT rowid, id, title, simhash FROM events \
-         WHERE id != ?1 AND ( \
+    // `idx_events_sh0..3`, condición para que SQLite use la OR-optimization;
+    // v6: los índices son parciales (`kind = 'commit'`), así que la consulta
+    // repite ese término. Los eventos que no son commits se recorren aparte
+    // (solo si los hay: en un índice de git no hay ninguno).
+    let bands = "SELECT rowid, id, title, simhash FROM events \
+         WHERE kind = 'commit' AND id != ?1 AND ( \
              ((simhash >> 48) & 65535) = ?2 OR \
              ((simhash >> 32) & 65535) = ?3 OR \
              ((simhash >> 16) & 65535) = ?4 OR \
-             (simhash & 65535) = ?5)",
-    )?;
-    let rows = stmt.query_map(params![id, b0, b1, b2, b3], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, i64>(3)?,
-        ))
-    })?;
-
+             (simhash & 65535) = ?5)";
+    let resto = "SELECT rowid, id, title, simhash FROM events WHERE kind <> 'commit' AND id != ?1";
     let mut cands: Vec<(i64, SimilarRow)> = Vec::new();
-    for row in rows {
-        let (rowid, other_id, title, sh) = row?;
+    let mut push = |rowid: i64, other_id: String, title: String, sh: i64| {
         let dist = (target ^ (sh as u64)).count_ones();
         if dist <= max_dist {
             cands.push((rowid, SimilarRow { id: other_id, title, distance: dist }));
+        }
+    };
+    let row = |r: &rusqlite::Row| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?));
+    for x in conn.prepare(bands)?.query_map(params![id, b0, b1, b2, b3], row)? {
+        let (rowid, other_id, title, sh) = x?;
+        push(rowid, other_id, title, sh);
+    }
+    if crate::cube::any_kind_other_than(conn, "commit")? {
+        for x in conn.prepare(resto)?.query_map(params![id], row)? {
+            let (rowid, other_id, title, sh) = x?;
+            push(rowid, other_id, title, sh);
         }
     }
     // Orden natural de la tabla (rowid asc): replica el orden en que el escaneo

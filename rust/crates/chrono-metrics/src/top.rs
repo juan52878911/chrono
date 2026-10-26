@@ -139,6 +139,26 @@ pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilte
         return collect(rows);
     }
 
+    // v6: level/kind/entity desde `dim_rollups` cuando pueden responder.
+    let cube_dim = match dim {
+        "level" if f.infer_level => Some(crate::cube::Dim::LevelInf),
+        "level" => Some(crate::cube::Dim::Level),
+        "kind" => Some(crate::cube::Dim::Kind),
+        "entity" => Some(crate::cube::Dim::Entity),
+        _ => None,
+    };
+    if let Some(d) = cube_dim {
+        if let Some(cells) = crate::cube::cube(conn, since_epoch, &scope, &[d], None)? {
+            let mut v: Vec<TopValue> = cells
+                .into_iter()
+                .filter_map(|((k, _), (count, _))| k.into_iter().next().filter(|s| !s.is_empty()).map(|value| TopValue { value, count }))
+                .collect();
+            v.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
+            v.truncate(limit as usize);
+            return Ok(v);
+        }
+    }
+
     let level_value = crate::timeline::level_expr("events", f.infer_level);
     let (from_clause, value_expr) = match dim {
         "level" => ("events", level_value.as_str()),
@@ -148,7 +168,7 @@ pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilte
             "COALESCE(actors.display_name, actors.key)",
         ),
         "entity" => (
-            "touches JOIN events ON events.id = touches.event_id \
+            "touches JOIN events ON events.rid = touches.event_rid \
              JOIN entities ON entities.id = touches.entity_id",
             "entities.key",
         ),
@@ -493,14 +513,6 @@ mod tests_p3 {
         );
         let p = plan(&store, &sql);
         assert!(p.contains("idx_events_actor"), "plan debería usar idx_events_actor:\n{p}");
-    }
-
-    #[test]
-    fn top_kind_sigue_usando_indice_covering() {
-        // Referencia: `kind` (no tocado) resuelve por su índice covering.
-        let (_db, store) = fixture("kind-eqp");
-        let p = plan(&store, &top_sql("events", "events.kind"));
-        assert!(p.contains("idx_events_kind"), "plan debería usar idx_events_kind:\n{p}");
     }
 
     #[test]

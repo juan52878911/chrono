@@ -11,6 +11,7 @@ mod bugs;
 mod churn;
 mod correlate;
 mod coupling;
+mod cube;
 mod events;
 mod explain;
 mod hotspots;

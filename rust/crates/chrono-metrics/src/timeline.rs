@@ -77,6 +77,10 @@ pub fn timeline(
             return Ok(rows);
         }
     }
+    // v6: con desglose (o buckets que no son múltiplo del minuto), `dim_rollups`.
+    if let Some(rows) = timeline_from_cube(conn, since_epoch, until_epoch, bucket_secs, group_by, &EventScope::default(), limit)? {
+        return Ok(rows);
+    }
 
     // `at_epoch - ((at_epoch % ?1 + ?1) % ?1)` reproduce
     // `at_epoch - at_epoch.rem_euclid(bucket_secs)` en SQL: el `%` de SQLite
@@ -150,7 +154,7 @@ pub(crate) fn level_expr(t: &str, infer: bool) -> String {
 
 /// `,A,B,` en mayúsculas y sin espacios: el parámetro de una lista separada por
 /// comas, para casar con `instr(?, ',' || x || ',')`.
-fn comma_list(raw: &str, upper: bool) -> String {
+pub(crate) fn comma_list(raw: &str, upper: bool) -> String {
     let items: Vec<String> = raw
         .split(',')
         .map(str::trim)
@@ -217,7 +221,7 @@ impl EventScope<'_> {
         if let Some(en) = self.entity.filter(|e| !e.trim().is_empty()) {
             push(
                 "EXISTS (SELECT 1 FROM touches tq JOIN entities enq ON enq.id = tq.entity_id
-                         WHERE tq.event_id = $t.id AND instr(?N, ',' || enq.key || ',') > 0)",
+                         WHERE tq.event_rid = $t.rid AND instr(?N, ',' || enq.key || ',') > 0)",
                 comma_list(en, false),
             );
         }
@@ -245,8 +249,9 @@ impl EventScope<'_> {
 }
 
 /// Como [`timeline`], contando solo los eventos de `scope`: «¿desde cuándo
-/// aparece este error?», «¿cuántos despliegues fallidos por semana?». Siempre
-/// barre `events` (los rollups no guardan nivel ni kind).
+/// aparece este error?», «¿cuántos despliegues fallidos por semana?». Lee
+/// `dim_rollups` cuando pueden responder (fuente, nivel, kind, entidad; bucket
+/// múltiplo de 10 min) y si no barre `events`.
 pub fn timeline_scoped(
     conn: &Connection,
     since_epoch: i64,
@@ -268,6 +273,9 @@ pub fn timeline_scoped(
         Some("kind") => "e.kind",
         Some(other) => return Err(format!("timeline: unsupported group_by: {other}").into()),
     };
+    if let Some(rows) = timeline_from_cube(conn, since_epoch, until_epoch, bucket_secs, group_by, scope, limit)? {
+        return Ok(rows);
+    }
     let (filters, extra) = scope.sql(5);
     let sql = format!(
         "SELECT bucket_epoch, key, COUNT(*) AS count FROM (
@@ -296,6 +304,41 @@ pub fn timeline_scoped(
         out.push(row?);
     }
     Ok(out)
+}
+
+/// `timeline` desde `dim_rollups` (ver [`crate::cube`]): mismas filas que el
+/// camino de `events`, o `None` si el cubo no puede responder.
+fn timeline_from_cube(
+    conn: &Connection,
+    since_epoch: i64,
+    until_epoch: i64,
+    bucket_ms: i64,
+    group_by: Option<&str>,
+    scope: &EventScope,
+    limit: usize,
+) -> Result<Option<Vec<TimelineBucket>>> {
+    use crate::cube::Dim;
+    let dims: &[Dim] = match group_by {
+        None => &[],
+        Some("level") => &[Dim::Level],
+        Some("kind") => &[Dim::Kind],
+        Some(_) => return Ok(None),
+    };
+    let mut sc = scope.clone();
+    if until_epoch > 0 {
+        sc.until_epoch = if sc.until_epoch > 0 { sc.until_epoch.min(until_epoch) } else { until_epoch };
+    }
+    let Some(cells) = crate::cube::cube(conn, since_epoch, &sc, dims, Some(bucket_ms))? else { return Ok(None) };
+    // `Cells` va ordenado por (claves, bucket); la salida, por (bucket, clave).
+    let mut out: Vec<TimelineBucket> = cells
+        .into_iter()
+        .map(|((keys, bucket), (count, _))| TimelineBucket { bucket_epoch: bucket, key: keys.into_iter().next().unwrap_or_default(), count })
+        .collect();
+    out.sort_by(|a, b| a.bucket_epoch.cmp(&b.bucket_epoch).then_with(|| a.key.cmp(&b.key)));
+    if limit > 0 {
+        out.truncate(limit);
+    }
+    Ok(Some(out))
 }
 
 /// Lee un valor de `meta` como `i64`, o `None` si la clave falta o no parsea.

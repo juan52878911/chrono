@@ -65,7 +65,7 @@ pub fn sources(conn: &Connection) -> Result<Vec<SourceSummary>> {
             )?,
             kinds: counts("SELECT kind, COUNT(*) c FROM events WHERE source_ref = ?1 GROUP BY kind ORDER BY c DESC, kind LIMIT 5", sref)?,
             top_entities: counts(
-                "SELECT en.key, COUNT(*) c FROM touches t JOIN events e ON e.id = t.event_id
+                "SELECT en.key, COUNT(*) c FROM touches t JOIN events e ON e.rid = t.event_rid
                  JOIN entities en ON en.id = t.entity_id WHERE e.source_ref = ?1
                  GROUP BY en.key ORDER BY c DESC, en.key LIMIT 15",
                 sref,

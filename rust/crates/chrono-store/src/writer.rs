@@ -2,7 +2,7 @@
 //! cachés en memoria de `actor.key -> id` / `entity.key -> id`, para no volver
 //! a consultar por cada fila (igual que el `Writer` de Go).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::{params, Transaction};
 
@@ -18,11 +18,20 @@ pub struct WriterCaches {
     actors: HashMap<String, i64>,
     entities: HashMap<String, i64>,
     sources: HashMap<String, i64>,
+    dim_values: HashMap<(String, String), i64>,
+    attr_keys: HashSet<(i64, String)>,
+    dims: Vec<String>,
 }
 
 impl WriterCaches {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Cachés vacías con las `dims` de la fuente: esas claves de `attrs` van a
+    /// `event_dims` (ver [`Writer::set_dims`]).
+    pub fn with_dims(dims: Vec<String>) -> Self {
+        WriterCaches { dims, ..Self::default() }
     }
 }
 
@@ -30,30 +39,32 @@ impl WriterCaches {
 /// a [`Writer::commit`], `rusqlite::Transaction` revierte automáticamente.
 pub struct Writer<'a> {
     tx: Transaction<'a>,
-    actors: HashMap<String, i64>,
-    entities: HashMap<String, i64>,
-    sources: HashMap<String, i64>,
+    c: WriterCaches,
+    /// `(id, rid)` del último evento insertado: `add_labels` va justo detrás.
+    last: Option<(String, i64)>,
 }
 
 impl<'a> Writer<'a> {
     pub(crate) fn new(tx: Transaction<'a>) -> Self {
-        Writer { tx, actors: HashMap::new(), entities: HashMap::new(), sources: HashMap::new() }
+        Writer { tx, c: WriterCaches::default(), last: None }
     }
 
     /// Como [`Writer::new`] pero sembrado con cachés de un lote anterior.
     pub(crate) fn new_seeded(tx: Transaction<'a>, caches: WriterCaches) -> Self {
-        Writer { tx, actors: caches.actors, entities: caches.entities, sources: caches.sources }
+        Writer { tx, c: caches, last: None }
     }
 
     /// Commitea el lote y DEVUELVE las cachés, para sembrar el siguiente lote.
     pub fn finish(self) -> Result<WriterCaches> {
-        let caches = WriterCaches {
-            actors: self.actors,
-            entities: self.entities,
-            sources: self.sources,
-        };
         self.tx.commit()?;
-        Ok(caches)
+        Ok(self.c)
+    }
+
+    /// Claves de `attrs` que se guardan como dims (P-REL-1): salen del JSON y
+    /// van a `event_dims`, con el valor una vez en `dim_values`. Se aplica a los
+    /// eventos que se añadan después.
+    pub fn set_dims(&mut self, dims: Vec<String>) {
+        self.c.dims = dims;
     }
 
     /// Inserta un evento COMPLETO: upsert de actor (y su alias en
@@ -75,17 +86,14 @@ impl<'a> Writer<'a> {
 
         // Sin nivel de la fuente: el que diga el texto, APARTE (`level` sigue
         // siendo el de la fuente para que las cifras coincidan con ella).
-        let attrs_json = match (ev.level.is_empty() && ev.kind != "commit")
-            .then(|| chrono_core::infer_level(&ev.title))
-            .flatten()
-        {
-            Some(lv) if !ev.attrs.contains_key("level_inferred") => {
-                let mut a = ev.attrs.clone();
-                a.insert("level_inferred".to_string(), lv.to_string());
-                attrs_to_json(&a)
-            }
-            _ => attrs_to_json(&ev.attrs),
-        };
+        let mut attrs = ev.attrs.clone();
+        if let Some(lv) = (ev.level.is_empty() && ev.kind != "commit").then(|| chrono_core::infer_level(&ev.title)).flatten() {
+            attrs.entry("level_inferred".to_string()).or_insert_with(|| lv.to_string());
+        }
+        // Las dims salen del JSON (van a `event_dims` tras insertar el evento).
+        let dims: Vec<(String, String)> =
+            self.c.dims.iter().filter_map(|k| attrs.remove(k).map(|v| (k.clone(), v))).collect();
+        let attrs_json = attrs_to_json(&attrs);
         let touches_n = ev.touches.len() as i64;
         let is_bulk = i64::from(ev.is_bulk);
         // u64 -> i64 reinterpretando bits (misma convención que el Go: int64(simhash)).
@@ -95,15 +103,14 @@ impl<'a> Writer<'a> {
             .tx
             .prepare_cached(
                 "INSERT OR IGNORE INTO events
-                    (id, source_ref, kind, at, at_epoch, actor_id, title, body, level,
+                    (id, source_ref, kind, at_epoch, actor_id, title, body, level,
                      simhash, is_bulk, touches_n, attrs)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             )?
             .execute(params![
                 ev.id,
                 source_ref,
                 ev.kind,
-                ev.at,
                 ev.at_epoch,
                 actor_id,
                 ev.title,
@@ -117,6 +124,23 @@ impl<'a> Writer<'a> {
         if inserted == 0 {
             return Ok(false);
         }
+        let rid = self.tx.last_insert_rowid();
+        self.last = Some((ev.id.clone(), rid));
+
+        for (key, value) in dims {
+            let dim_id = self.dim_id(key, value)?;
+            self.tx
+                .prepare_cached("INSERT OR IGNORE INTO event_dims(dim_id, event_rid) VALUES (?1, ?2)")?
+                .execute(params![dim_id, rid])?;
+        }
+        for key in attrs.keys() {
+            if !self.c.attr_keys.contains(&(source_ref, key.clone())) {
+                self.tx
+                    .prepare_cached("INSERT OR IGNORE INTO attr_keys(source_ref, key) VALUES (?1, ?2)")?
+                    .execute(params![source_ref, key])?;
+                self.c.attr_keys.insert((source_ref, key.clone()));
+            }
+        }
 
         for t in &ev.touches {
             let entity_id = self.entity_id(&t.entity, &t.entity_type)?;
@@ -127,18 +151,18 @@ impl<'a> Writer<'a> {
             let (added, deleted) = touch_lines(&t.attrs);
             self.tx
                 .prepare_cached(
-                    "INSERT OR IGNORE INTO touches(event_id, entity_id, weight, added, deleted, attrs)
+                    "INSERT OR IGNORE INTO touches(event_rid, entity_id, weight, added, deleted, attrs)
                      VALUES (?1,?2,?3,?4,?5,?6)",
                 )?
-                .execute(params![ev.id, entity_id, t.weight, added, deleted, touch_attrs])?;
+                .execute(params![rid, entity_id, t.weight, added, deleted, touch_attrs])?;
         }
 
         for l in &ev.links {
             self.tx
                 .prepare_cached(
-                    "INSERT OR IGNORE INTO links(event_id, rel, target) VALUES (?1,?2,?3)",
+                    "INSERT OR IGNORE INTO links(event_rid, rel, target) VALUES (?1,?2,?3)",
                 )?
-                .execute(params![ev.id, l.rel, l.target])?;
+                .execute(params![rid, l.rel, l.target])?;
         }
 
         Ok(true)
@@ -147,14 +171,21 @@ impl<'a> Writer<'a> {
     /// Inserta las etiquetas de clasificación de `event_id` (una fila por
     /// `task`, `INSERT OR IGNORE`: la primera etiqueta de cada tarea gana).
     pub fn add_labels(&mut self, event_id: &str, labels: &[chrono_core::Label]) -> Result<()> {
+        if labels.is_empty() {
+            return Ok(());
+        }
+        let rid = match &self.last {
+            Some((id, rid)) if id == event_id => *rid,
+            _ => self.tx.prepare_cached("SELECT rid FROM events WHERE id = ?1")?.query_row(params![event_id], |r| r.get(0))?,
+        };
         for lb in labels {
             let evidence = lb.evidence.join("\n");
             self.tx
                 .prepare_cached(
-                    "INSERT OR IGNORE INTO labels(event_id, task, label, confidence, source, evidence)
+                    "INSERT OR IGNORE INTO labels(event_rid, task, label, confidence, source, evidence)
                      VALUES (?1,?2,?3,?4,?5,?6)",
                 )?
-                .execute(params![event_id, lb.task, lb.label, lb.confidence, lb.source, evidence])?;
+                .execute(params![rid, lb.task, lb.label, lb.confidence, lb.source, evidence])?;
         }
         Ok(())
     }
@@ -172,7 +203,7 @@ impl<'a> Writer<'a> {
         if actor.key.is_empty() {
             return Ok(None);
         }
-        if let Some(&id) = self.actors.get(&actor.key) {
+        if let Some(&id) = self.c.actors.get(&actor.key) {
             return Ok(Some(id));
         }
 
@@ -191,13 +222,13 @@ impl<'a> Writer<'a> {
             )?
             .execute(params![actor.key, actor.name, id])?;
 
-        self.actors.insert(actor.key.clone(), id);
+        self.c.actors.insert(actor.key.clone(), id);
         Ok(Some(id))
     }
 
     /// Upsert de entidad por `key`; se crea con `size = 0` si no existía.
     fn entity_id(&mut self, key: &str, entity_type: &str) -> Result<i64> {
-        if let Some(&id) = self.entities.get(key) {
+        if let Some(&id) = self.c.entities.get(key) {
             return Ok(id);
         }
 
@@ -209,7 +240,7 @@ impl<'a> Writer<'a> {
             .prepare_cached("SELECT id FROM entities WHERE key = ?1")?
             .query_row(params![key], |r| r.get(0))?;
 
-        self.entities.insert(key.to_string(), id);
+        self.c.entities.insert(key.to_string(), id);
         Ok(id)
     }
 
@@ -221,7 +252,7 @@ impl<'a> Writer<'a> {
     /// el prefijo del id (`"git:/abs"` → `"git"`), que coincide con el real
     /// (`canonical_source_id` usa `src.kind()` como prefijo) → sin divergencia.
     fn source_ref(&mut self, source_id: &str) -> Result<i64> {
-        if let Some(&r) = self.sources.get(source_id) {
+        if let Some(&r) = self.c.sources.get(source_id) {
             return Ok(r);
         }
         let kind = source_id.split(':').next().unwrap_or("");
@@ -232,8 +263,32 @@ impl<'a> Writer<'a> {
             .tx
             .prepare_cached("SELECT ref FROM sources WHERE id = ?1")?
             .query_row(params![source_id], |x| x.get(0))?;
-        self.sources.insert(source_id.to_string(), r);
+        self.c.sources.insert(source_id.to_string(), r);
+        if !self.c.dims.is_empty() {
+            for key in &self.c.dims {
+                self.tx
+                    .prepare_cached("INSERT OR IGNORE INTO source_dims(source_ref, key) VALUES (?1, ?2)")?
+                    .execute(params![r, key])?;
+            }
+        }
         Ok(r)
+    }
+
+    /// Upsert de `(clave, valor)` en `dim_values`, cacheado.
+    fn dim_id(&mut self, key: String, value: String) -> Result<i64> {
+        let k = (key, value);
+        if let Some(&id) = self.c.dim_values.get(&k) {
+            return Ok(id);
+        }
+        self.tx
+            .prepare_cached("INSERT OR IGNORE INTO dim_values(key, value) VALUES (?1, ?2)")?
+            .execute(params![k.0, k.1])?;
+        let id: i64 = self
+            .tx
+            .prepare_cached("SELECT id FROM dim_values WHERE key = ?1 AND value = ?2")?
+            .query_row(params![k.0, k.1], |r| r.get(0))?;
+        self.c.dim_values.insert(k, id);
+        Ok(id)
     }
 }
 

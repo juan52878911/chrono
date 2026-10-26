@@ -32,7 +32,7 @@ pub fn coupling(
     let total: i64 = conn.query_row(
         "SELECT COUNT(*) FROM touches t
          JOIN entities e ON e.id = t.entity_id
-         JOIN events ev ON ev.id = t.event_id
+         JOIN events ev ON ev.rid = t.event_rid
          WHERE e.key = ?1 AND ev.is_bulk = 0 AND ev.at_epoch >= ?2",
         params![entity, since_epoch],
         |r| r.get(0),
@@ -42,10 +42,10 @@ pub fn coupling(
         "SELECT e2.key, COUNT(*) AS support
          FROM touches t2
          JOIN entities e2 ON e2.id = t2.entity_id
-         WHERE t2.event_id IN (
-             SELECT t1.event_id FROM touches t1
+         WHERE t2.event_rid IN (
+             SELECT t1.event_rid FROM touches t1
              JOIN entities e1 ON e1.id = t1.entity_id
-             JOIN events ev ON ev.id = t1.event_id
+             JOIN events ev ON ev.rid = t1.event_rid
              WHERE e1.key = ?1 AND ev.is_bulk = 0 AND ev.at_epoch >= ?2
          ) AND e2.key != ?1 AND e2.type {op} 'symbol'
          GROUP BY e2.id

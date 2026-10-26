@@ -93,7 +93,7 @@ impl Default for PrecedeOpts<'_> {
 const ENTITY_SQL: &str = "COALESCE(json_extract(e.attrs, '$.container'), json_extract(e.attrs, '$.pod'),
                                    json_extract(e.attrs, '$.host'),
                                    (SELECT en.key FROM touches t JOIN entities en ON en.id = t.entity_id
-                                    WHERE t.event_id = e.id ORDER BY en.key LIMIT 1), '')";
+                                    WHERE t.event_rid = e.rid ORDER BY en.key LIMIT 1), '')";
 
 fn severity(level: &str) -> u8 {
     match level.to_ascii_uppercase().as_str() {

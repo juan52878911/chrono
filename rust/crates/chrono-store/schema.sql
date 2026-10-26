@@ -1,4 +1,4 @@
--- Esquema v2 de chrono (port Rust). Convención: `id` (no sha), `entity` (no path).
+-- Esquema v6 de chrono (port Rust; ver SCHEMA_VERSION en lib.rs). Convención: `id` (no sha), `entity` (no path).
 -- Contrato COMPARTIDO entre chrono-store (escribe) y chrono-metrics (lee).
 -- Un evento genérico; un commit git es una proyección (kind='commit').
 PRAGMA journal_mode = WAL;
@@ -48,11 +48,16 @@ CREATE TABLE IF NOT EXISTS entities (
 );
 
 -- Eventos (era `commits`).
+-- v6: `rid` es alias explícito del rowid (estable ante VACUUM, como
+-- `sources.ref`) y la clave que usan touches/labels/links/event_dims; `id`
+-- pasa a UNIQUE y sigue siendo lo que enseñan las salidas. `at` ya no se guarda:
+-- es una columna virtual derivada de `at_epoch` (mismo formato que escribían
+-- los adaptadores: milisegundos solo si no son 0; '' sin tiempo).
 CREATE TABLE IF NOT EXISTS events (
-    id         TEXT PRIMARY KEY,          -- sha | hash(línea) | uuid
+    rid        INTEGER PRIMARY KEY,
+    id         TEXT NOT NULL UNIQUE,      -- sha | hash(línea) | uuid
     source_ref INTEGER NOT NULL REFERENCES sources(ref),  -- entero (v5); texto por JOIN
     kind      TEXT NOT NULL,              -- "commit" | "log" | ...
-    at        TEXT NOT NULL,              -- ISO-8601 UTC para la salida
     at_epoch  INTEGER NOT NULL,           -- MILISEGUNDOS UTC; lo que usan ventanas/índices
     actor_id  INTEGER REFERENCES actors(id),
     title     TEXT NOT NULL DEFAULT '',
@@ -61,38 +66,44 @@ CREATE TABLE IF NOT EXISTS events (
     simhash   INTEGER NOT NULL DEFAULT 0,
     is_bulk   INTEGER NOT NULL DEFAULT 0,
     touches_n INTEGER NOT NULL DEFAULT 0,
-    attrs     TEXT NOT NULL DEFAULT '{}'  -- JSON de atributos planos
+    attrs     TEXT NOT NULL DEFAULT '{}', -- JSON de atributos planos (sin las dims)
+    at        TEXT GENERATED ALWAYS AS (
+        CASE WHEN at_epoch = 0 THEN '' ELSE
+            strftime('%Y-%m-%dT%H:%M:%S', (at_epoch - ((at_epoch % 1000 + 1000) % 1000)) / 1000, 'unixepoch')
+            || CASE WHEN at_epoch % 1000 = 0 THEN '' ELSE '.' || printf('%03d', (at_epoch % 1000 + 1000) % 1000) END
+            || 'Z'
+        END) VIRTUAL                      -- ISO-8601 UTC para la salida
 );
 
 -- Cambios: evento × entidad (era `changes`).
 CREATE TABLE IF NOT EXISTS touches (
-    event_id  TEXT NOT NULL REFERENCES events(id),
+    event_rid INTEGER NOT NULL REFERENCES events(rid),
     entity_id INTEGER NOT NULL REFERENCES entities(id),
     weight    INTEGER NOT NULL DEFAULT 0,  -- added+deleted en git; -1 si binario
     added     INTEGER NOT NULL DEFAULT 0,  -- v5: líneas añadidas (antes json_extract en churn)
     deleted   INTEGER NOT NULL DEFAULT 0,  -- v5: líneas borradas (git binario = -1, clamp en churn)
     attrs     TEXT NOT NULL DEFAULT '{}',  -- git: added, deleted, change_type, old_path
-    PRIMARY KEY (event_id, entity_id)
-);
+    PRIMARY KEY (event_rid, entity_id)
+) WITHOUT ROWID;
 
 -- Relaciones deterministas (absorbe commit_tickets + reverts).
 CREATE TABLE IF NOT EXISTS links (
-    event_id TEXT NOT NULL REFERENCES events(id),
+    event_rid INTEGER NOT NULL REFERENCES events(rid),
     rel      TEXT NOT NULL,               -- "ticket" | "reverts" | "pr" | ...
     target   TEXT NOT NULL,
-    PRIMARY KEY (event_id, rel, target)
-);
+    PRIMARY KEY (event_rid, rel, target)
+) WITHOUT ROWID;
 
 -- Etiquetas de clasificación multitarea (generaliza classifications).
 CREATE TABLE IF NOT EXISTS labels (
-    event_id   TEXT NOT NULL REFERENCES events(id),
+    event_rid  INTEGER NOT NULL REFERENCES events(rid),
     task       TEXT NOT NULL,             -- "is_fix" | "kind" | "bug_category" | ...
     label      TEXT NOT NULL,
     confidence REAL NOT NULL DEFAULT 0,
     source     TEXT NOT NULL DEFAULT '',  -- "rules" | "jev" | "forge"
     evidence   TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (event_id, task)
-);
+    PRIMARY KEY (event_rid, task)
+) WITHOUT ROWID;
 
 -- Marcadores (tags/releases/deploys). Era `tags`, generalizado.
 CREATE TABLE IF NOT EXISTS markers (
@@ -126,27 +137,59 @@ CREATE TABLE IF NOT EXISTS issues (
 -- Índices (mismos accesos que las consultas de metrics).
 CREATE INDEX IF NOT EXISTS idx_events_at     ON events(at_epoch);
 CREATE INDEX IF NOT EXISTS idx_events_srcref_at ON events(source_ref, at_epoch);
-CREATE INDEX IF NOT EXISTS idx_events_kind   ON events(kind, at_epoch);
-CREATE INDEX IF NOT EXISTS idx_touches_ent   ON touches(entity_id, event_id);
+CREATE INDEX IF NOT EXISTS idx_touches_ent   ON touches(entity_id, event_rid);
 CREATE INDEX IF NOT EXISTS idx_labels_task   ON labels(task, label);
 CREATE INDEX IF NOT EXISTS idx_links_rel     ON links(rel, target);
 CREATE INDEX IF NOT EXISTS idx_links_target  ON links(target);
 
--- P3 (escala, aditivos — se crean al abrir, sin reindex ni subir schema_version).
--- Covering para `top level`/`top actor` y ventanas por nivel/actor: evitan el
--- SCAN completo de events (como ya hace idx_events_kind con `top kind`).
+-- `events --level` y `top level` sin filtros. v6: ya no hay `idx_events_kind`
+-- (en logs había un solo kind; los conteos por kind salen de `dim_rollups`).
 CREATE INDEX IF NOT EXISTS idx_events_level ON events(level, at_epoch);
-CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id, at_epoch);
+-- v6, parcial: los logs no traen actor y pagaban un índice entero de NULLs.
+CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id, at_epoch) WHERE actor_id IS NOT NULL;
 -- Bandas SimHash para `similar` sin escanear: el simhash de 64 bits se parte en
 -- 4 bandas de 16 bits (índices de expresión; `& 65535` toma los 16 bits bajos
 -- del desplazamiento, correcto aunque el i64 sea negativo). Dos eventos a
 -- distancia Hamming ≤3 comparten al menos una banda idéntica (pigeonhole: 3
 -- bits que difieren tocan ≤3 de las 4 bandas), así que la consulta recupera los
 -- candidatos por igualdad de banda y refina con Hamming exacto en Rust.
-CREATE INDEX IF NOT EXISTS idx_events_sh0 ON events((simhash >> 48) & 65535);
-CREATE INDEX IF NOT EXISTS idx_events_sh1 ON events((simhash >> 32) & 65535);
-CREATE INDEX IF NOT EXISTS idx_events_sh2 ON events((simhash >> 16) & 65535);
-CREATE INDEX IF NOT EXISTS idx_events_sh3 ON events(simhash & 65535);
+-- v6, parciales: solo commits (`similar` es de commits; los demás eventos se
+-- recorren aparte, ver `similar.rs`).
+CREATE INDEX IF NOT EXISTS idx_events_sh0 ON events((simhash >> 48) & 65535) WHERE kind = 'commit';
+CREATE INDEX IF NOT EXISTS idx_events_sh1 ON events((simhash >> 32) & 65535) WHERE kind = 'commit';
+CREATE INDEX IF NOT EXISTS idx_events_sh2 ON events((simhash >> 16) & 65535) WHERE kind = 'commit';
+CREATE INDEX IF NOT EXISTS idx_events_sh3 ON events(simhash & 65535) WHERE kind = 'commit';
+
+-- v6 · Dims (P-REL-1): las claves de `attrs` que una fuente declara en `dims`
+-- salen del JSON y van aquí, con el valor una sola vez en `dim_values`. Sirven
+-- para `top attr:k`, `--attr k:v` y, en la fase 4, para unir fuentes por clave
+-- (`dim_id` igual = mismo valor de la misma clave).
+CREATE TABLE IF NOT EXISTS dim_values (
+    id    INTEGER PRIMARY KEY,
+    key   TEXT NOT NULL,
+    value TEXT NOT NULL,
+    UNIQUE (key, value)
+);
+CREATE TABLE IF NOT EXISTS event_dims (
+    dim_id    INTEGER NOT NULL REFERENCES dim_values(id),
+    event_rid INTEGER NOT NULL REFERENCES events(rid),
+    PRIMARY KEY (dim_id, event_rid)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_event_dims_ev ON event_dims(event_rid, dim_id);
+-- Dims declaradas por fuente (lo que se quitó de `attrs` al ingerir).
+CREATE TABLE IF NOT EXISTS source_dims (
+    source_ref INTEGER NOT NULL REFERENCES sources(ref),
+    key        TEXT NOT NULL,
+    PRIMARY KEY (source_ref, key)
+) WITHOUT ROWID;
+-- Claves que ALGÚN evento de la fuente lleva en `attrs` (superconjunto: no se
+-- borran al reingerir). `top attr:k` y `--attr k:v` solo leen el JSON de las
+-- fuentes que tienen `k`; sin ninguna, la respuesta es 0 sin recorrer nada.
+CREATE TABLE IF NOT EXISTS attr_keys (
+    source_ref INTEGER NOT NULL,
+    key        TEXT NOT NULL,
+    PRIMARY KEY (key, source_ref)
+) WITHOUT ROWID;
 
 -- Plantillas Drain-light: un mensaje normalizado (variables → <NUM>/<IP>/…).
 -- Miles de líneas de log que solo difieren en valores comparten `template`.
@@ -165,12 +208,33 @@ CREATE TABLE IF NOT EXISTS rollups (
     template_id  INTEGER NOT NULL REFERENCES templates(id),
     bucket_epoch INTEGER NOT NULL,       -- inicio del bucket (múltiplo de ROLLUP_BUCKET_SECS)
     count        INTEGER NOT NULL DEFAULT 0,
-    first_id     TEXT NOT NULL DEFAULT '', -- primer/último event id del bucket (para inspección)
-    last_id      TEXT NOT NULL DEFAULT '',
+    last_rid     INTEGER NOT NULL DEFAULT 0, -- v6: último evento del bucket (events.rid)
     PRIMARY KEY (source_id, template_id, bucket_epoch)
-);
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_rollups_template ON rollups(template_id);
 CREATE INDEX IF NOT EXISTS idx_rollups_bucket   ON rollups(bucket_epoch);
+
+-- v6 · Rollups por dimensión (P-ESC-1): fuente × plantilla × kind × nivel ×
+-- entidad × bucket de 10 min. Responden `top level|kind|entity`, `patterns` y
+-- `timeline` con filtros de nivel/kind/entidad/fuente sin recorrer `events`.
+-- `level_inf` es el nivel efectivo con `infer_level` (el de la fuente o el
+-- deducido del texto). `entity_id`: la entidad del único touch; 0 sin touches;
+-- -1 con varios (o un commit, que recibe touches de símbolos después): una
+-- consulta por entidad que encuentre -1 en su alcance cae a `events`.
+-- `bucket_epoch` = -1 para los eventos sin tiempo (`at_epoch <= 0`).
+-- Mismo watermark que `rollups` (`rollup_max_rowid`): se construyen juntos.
+CREATE TABLE IF NOT EXISTS dim_rollups (
+    source_ref   INTEGER NOT NULL,
+    template_id  INTEGER NOT NULL,
+    kind         TEXT NOT NULL,
+    level        TEXT NOT NULL,
+    level_inf    TEXT NOT NULL,
+    entity_id    INTEGER NOT NULL,
+    bucket_epoch INTEGER NOT NULL,
+    count        INTEGER NOT NULL DEFAULT 0,
+    last_rid     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (source_ref, template_id, kind, level, level_inf, entity_id, bucket_epoch)
+) WITHOUT ROWID;
 
 -- FTS5 externo sobre events (title+body); sin duplicar contenido.
 CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(

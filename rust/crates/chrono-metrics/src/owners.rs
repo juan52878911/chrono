@@ -24,7 +24,7 @@ pub fn owners(conn: &Connection, prefix: &str, since_epoch: i64, symbols_only: b
         "SELECT COALESCE(a.display_name, a.key, '') AS name, COUNT(*) AS commits
          FROM touches t
          JOIN entities e ON e.id = t.entity_id
-         JOIN events ev ON ev.id = t.event_id
+         JOIN events ev ON ev.rid = t.event_rid
          JOIN actors a ON a.id = ev.actor_id
          WHERE e.key LIKE ?1 AND e.type {op} 'symbol' AND ev.at_epoch >= ?2
          GROUP BY ev.actor_id

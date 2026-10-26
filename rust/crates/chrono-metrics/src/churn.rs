@@ -56,7 +56,7 @@ pub fn churn(conn: &Connection, since_epoch: i64, limit: usize, symbols_only: bo
                  SUM(MAX(t.added, 0)) AS a,
                  SUM(MAX(t.deleted, 0)) AS d
              FROM touches t
-             JOIN events ev ON ev.id = t.event_id
+             JOIN events ev ON ev.rid = t.event_rid
              JOIN entities e ON e.id = t.entity_id
              WHERE e.excluded = 0 AND e.type {op} 'symbol' AND ev.at_epoch >= ?1
              GROUP BY e.id
@@ -119,16 +119,16 @@ mod tests_p3 {
                 (3,'src/sym','symbol',0,0,0),
                 (4,'src/exc.rs','file',0,0,1);
              INSERT INTO sources(ref,id,kind) VALUES (1,'git:/r','git');
-             INSERT INTO events(id,source_ref,kind,at,at_epoch,title) VALUES
-                ('e1',1,'commit','',1000,''),
-                ('e2',1,'commit','',2000,'');
-             INSERT INTO touches(event_id,entity_id,weight,added,deleted,attrs) VALUES
-                ('e1',1,12,10,2,'{\"added\":10,\"deleted\":2}'),
-                ('e2',1,5,5,0,'{\"added\":5,\"deleted\":0}'),
-                ('e1',2,2,1,1,'{\"added\":1,\"deleted\":1}'),
-                ('e2',2,0,-1,-1,'{\"added\":-1,\"deleted\":-1}'),
-                ('e1',3,3,9,9,'{\"added\":9,\"deleted\":9}'),
-                ('e1',4,1,7,7,'{\"added\":7,\"deleted\":7}');",
+             INSERT INTO events(rid,id,source_ref,kind,at_epoch,title) VALUES
+                (1,'e1',1,'commit',1000,''),
+                (2,'e2',1,'commit',2000,'');
+             INSERT INTO touches(event_rid,entity_id,weight,added,deleted,attrs) VALUES
+                (1,1,12,10,2,'{\"added\":10,\"deleted\":2}'),
+                (2,1,5,5,0,'{\"added\":5,\"deleted\":0}'),
+                (1,2,2,1,1,'{\"added\":1,\"deleted\":1}'),
+                (2,2,0,-1,-1,'{\"added\":-1,\"deleted\":-1}'),
+                (1,3,3,9,9,'{\"added\":9,\"deleted\":9}'),
+                (1,4,1,7,7,'{\"added\":7,\"deleted\":7}');",
         )
         .unwrap();
     }
@@ -141,7 +141,7 @@ mod tests_p3 {
                      SUM(MAX(CAST(COALESCE(json_extract(t.attrs, '$.added'), 0) AS INTEGER), 0)) AS a,
                      SUM(MAX(CAST(COALESCE(json_extract(t.attrs, '$.deleted'), 0) AS INTEGER), 0)) AS d
                  FROM touches t
-                 JOIN events ev ON ev.id = t.event_id
+                 JOIN events ev ON ev.rid = t.event_rid
                  JOIN entities e ON e.id = t.entity_id
                  WHERE e.excluded = 0 AND e.type {op} 'symbol' AND ev.at_epoch >= ?1
                  GROUP BY e.id
@@ -196,11 +196,11 @@ mod tests_p3 {
         conn.execute_batch(
             "INSERT INTO entities(id,key,type,size,deleted,excluded) VALUES
                 (5,'src/ancient.rs','file',0,0,0);
-             INSERT INTO events(id,source_ref,kind,at,at_epoch,title) VALUES
-                ('eneg',1,'commit','',-5000,'');
-             INSERT INTO touches(event_id,entity_id,weight,added,deleted,attrs) VALUES
-                ('eneg',5,1,100,100,'{\"added\":100,\"deleted\":100}'),
-                ('eneg',1,1,100,100,'{\"added\":100,\"deleted\":100}');",
+             INSERT INTO events(rid,id,source_ref,kind,at_epoch,title) VALUES
+                (99,'eneg',1,'commit',-5000,'');
+             INSERT INTO touches(event_rid,entity_id,weight,added,deleted,attrs) VALUES
+                (99,5,1,100,100,'{\"added\":100,\"deleted\":100}'),
+                (99,1,1,100,100,'{\"added\":100,\"deleted\":100}');",
         )
         .unwrap();
         assert!(super::has_negative_epoch(conn).unwrap(), "debe detectar el epoch negativo");

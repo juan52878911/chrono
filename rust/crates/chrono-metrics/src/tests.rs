@@ -386,16 +386,16 @@ fn bugs_cuenta_fixes_categorias_y_hot_areas() {
     let conn = store.conn();
     for (id, is_fix) in [("b1", true), ("b2", true), ("b3", true), ("b4", false), ("b5", true)] {
         conn.execute(
-            "INSERT INTO labels(event_id, task, label, confidence, source, evidence)
-             VALUES (?1,'is_fix',?2,1.0,'rules','')",
+            "INSERT INTO labels(event_rid, task, label, confidence, source, evidence)
+             VALUES ((SELECT rid FROM events WHERE id = ?1),'is_fix',?2,1.0,'rules','')",
             rusqlite::params![id, if is_fix { "true" } else { "false" }],
         )
         .unwrap();
     }
     for (id, cat) in [("b1", "crash"), ("b2", "crash"), ("b3", "overflow")] {
         conn.execute(
-            "INSERT INTO labels(event_id, task, label, confidence, source, evidence)
-             VALUES (?1,'bug_category',?2,1.0,'rules','')",
+            "INSERT INTO labels(event_rid, task, label, confidence, source, evidence)
+             VALUES ((SELECT rid FROM events WHERE id = ?1),'bug_category',?2,1.0,'rules','')",
             rusqlite::params![id, cat],
         )
         .unwrap();

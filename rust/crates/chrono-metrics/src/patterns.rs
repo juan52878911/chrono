@@ -12,7 +12,7 @@ use crate::Result;
 pub struct Pattern {
     pub template: String,
     pub count: i64,
-    /// Un event id de ejemplo (el último visto de la plantilla) para inspección.
+    /// Un event id de ejemplo (el último ingerido de la plantilla) para inspección.
     pub example_id: String,
 }
 
@@ -41,16 +41,18 @@ pub fn patterns_filtered(
         .map(|s| if s.contains(':') { format!("{s}%") } else { format!("{s}:%") });
     let grep_like: Option<String> = grep.filter(|g| !g.is_empty()).map(|g| format!("%{g}%"));
     let mut stmt = conn.prepare(
-        "SELECT t.template, SUM(r.count) AS c, MAX(r.last_id) AS ex
-         FROM rollups r
-         JOIN templates t ON t.id = r.template_id
-         WHERE (?1 = 0 OR r.bucket_epoch >= ?1)
-           AND (?3 IS NULL OR r.source_id LIKE ?3
-                OR r.source_id IN (SELECT id FROM sources WHERE json_extract(manifest_json, '$.alias') = ?5))
-           AND (?4 IS NULL OR t.template LIKE ?4)
-         GROUP BY r.template_id
-         ORDER BY c DESC, t.template ASC
-         LIMIT ?2",
+        "SELECT template, c, COALESCE((SELECT id FROM events WHERE rid = ex), '') FROM (
+             SELECT t.template, SUM(r.count) AS c, MAX(r.last_rid) AS ex
+             FROM rollups r
+             JOIN templates t ON t.id = r.template_id
+             WHERE (?1 = 0 OR r.bucket_epoch >= ?1)
+               AND (?3 IS NULL OR r.source_id LIKE ?3
+                    OR r.source_id IN (SELECT id FROM sources WHERE json_extract(manifest_json, '$.alias') = ?5))
+               AND (?4 IS NULL OR t.template LIKE ?4)
+             GROUP BY r.template_id
+             ORDER BY c DESC, t.template ASC
+             LIMIT ?2)
+         ORDER BY c DESC, template ASC",
     )?;
     let rows = stmt.query_map(params![since_epoch, limit as i64, source_like, grep_like, source], |r| {
         Ok(Pattern {
@@ -92,6 +94,16 @@ pub fn patterns_scoped(conn: &Connection, since_epoch: i64, scope: &crate::Event
     use std::collections::HashMap;
     if scope.only_source_grep() {
         return patterns_filtered(conn, since_epoch, scope.source, scope.grep, limit);
+    }
+    // v6: nivel, kind, entidad o fin de ventana, desde `dim_rollups` si pueden.
+    if let Some(cells) = crate::cube::cube(conn, since_epoch, scope, &[crate::cube::Dim::Template], None)? {
+        let mut v: Vec<(String, i64, i64)> = cells.into_iter().map(|((k, _), (n, last))| (k.into_iter().next().unwrap_or_default(), n, last)).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        v.truncate(limit);
+        return v
+            .into_iter()
+            .map(|(template, count, last)| Ok(Pattern { template, count, example_id: crate::cube::id_of(conn, last)? }))
+            .collect();
     }
     let (filters, extra) = scope.sql(2);
     let sql = format!(

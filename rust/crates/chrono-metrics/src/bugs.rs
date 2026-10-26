@@ -64,7 +64,7 @@ pub fn bugs(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Bugs> {
         let mut stmt = conn.prepare(
             "SELECT ev.id, ev.at_epoch
              FROM labels l
-             JOIN events ev ON ev.id = l.event_id
+             JOIN events ev ON ev.rid = l.event_rid
              WHERE l.task = 'is_fix' AND l.label = 'true' AND ev.is_bulk = 0
                AND ev.at_epoch >= ?1",
         )?;
@@ -89,8 +89,8 @@ pub fn bugs(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Bugs> {
         let mut stmt = conn.prepare(
             "SELECT ev.id, e.key
              FROM labels l
-             JOIN events ev ON ev.id = l.event_id
-             JOIN touches t ON t.event_id = ev.id
+             JOIN events ev ON ev.rid = l.event_rid
+             JOIN touches t ON t.event_rid = ev.rid
              JOIN entities e ON e.id = t.entity_id
              WHERE l.task = 'is_fix' AND l.label = 'true' AND ev.is_bulk = 0
                AND e.excluded = 0 AND ev.at_epoch >= ?1
@@ -139,12 +139,12 @@ pub fn bugs(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Bugs> {
     let mut cat_events: BTreeMap<String, Vec<String>> = BTreeMap::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT l.label, l.event_id
+            "SELECT l.label, ev.id
              FROM labels l
-             JOIN events ev ON ev.id = l.event_id
-             JOIN labels lf ON lf.event_id = l.event_id AND lf.task = 'is_fix' AND lf.label = 'true'
+             JOIN events ev ON ev.rid = l.event_rid
+             JOIN labels lf ON lf.event_rid = l.event_rid AND lf.task = 'is_fix' AND lf.label = 'true'
              WHERE l.task = 'bug_category' AND ev.is_bulk = 0 AND ev.at_epoch >= ?1
-             ORDER BY l.event_id",
+             ORDER BY ev.id",
         )?;
         let rows = stmt.query_map(params![since_epoch], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -160,9 +160,9 @@ pub fn bugs(conn: &Connection, since_epoch: i64, limit: usize) -> Result<Bugs> {
         let mut stmt = conn.prepare(
             "SELECT l.label, e.key
              FROM labels l
-             JOIN events ev ON ev.id = l.event_id
-             JOIN labels lf ON lf.event_id = l.event_id AND lf.task = 'is_fix' AND lf.label = 'true'
-             JOIN touches t ON t.event_id = ev.id
+             JOIN events ev ON ev.rid = l.event_rid
+             JOIN labels lf ON lf.event_rid = l.event_rid AND lf.task = 'is_fix' AND lf.label = 'true'
+             JOIN touches t ON t.event_rid = ev.rid
              JOIN entities e ON e.id = t.entity_id
              WHERE l.task = 'bug_category' AND ev.is_bulk = 0 AND e.excluded = 0
                AND ev.at_epoch >= ?1",

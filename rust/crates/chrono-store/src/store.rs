@@ -195,15 +195,16 @@ impl Store {
             let mut upsert_entity =
                 tx.prepare("INSERT INTO entities(key, type) VALUES (?1, ?2) ON CONFLICT(key) DO NOTHING")?;
             let mut entity_id = tx.prepare("SELECT id FROM entities WHERE key = ?1")?;
+            let rid: i64 = tx.query_row("SELECT rid FROM events WHERE id = ?1", params![event_id], |r| r.get(0))?;
             let mut add_touch = tx.prepare(
-                "INSERT INTO touches(event_id, entity_id, weight, added, deleted, attrs) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(event_id, entity_id) DO UPDATE SET
+                "INSERT INTO touches(event_rid, entity_id, weight, added, deleted, attrs) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(event_rid, entity_id) DO UPDATE SET
                     weight = excluded.weight, added = excluded.added, deleted = excluded.deleted, attrs = excluded.attrs",
             )?;
             for (key, typ, weight, added, deleted, attrs) in touches {
                 upsert_entity.execute(params![key, typ])?;
                 let id: i64 = entity_id.query_row(params![key], |r| r.get(0))?;
-                add_touch.execute(params![event_id, id, weight, added, deleted, attrs])?;
+                add_touch.execute(params![rid, id, weight, added, deleted, attrs])?;
             }
         }
         tx.commit()?;
@@ -231,7 +232,7 @@ impl Store {
     }
 
     /// Como [`Store::delete_source_events`], solo los eventos de UN fichero de
-    /// una fuente glob (los que llevan `attrs.file = file`).
+    /// una fuente glob (los que llevan la dim `file = file`).
     pub fn delete_source_file_events(&self, source_id: &str, file: &str) -> Result<()> {
         self.delete_events_where(source_id, Some(file))
     }
@@ -242,15 +243,18 @@ impl Store {
         // una subconsulta. Si la fuente no existe, `(SELECT ref …)` da NULL y
         // `source_ref = NULL` no casa nada (no-op, igual que antes). NO se borra
         // la fila de `sources`: su `ref` se conserva para la re-ingesta.
+        // v6: `file` es una dim de la fuente glob (ver el CLI); sin ella, attrs.
         let selected = "source_ref = (SELECT ref FROM sources WHERE id = ?1)
-                        AND (?2 IS NULL OR json_extract(attrs, '$.file') = ?2)";
-        for child in ["touches", "labels", "links"] {
-            tx.execute(
-                &format!("DELETE FROM {child} WHERE event_id IN (SELECT id FROM events WHERE {selected})"),
-                params![source_id, file],
-            )?;
+                        AND (?2 IS NULL OR rid IN (SELECT d.event_rid FROM event_dims d JOIN dim_values v ON v.id = d.dim_id
+                                                   WHERE v.key = 'file' AND v.value = ?2)
+                                        OR json_extract(attrs, '$.file') = ?2)";
+        // Los rids primero: la selección por fichero lee `event_dims`, que se borra.
+        tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS del_rids(rid INTEGER PRIMARY KEY); DELETE FROM del_rids;")?;
+        tx.execute(&format!("INSERT INTO del_rids SELECT rid FROM events WHERE {selected}"), params![source_id, file])?;
+        for child in ["touches", "labels", "links", "event_dims"] {
+            tx.execute(&format!("DELETE FROM {child} WHERE event_rid IN (SELECT rid FROM del_rids)"), [])?;
         }
-        tx.execute(&format!("DELETE FROM events WHERE {selected}"), params![source_id, file])?;
+        tx.execute("DELETE FROM events WHERE rid IN (SELECT rid FROM del_rids)", [])?;
         tx.commit()?;
         Ok(())
     }
@@ -264,6 +268,11 @@ impl Store {
             "touches",
             "links",
             "labels",
+            "event_dims",
+            "dim_values",
+            "source_dims",
+            "attr_keys",
+            "dim_rollups",
             "events",
             "actor_identities",
             "actors",
@@ -392,34 +401,57 @@ impl Store {
         } else {
             self.meta("rollup_max_rowid")?.and_then(|v| v.parse().ok()).unwrap_or(0)
         };
+        let drb = crate::DIM_ROLLUP_BUCKET_MS;
 
         // Fase 1: escanear eventos (solo el delta si no es reset) y agregar en
-        // memoria. Clave: (source_id, template, bucket) -> (count, first_id, last_id).
-        let mut agg: BTreeMap<(String, String, i64), (i64, String, String)> = BTreeMap::new();
+        // memoria. `rollups`: (source_id, template, bucket) -> (count, last_rid),
+        // solo eventos con tiempo. `dim_rollups`: además kind, nivel, nivel
+        // efectivo y entidad, TODOS los eventos (los sin tiempo en el bucket -1).
+        type DimKey = (i64, String, String, String, String, i64, i64);
+        let mut agg: BTreeMap<(String, String, i64), (i64, i64)> = BTreeMap::new();
+        let mut dagg: BTreeMap<DimKey, (i64, i64)> = BTreeMap::new();
         {
             // rollups.source_id sigue siendo TEXT (v5 solo cambió events): se
-            // recupera el string por JOIN a sources. ORDER BY e.rowid conserva el
-            // determinismo del first_id/last_id.
+            // recupera el string por JOIN a sources. ORDER BY e.rid conserva el
+            // determinismo del last_rid. El LEFT JOIN cuenta los touches del evento.
             let mut stmt = self.conn.prepare(
-                "SELECT e.id, s.id, e.at_epoch, e.title
+                "SELECT e.rid, e.source_ref, s.id, e.kind, e.level,
+                        COALESCE(NULLIF(e.level, ''), json_extract(e.attrs, '$.level_inferred'), ''),
+                        e.at_epoch, e.title, COUNT(t.entity_id), COALESCE(MIN(t.entity_id), 0)
                  FROM events e JOIN sources s ON s.ref = e.source_ref
-                 WHERE e.at_epoch > 0 AND e.rowid > ?1 ORDER BY e.rowid",
+                 LEFT JOIN touches t ON t.event_rid = e.rid
+                 WHERE e.rid > ?1 GROUP BY e.rid ORDER BY e.rid",
             )?;
-            let rows = stmt.query_map(params![since_rowid], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
-            })?;
-            for row in rows {
-                let (id, source_id, at_epoch, title) = row?;
+            let mut rows = stmt.query(params![since_rowid])?;
+            while let Some(r) = rows.next()? {
+                let rid: i64 = r.get(0)?;
+                let source_ref: i64 = r.get(1)?;
+                let source_id: String = r.get(2)?;
+                let kind: String = r.get(3)?;
+                let level: String = r.get(4)?;
+                let level_inf: String = r.get(5)?;
+                let at_epoch: i64 = r.get(6)?;
+                let title: String = r.get(7)?;
+                let n_touches: i64 = r.get(8)?;
+                let one_entity: i64 = r.get(9)?;
                 let template = chrono_core::templatize(&title);
-                let bucket = at_epoch - at_epoch.rem_euclid(bucket_ms);
-                let entry = agg.entry((source_id, template, bucket)).or_insert((0, id.clone(), String::new()));
-                entry.0 += 1;
-                entry.2 = id; // last_id (iteración en orden de rowid → determinista)
+                // Un commit recibe touches de símbolos después: nunca por rollup.
+                let entity = match n_touches {
+                    _ if kind == "commit" => -1,
+                    0 => 0,
+                    1 => one_entity,
+                    _ => -1,
+                };
+                let dbucket = if at_epoch <= 0 { -1 } else { at_epoch - at_epoch.rem_euclid(drb) };
+                let d = dagg.entry((source_ref, template.clone(), kind, level, level_inf, entity, dbucket)).or_insert((0, 0));
+                d.0 += 1;
+                d.1 = rid;
+                if at_epoch > 0 {
+                    let bucket = at_epoch - at_epoch.rem_euclid(bucket_ms);
+                    let entry = agg.entry((source_id, template, bucket)).or_insert((0, 0));
+                    entry.0 += 1;
+                    entry.1 = rid; // último (iteración en orden de rid → determinista)
+                }
             }
         }
 
@@ -428,6 +460,7 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         if reset {
             tx.execute("DELETE FROM rollups", [])?;
+            tx.execute("DELETE FROM dim_rollups", [])?;
             tx.execute("DELETE FROM templates", [])?;
         }
         let mut n_templates = 0usize;
@@ -439,29 +472,63 @@ impl Store {
             )?;
             let mut tpl_id = tx.prepare("SELECT id FROM templates WHERE source_id = ?1 AND template = ?2")?;
             let mut ins_rollup = tx.prepare(
-                "INSERT INTO rollups(source_id, template_id, bucket_epoch, count, first_id, last_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "INSERT INTO rollups(source_id, template_id, bucket_epoch, count, last_rid)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(source_id, template_id, bucket_epoch) DO UPDATE SET
                     count = count + excluded.count,
-                    last_id = excluded.last_id",
+                    last_rid = excluded.last_rid",
             )?;
-            for ((source_id, template, bucket), (count, first_id, last_id)) in &agg {
-                let inserted = upsert_tpl.execute(params![source_id, template])?;
-                if inserted > 0 {
-                    n_templates += 1;
+            let mut ins_dim = tx.prepare(
+                "INSERT INTO dim_rollups(source_ref, template_id, kind, level, level_inf, entity_id, bucket_epoch, count, last_rid)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(source_ref, template_id, kind, level, level_inf, entity_id, bucket_epoch) DO UPDATE SET
+                    count = count + excluded.count,
+                    last_rid = excluded.last_rid",
+            )?;
+            let mut source_ids: BTreeMap<i64, String> = BTreeMap::new();
+            {
+                let mut st = tx.prepare("SELECT ref, id FROM sources")?;
+                let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+                for row in rows {
+                    let (r, id) = row?;
+                    source_ids.insert(r, id);
+                }
+            }
+            let mut tpl_cache: std::collections::HashMap<(String, String), i64> = std::collections::HashMap::new();
+            let mut tpl = |source_id: &str, template: &str, n: &mut usize| -> Result<i64> {
+                if let Some(&id) = tpl_cache.get(&(source_id.to_string(), template.to_string())) {
+                    return Ok(id);
+                }
+                if upsert_tpl.execute(params![source_id, template])? > 0 {
+                    *n += 1;
                 }
                 let id: i64 = tpl_id.query_row(params![source_id, template], |r| r.get(0))?;
-                ins_rollup.execute(params![source_id, id, bucket, count, first_id, last_id])?;
+                tpl_cache.insert((source_id.to_string(), template.to_string()), id);
+                Ok(id)
+            };
+            for ((source_id, template, bucket), (count, last_rid)) in &agg {
+                let id = tpl(source_id, template, &mut n_templates)?;
+                ins_rollup.execute(params![source_id, id, bucket, count, last_rid])?;
                 n_rollups += 1;
+            }
+            for ((source_ref, template, kind, level, level_inf, entity, bucket), (count, last_rid)) in &dagg {
+                let source_id = source_ids.get(source_ref).map(String::as_str).unwrap_or("");
+                let id = tpl(source_id, template, &mut n_templates)?;
+                ins_dim.execute(params![source_ref, id, kind, level, level_inf, entity, bucket, count, last_rid])?;
             }
         }
         // Watermark al tope actual: el próximo sync parte de aquí.
         let max_rowid: i64 =
-            tx.query_row("SELECT COALESCE(MAX(rowid), 0) FROM events", [], |r| r.get(0))?;
+            tx.query_row("SELECT COALESCE(MAX(rid), 0) FROM events", [], |r| r.get(0))?;
         tx.execute(
             "INSERT INTO meta(key, value) VALUES ('rollup_max_rowid', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![max_rowid.to_string()],
+        )?;
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES ('dim_rollup_bucket_ms', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![drb.to_string()],
         )?;
         tx.commit()?;
         Ok((n_templates, n_rollups))

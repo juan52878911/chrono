@@ -45,7 +45,7 @@ pub fn stats(
         Some("level") => ("e.level".to_string(), ""),
         Some("kind") => ("e.kind".to_string(), ""),
         Some("entity") => (
-            "COALESCE((SELECT en.key FROM touches t JOIN entities en ON en.id = t.entity_id WHERE t.event_id = e.id LIMIT 1), '')"
+            "COALESCE((SELECT en.key FROM touches t JOIN entities en ON en.id = t.entity_id WHERE t.event_rid = e.rid LIMIT 1), '')"
                 .to_string(),
             "",
         ),
