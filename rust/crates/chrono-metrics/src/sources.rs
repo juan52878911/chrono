@@ -41,8 +41,10 @@ pub fn sources(conn: &Connection) -> Result<Vec<SourceSummary>> {
                 json_extract(s.manifest_json, '$.alias'),
                 (SELECT at FROM events WHERE source_ref = s.ref AND at_epoch > 0 ORDER BY at_epoch ASC LIMIT 1),
                 (SELECT at FROM events WHERE source_ref = s.ref AND at_epoch > 0 ORDER BY at_epoch DESC LIMIT 1),
-                (SELECT COUNT(*) FROM events WHERE source_ref = s.ref
-                    AND rid <= CAST((SELECT value FROM meta WHERE key = 'stale_dims:' || s.id) AS INTEGER))
+                CASE WHEN EXISTS (SELECT 1 FROM meta WHERE key = 'stale_dims:' || s.id)
+                     THEN (SELECT COUNT(*) FROM events WHERE source_ref = s.ref
+                               AND rid <= CAST((SELECT value FROM meta WHERE key = 'stale_dims:' || s.id) AS INTEGER))
+                     ELSE 0 END
          FROM sources s ORDER BY s.id",
     )?;
     type Row = (i64, String, String, i64, Option<String>, Option<String>, Option<String>, i64);
