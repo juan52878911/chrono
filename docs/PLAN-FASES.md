@@ -42,14 +42,22 @@ nuevas. Detalle en la decisión 29 de `DECISIONS.md`.
   La ingesta del bench marcó +14 % (24,9 → 28,5 s) con load 7; alternando los dos binarios con la misma carga,
   0.4.0 tardó 38,7 y 33,4 s y 0.5.0 24,4 y 23,3 s (la primera de 0.4.0 coincidió con una compilación): no empeora.
 - **Sesiones de Claude** (copia congelada de `~/.claude/projects`, 1 927 ficheros, 264 642 eventos): índice
-  395 → **207 MB** (1 492 → 782 B/evento; `events` 159 → 26 MB), ingesta 31 → 26 s y 645 → 424 MB de RSS. Usos y
-  fallos por tool, kinds, niveles, `top attr:cwd|gitBranch|sessionId`, `--attr cwd:…`, `timeline` y `sources`:
-  idénticos a 0.4.0.
+  395 → **166 MB** (1 492 → 629 B/evento; `events` 159 → 26 MB, `rollups` 43 → 1 MB), ingesta 31 → 26 s y
+  645 → 357 MB de RSS, `sync` sin cambios 0,05 s. Usos y fallos por tool, kinds, niveles,
+  `top attr:cwd|gitBranch|sessionId`, `--attr cwd:…`, `timeline`, `patterns` y `sources`: idénticos a 0.4.0.
+- Auditorías (`auditor-senales`, `auditor-silencios`) sobre el diff; corregido lo que encontraron: valores a 0 en
+  `top attr` tras borrar una fuente, `jsonl` perdía el tiempo ilegible, el mensaje cuando el título sale de otro
+  campo y las claves pedidas en `attrs`, y tests que podían pasar sin probar el cubo o la relectura.
 
 Sin verificar o pendiente:
 - Los tiempos son de una máquina con load 4-7 (otras sesiones): repetir `make bench` en frío para cifras finas.
 - `top attr:k` con filtros (p. ej. `--level ERROR`) une `event_dims` con `events` por rid: 0,5 s a 1M, sin cubo.
-- `links` sigue en texto (54 MB de 207 en las sesiones): candidato a internar targets en F4 junto a `relations`.
+- `links` sigue en texto (54 MB de 166 en las sesiones): candidato a internar targets en F4 junto a `relations`.
+- De las auditorías, sin tocar (venían de antes o son raros): `patterns` con solo fuente/`grep` lee `rollups`, que
+  no comprueban su watermark ni cuentan eventos sin tiempo, y puede no coincidir con `patterns` con nivel; `tail`
+  ingiere sin `finalize` y sin mirar si cambiaron las dims; cambiar las dims de una fuente que ya no se puede
+  releer entera (log rotado, caché `cmd` truncada) pierde lo que no se relea, con solo un aviso; una clave con
+  punto (`message.model`) como attr se lee como ruta anidada (como dim funciona).
 - `correlate` entre sesiones y git sigue sin probar (venía de F2).
 - La cuenta de Trycore no tuvo cupo (tope de 5 h a 0); todo se hizo en esta sesión.
 
