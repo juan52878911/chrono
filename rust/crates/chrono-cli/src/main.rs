@@ -515,6 +515,15 @@ fn refresh_commands(db: &Path, only: Option<&str>) -> Option<PathBuf> {
     found
 }
 
+/// Un error de las consultas en el idioma activo: los de uso de
+/// `chrono-metrics` traen los dos (`Msg`); el resto sale tal cual.
+fn localized(e: Box<dyn std::error::Error + Send + Sync>) -> String {
+    match e.downcast_ref::<chrono_metrics::Msg>() {
+        Some(m) => t(m.en.clone(), m.es.clone()),
+        None => e.to_string(),
+    }
+}
+
 fn fatal(msg: impl std::fmt::Display) -> ! {
     // "chrono: error:" no se traduce (paridad literal con el Go).
     eprintln!("chrono: error: {msg}");
@@ -820,7 +829,7 @@ fn main() {
     };
     // Una clave de `--join` que no existe no casaría nada: error, no vacío.
     if let Err(e) = chrono_metrics::check_join(store.conn(), scope.join) {
-        fatal(e);
+        fatal(localized(e));
     }
     let out = match cmd {
         "hotspots" => query::hotspots(&store, &window, symbols_only),
@@ -961,7 +970,7 @@ fn main() {
     match out {
         Ok(j) if f.compact => print!("{}", j.compact()),
         Ok(j) => print!("{}", j.pretty()),
-        Err(e) => fatal(e),
+        Err(e) => fatal(localized(e)),
     }
 }
 

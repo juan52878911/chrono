@@ -25,7 +25,10 @@ pub fn valid_key(k: &str) -> bool {
 /// hay ninguno» (un typo en `--join`, `--via`, `--by`).
 fn check_key(conn: &Connection, k: &str) -> Result<()> {
     if !valid_key(k) {
-        return Err(format!("clave de relación no válida: {k:?} (usa [A-Za-z0-9_.-])").into());
+        return Err(crate::Msg::err(
+            format!("invalid relation key: {k:?} (use [A-Za-z0-9_.-])"),
+            format!("clave de relación no válida: {k:?} (usa [A-Za-z0-9_.-])"),
+        ));
     }
     let known: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM link_targets WHERE rel = ?1) OR EXISTS(SELECT 1 FROM dim_values WHERE key = ?1)",
@@ -35,7 +38,10 @@ fn check_key(conn: &Connection, k: &str) -> Result<()> {
     if known {
         Ok(())
     } else {
-        Err(format!("clave de relación desconocida: {k:?} (ningún link ni dim se llama así; mira `chrono sources`)").into())
+        Err(crate::Msg::err(
+            format!("unknown relation key: {k:?} (no link or dim has that name; see `chrono sources`)"),
+            format!("clave de relación desconocida: {k:?} (ningún link ni dim se llama así; mira `chrono sources`)"),
+        ))
     }
 }
 
@@ -390,7 +396,10 @@ pub fn gaps(conn: &Connection, from: &EventScope, to: &EventScope, via: &str, by
                 |r| r.get(0),
             )?;
             if n == 0 {
-                return Err(format!("gaps: --{side}: ninguna fuente se llama {src:?} (mira `chrono sources`)").into());
+                return Err(crate::Msg::err(
+                    format!("gaps: --{side}: no source is called {src:?} (see `chrono sources`)"),
+                    format!("gaps: --{side}: ninguna fuente se llama {src:?} (mira `chrono sources`)"),
+                ));
             }
         }
     }

@@ -60,6 +60,28 @@ pub use trace::{trace, Trace, TraceNode};
 /// (CLI, tests...).
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+/// Error de uso con el mensaje en los dos idiomas: `Display` da el español
+/// (lo que ve el MCP); el CLI lo baja con `downcast_ref` y elige según `--lang`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Msg {
+    pub en: String,
+    pub es: String,
+}
+
+impl Msg {
+    pub fn err(en: impl Into<String>, es: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
+        Box::new(Msg { en: en.into(), es: es.into() })
+    }
+}
+
+impl std::fmt::Display for Msg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.es)
+    }
+}
+
+impl std::error::Error for Msg {}
+
 /// Operador SQL de alcance de símbolos (S1). Por defecto las consultas de
 /// entidades EXCLUYEN símbolos (`type != 'symbol'`), para no mezclar el touch
 /// del fichero con el del símbolo; `--by symbol` (symbols_only=true) invierte

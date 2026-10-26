@@ -66,3 +66,13 @@ fn flags_que_se_ignoraban() {
     let (ok, _, err) = run(&d.0, &["timeline", "--by", "entity"]);
     assert!(!ok && err.contains("use level or kind"), "{err}");
 }
+
+#[test]
+fn errores_de_gaps_en_el_idioma_pedido() {
+    let d = indice("gaps-lang");
+    let args = ["gaps", "--from", "app.jsonl", "--to", "app.jsonl", "--via", "tikcet"];
+    let (ok, _, err) = run(&d.0, &args);
+    assert!(!ok && err.contains("unknown relation key") && !err.contains("clave"), "{err}");
+    let (ok, _, err) = run(&d.0, &[&args[..], &["--lang", "es"]].concat());
+    assert!(!ok && err.contains("clave de relación desconocida"), "{err}");
+}
