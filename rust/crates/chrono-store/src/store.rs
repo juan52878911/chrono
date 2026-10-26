@@ -265,6 +265,18 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Añade claves a las dims con que se ingirió la fuente (la firma de
+    /// opciones de una fuente indexada antes de que existiera).
+    pub fn add_source_dims(&self, source_id: &str, keys: &[String]) -> Result<()> {
+        for key in keys {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO source_dims(source_ref, key) SELECT ref, ?2 FROM sources WHERE id = ?1",
+                params![source_id, key],
+            )?;
+        }
+        Ok(())
+    }
+
     /// ¿Tiene la fuente algún evento en el índice?
     pub fn source_has_events(&self, source_id: &str) -> Result<bool> {
         Ok(self.conn.query_row(

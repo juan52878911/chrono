@@ -610,7 +610,7 @@ fn tail_ingest(store: &mut Store, registry: &Registry, index_root: &Path) -> Res
             None => IngestCtx { preset: preset.as_deref(), ..Default::default() },
         };
         let want = ingest_dims(adapter, &source_config(&cfg, Path::new(&s.path), &ctx), glob.is_some(), &relation_sides(&cfg, adapter, Path::new(&s.path), &ctx));
-        if store.source_dims(&s.id)? != want && store.source_has_events(&s.id)? {
+        if dims_changed(store, &s.id, &want)? {
             eprintln!("{}", t(
                 format!("  dims or relations of {} changed — skipped; run `chrono sync` to reindex it", s.id),
                 format!("  cambiaron las dims o relaciones de {} — se omite; `chrono sync` la reindexa", s.id),
@@ -911,16 +911,48 @@ fn source_config(cfg: &chrono_classify_rules::Config, path: &Path, ctx: &IngestC
 
 /// Dims con que se ingiere una fuente: las de su config (o preset) y, en una
 /// fuente glob, `file` (cada evento lleva su fichero, y así se borra por fichero).
-/// Llevan también la firma de sus `relations` (`rel:…`): cambiar una relación
-/// reindexa la fuente como cambiar una dim.
+/// Llevan también la firma de sus `relations` (`rel:…`) y la de sus opciones
+/// (`opt:…`, con el preset desplegado): cambiar una relación, `entity_via`,
+/// `explode`, `attrs`, `links`… reindexa la fuente como cambiar una dim.
 fn ingest_dims(source: &dyn Source, source_cfg: &SourceConfig, glob: bool, sides: &[relations::Side]) -> Vec<String> {
     let mut dims = source.dims(source_cfg);
     if glob && !dims.iter().any(|d| d == "file") {
         dims.push("file".to_string());
     }
     dims.extend(relations::signature(sides));
+    dims.push(options_signature(source, source_cfg));
     dims.sort();
     dims
+}
+
+/// `opt:<hash>` de las opciones efectivas de la fuente (siempre presente, también
+/// sin opciones: así una fuente indexada antes de esta firma se reconoce porque
+/// no la tiene).
+fn options_signature(source: &dyn Source, source_cfg: &SourceConfig) -> String {
+    let opts = source.ingest_options(source_cfg).options;
+    let flat: String = opts.iter().map(|(k, v)| format!("{k}\u{1f}{v}\u{1e}")).collect();
+    format!("opt:{:08x}", fnv1a32(flat.as_bytes()))
+}
+
+/// ¿Cambió lo que se ingiere? Una fuente indexada antes de la firma de opciones
+/// no la tiene: si el resto coincide se adopta la de hoy sin reindexar (no se
+/// sabe con qué opciones se leyó, y reindexarlas todas al actualizar costaría
+/// una relectura entera de cada una).
+fn dims_changed(store: &Store, source_id: &str, want: &[String]) -> Result<bool> {
+    let had = store.source_dims(source_id)?;
+    if had == want || !store.source_has_events(source_id)? {
+        return Ok(false);
+    }
+    let is_opt = |d: &&String| d.starts_with("opt:");
+    if !had.iter().any(|d| is_opt(&d)) {
+        let rest: Vec<&String> = want.iter().filter(|d| !is_opt(d)).collect();
+        if had.iter().collect::<Vec<_>>() == rest {
+            let opt: Vec<String> = want.iter().filter(is_opt).cloned().collect();
+            store.add_source_dims(source_id, &opt)?;
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Extremos de `relations` que tocan a la fuente. Una glob se nombra por su id,
@@ -959,13 +991,13 @@ fn inherit_entity(w: &mut chrono_store::Writer<'_>, rel: &str, ev: &mut chrono_c
 /// eventos se borran (la próxima ingesta la rehace entera): las claves que
 /// salieron de `attrs` no se pueden recuperar sin releer la fuente.
 fn reset_if_dims_changed(store: &Store, source_id: &str, want: &[String]) -> Result<bool> {
-    let had = store.source_dims(source_id)?;
-    if had == want || !store.source_has_events(source_id)? {
+    if !dims_changed(store, source_id, want)? {
         return Ok(false);
     }
+    let had = store.source_dims(source_id)?;
     eprintln!("{}", t(
-        format!("  dims of {source_id} changed ({} → {}) — reindexing that source", had.join(","), want.join(",")),
-        format!("  las dims de {source_id} cambiaron ({} → {}) — se reindexa esa fuente", had.join(","), want.join(",")),
+        format!("  dims or options of {source_id} changed ({} → {}) — reindexing that source", had.join(","), want.join(",")),
+        format!("  las dims u opciones de {source_id} cambiaron ({} → {}) — se reindexa esa fuente", had.join(","), want.join(",")),
     ));
     store.delete_source_events(source_id)?;
     Ok(true)

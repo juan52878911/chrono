@@ -108,6 +108,10 @@ impl Source for JsonlSource {
         c.options.get("entity_via").map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
     }
 
+    fn ingest_options(&self, cfg: &SourceConfig) -> SourceConfig {
+        config::effective_options(cfg).unwrap_or_else(|_| cfg.clone())
+    }
+
     fn open(&self, path: &Path, watermark: Option<Watermark>, cfg: &SourceConfig) -> CoreResult<Box<dyn chrono_core::Cursor>> {
         let meta = fs::metadata(path).map_err(|e| CoreError::Other(format!("leyendo metadata de {}: {e}", path.display())))?;
         if !meta.is_file() {

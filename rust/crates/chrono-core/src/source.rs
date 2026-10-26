@@ -65,6 +65,12 @@ pub trait Source {
     fn entity_via(&self, cfg: &SourceConfig) -> Option<String> {
         cfg.options.get("entity_via").map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
     }
+
+    /// Opciones con que de verdad se ingiere (un preset del adaptador ya
+    /// desplegado): el CLI guarda su firma con la fuente y, si cambian, la reindexa.
+    fn ingest_options(&self, cfg: &SourceConfig) -> SourceConfig {
+        cfg.clone()
+    }
 }
 
 /// La opción `dims` (`"host,container"`) como lista ordenada y sin repetidos.
