@@ -15,6 +15,25 @@ solo ejecutable Rust estático, sin modelos ni runtimes dentro (hoy pesa 2,2 MB)
 
 Las cifras marcadas como *objetivo* son estimaciones que valida la fase correspondiente.
 
+## Estado (2026-10-26)
+
+**F0 y F1 hechas → 0.3.0.** Medido con `make bench` a 1M frente a 0.2.7:
+- RSS de las consultas −62 a −95 % (`patterns`, `precede`, `events`: ~450 → ~25 MB). `informe` +31 % de
+  tiempo (8,8 → 11,6 s) hasta F3, que lo saca de recorrer `events`.
+- Plantillas 68 → 15. Respuestas MCP: `precede` 20 KB → 1,9 KB, `events` 29 KB → 7,4 KB.
+- Ingesta +8 % por la redacción de secretos (era +23 % antes de la comprobación previa sin reservas).
+
+Lo que salió al hacerlo y corrige la propuesta:
+- `busy_timeout` ya estaba (5 s en toda apertura); faltaba el cerrojo. Sin él, dos `sync` simultáneos
+  **duplicaban los rollups** (420 000 para 220 000 eventos): `patterns` y `timeline` inflados sin aviso.
+- El bench de agentes (`bench/agentes/regresion`) **sí mide aciertos** (rúbrica calibrada); falta la elección de
+  tool. `hook.rs` tenía 9 tests, no 0.
+- El intermediario y `cmd:` guardaban la salida cruda en `.chrono/mcp/` y `.chrono/cmd/`: también se redacta ahí.
+- `precede` calcula `episodes_total` y «antes de x/N» sobre los episodios devueltos (tope `limit`, 50): con más
+  episodios que el tope, las cifras son parciales. Pendiente en F4 (P-MSR-3).
+- No se movió `hook.rs` a otro crate: no aporta por sí solo; se añadieron los tests que faltaban.
+- La cuenta de Trycore no tuvo cupo en toda la fase (otra sesión la ocupaba); todo se hizo en esta sesión.
+
 ---
 
 ## Fase 0 · Medir antes de tocar
