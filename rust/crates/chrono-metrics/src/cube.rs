@@ -58,7 +58,7 @@ pub(crate) fn any_kind_other_than(conn: &Connection, kind: &str) -> Result<bool>
 /// `since` es 0, como `top`/`patterns`. `None`: el cubo no puede responder.
 pub(crate) fn cube(conn: &Connection, since: i64, scope: &EventScope, dims: &[Dim], bucket_ms: Option<i64>) -> Result<Option<Cells>> {
     let nonempty = |v: Option<&str>| v.is_some_and(|s| !s.trim().is_empty());
-    if nonempty(scope.grep) || nonempty(scope.attr) || since < 0 {
+    if nonempty(scope.grep) || nonempty(scope.attr) || nonempty(scope.join) || since < 0 {
         return Ok(None);
     }
     let Some(drb) = fresh(conn)? else { return Ok(None) };

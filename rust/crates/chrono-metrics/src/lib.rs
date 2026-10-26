@@ -19,6 +19,7 @@ mod owners;
 mod patterns;
 mod phases;
 mod precede;
+mod relate;
 mod search;
 mod session_patterns;
 mod similar;
@@ -41,6 +42,7 @@ pub use owners::{owners, Owner};
 pub use patterns::{patterns, patterns_by_level, patterns_filtered, patterns_scoped, Pattern};
 pub use phases::{phases, Phase};
 pub use precede::{precede, Common, Episode, PrecedeOpts, Precursor};
+pub use relate::{correlate_via, gaps, relation_keys, valid_key, GapUnit, Gaps, Via};
 pub use search::{search, SearchHit};
 pub use session_patterns::{
     session_patterns, Commits, Group, Incomplete, LoopInfo, Merge, Rework, SessionPatterns, SessionPatternsOpts, Summary,

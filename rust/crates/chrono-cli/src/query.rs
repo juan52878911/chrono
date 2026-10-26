@@ -477,6 +477,7 @@ pub fn events(
         grep: scope.grep,
         entity: scope.entity,
         attr: scope.attr,
+        join: scope.join,
         infer_level: scope.infer_level,
     };
     let rows = chrono_metrics::events(store.conn(), &filter, limit)?;
@@ -621,6 +622,7 @@ pub fn top(
         kind: scope.kind,
         entity: scope.entity,
         attr: scope.attr,
+        join: scope.join,
         infer_level: scope.infer_level,
         until_epoch: until_epoch(until)?,
     };
@@ -752,6 +754,108 @@ pub fn correlate(store: &Store, id: &str, delta: Option<&str>, kind: Option<&str
         .set("anchor", event_ref_json(&corr.anchor))
         .set("related", Json::Arr(related));
     envelope(store, "correlate", &w, limit, n, result)
+}
+
+/// `correlate <id> --via K`: lo que comparte la clave `K` con el evento, de
+/// cualquier fuente, con las cifras exactas por fuente y por kind/nivel.
+pub fn correlate_via(store: &Store, id: &str, via: &str, kind: Option<&str>, limit: Option<&str>) -> Result<Json> {
+    let w = no_window();
+    let limit = parse_limit(limit, 25)?;
+    let kinds: Vec<String> = kind.unwrap_or("").split(',').map(str::to_string).collect();
+    let v = chrono_metrics::correlate_via(store.conn(), id, via, &kinds, limit)?;
+    let related: Vec<Json> = v.related.iter().map(event_ref_json).collect();
+    let n = related.len();
+    let by_source: Vec<Json> =
+        v.by_source.iter().map(|(s, c)| Json::obj().set("source_id", Json::str(s)).set("count", Json::Int(*c))).collect();
+    let by_kind: Vec<Json> = v
+        .by_kind_level
+        .iter()
+        .map(|(k, l, c)| Json::obj().set("kind", Json::str(k)).set("level", Json::str(l)).set("count", Json::Int(*c)))
+        .collect();
+    let result = Json::obj()
+        .set("via", Json::str(&v.key))
+        .set("values", Json::Arr(v.values.iter().map(|x| Json::str(x)).collect()))
+        .set("anchor", event_ref_json(&v.anchor))
+        .set("related_total", Json::Int(v.total))
+        .set("by_source", Json::Arr(by_source))
+        .set("by_kind_level", Json::Arr(by_kind))
+        .set("related", Json::Arr(related));
+    envelope(store, "correlate", &w, limit, n, result)
+}
+
+/// Un lado de `gaps`: `"<fuente> kind=… level=… entity=… grep=… attr=… join=…"`.
+/// La primera palabra sin `=` es la fuente (nombre, tipo o id); el resto, filtros.
+pub fn parse_side(raw: &str) -> std::result::Result<chrono_metrics::EventScope<'_>, String> {
+    let mut sc = chrono_metrics::EventScope::default();
+    for tok in raw.split_whitespace() {
+        match tok.split_once('=') {
+            None if sc.source.is_none() => sc.source = Some(tok),
+            None => return Err(format!("{tok:?}: only one source per side")),
+            Some(("source", v)) => sc.source = Some(v),
+            Some(("kind", v)) => sc.kind = Some(v),
+            Some(("level", v)) => sc.level = Some(v),
+            Some(("entity", v)) => sc.entity = Some(v),
+            Some(("grep", v)) => sc.grep = Some(v),
+            Some(("attr", v)) => sc.attr = Some(v),
+            Some(("join", v)) => sc.join = Some(v),
+            Some((k, _)) => return Err(format!("{k:?}: use source, kind, level, entity, grep, attr or join")),
+        }
+    }
+    if sc.is_empty() {
+        return Err("empty side".into());
+    }
+    Ok(sc)
+}
+
+/// `gaps --from A --to B --via K [--by U]`: «X sin Y» con cifras exactas.
+pub fn gaps(
+    store: &Store,
+    w: &Window,
+    from: Option<&str>,
+    to: Option<&str>,
+    via: Option<&str>,
+    by: Option<&str>,
+    limit: Option<&str>,
+) -> Result<Json> {
+    let need = |v: Option<&str>, flag: &str| -> Result<String> {
+        v.filter(|s| !s.trim().is_empty()).map(str::to_string).ok_or_else(|| {
+            t(
+                format!("gaps needs --{flag} (gaps --from <source> --to <source> --via <key> [--by <key>])"),
+                format!("gaps necesita --{flag} (gaps --from <fuente> --to <fuente> --via <clave> [--by <clave>])"),
+            )
+            .into()
+        })
+    };
+    let (from_raw, to_raw, via) = (need(from, "from")?, need(to, "to")?, need(via, "via")?);
+    fn side<'a>(raw: &'a str, flag: &str) -> Result<chrono_metrics::EventScope<'a>> {
+        parse_side(raw).map_err(|e| t(format!("--{flag}: {e}"), format!("--{flag}: {e}")).into())
+    }
+    let (fs, ts) = (side(&from_raw, "from")?, side(&to_raw, "to")?);
+    let limit = parse_limit(limit, 25)?;
+    let g = chrono_metrics::gaps(store.conn(), &fs, &ts, &via, by, w.since_epoch, limit)?;
+    let sample: Vec<Json> = g
+        .sample
+        .iter()
+        .map(|u| {
+            Json::obj()
+                .set("unit", Json::str(&u.unit))
+                .set("events", Json::Int(u.events))
+                .set("first_at", Json::str(&u.first_at))
+                .set("last_at", Json::str(&u.last_at))
+        })
+        .collect();
+    let n = sample.len();
+    let result = Json::obj()
+        .set("from", Json::str(&from_raw))
+        .set("to", Json::str(&to_raw))
+        .set("via", Json::str(&via))
+        .set("by", by.map_or(Json::Null, Json::str))
+        .set("units", Json::Int(g.units))
+        .set("covered", Json::Int(g.covered))
+        .set("missing", Json::Int(g.missing))
+        .set("to_values", Json::Int(g.to_values))
+        .set("missing_sample", Json::Arr(sample));
+    envelope(store, "gaps", w, limit, n, result)
 }
 
 /// `branches [base]`: lee git EN VIVO (no el índice), usando `repo_path` de

@@ -67,8 +67,9 @@ pub(super) fn signature(sides: &[Side]) -> Vec<String> {
 fn raw_values<'e>(ev: &'e Event, field: &str) -> Vec<&'e str> {
     match field {
         "title" => vec![&ev.title],
-        // Un id declarado lleva delante su kind (`tool_use:toolu_…`).
-        "id" => vec![ev.id.strip_prefix(&format!("{}:", ev.kind)).unwrap_or(&ev.id)],
+        // Un id declarado lleva delante su kind o su fichero (`tool_use:toolu_…`,
+        // `app.jsonl:42`): la clave es lo de después del primer `:`.
+        "id" => vec![ev.id.split_once(':').map_or(ev.id.as_str(), |(_, rest)| rest)],
         "kind" => vec![&ev.kind],
         "level" => vec![&ev.level],
         "actor" => vec![&ev.actor.key],

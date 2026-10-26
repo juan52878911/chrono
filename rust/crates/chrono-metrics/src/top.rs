@@ -139,6 +139,8 @@ pub struct TopFilter<'a> {
     pub attr: Option<&'a str>,
     /// `level` casa también lo deducido del texto, y `dim=level` cuenta por el nivel efectivo.
     pub infer_level: bool,
+    /// Relación por clave (ver `EventScope::join`).
+    pub join: Option<&'a str>,
     pub until_epoch: i64,
 }
 
@@ -150,6 +152,7 @@ pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilte
         kind: f.kind,
         entity: f.entity,
         attr: f.attr,
+        join: f.join,
         infer_level: f.infer_level,
         until_epoch: f.until_epoch,
     };

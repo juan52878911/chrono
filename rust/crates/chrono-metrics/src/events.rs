@@ -37,6 +37,8 @@ pub struct EventFilter<'a> {
     pub entity: Option<&'a str>,
     /// `clave:valor` sobre los atributos (ver `EventScope::attr`).
     pub attr: Option<&'a str>,
+    /// Relación por clave (ver `EventScope::join`).
+    pub join: Option<&'a str>,
     /// `level` casa también el nivel deducido del texto.
     pub infer_level: bool,
 }
@@ -53,6 +55,7 @@ pub fn events(conn: &Connection, f: &EventFilter, limit: usize) -> Result<Vec<Ev
         kind: f.kind,
         entity: f.entity,
         attr: f.attr,
+        join: f.join,
         infer_level: f.infer_level,
         until_epoch: f.until_epoch,
     };

@@ -28,6 +28,7 @@ fn logs(conn: &rusqlite::Connection, args: &Value, since_epoch: i64) -> Result<V
         kind: sc.kind,
         entity: sc.entity,
         attr: sc.attr,
+        join: sc.join,
         infer_level: false,
         until_epoch: sc.until_epoch,
     };

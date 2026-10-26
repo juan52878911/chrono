@@ -100,7 +100,7 @@ pub struct RelationSide {
     /// Fuente: su alias (`--name`), id, ruta, nombre de fichero o tipo
     /// (`git`, `jsonl`…). Vacío = todas.
     pub source: String,
-    /// `title`, `id`, `kind`, `level`, `actor`, `entity`, `file`,
+    /// `title`, `id` (sin su prefijo `kind:`/`fichero:`), `kind`, `level`, `actor`, `entity`, `file`,
     /// `link:<rel>` o una clave de `attrs`. Vacío = la clave con el nombre
     /// de la relación.
     pub field: String,

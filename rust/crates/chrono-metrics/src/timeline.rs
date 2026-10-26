@@ -138,6 +138,10 @@ pub struct EventScope<'a> {
     pub kind: Option<&'a str>,
     pub entity: Option<&'a str>,
     pub attr: Option<&'a str>,
+    /// Relación por clave (P-REL-2): `K=valor`, `K=prefijo*`, `K=@id` (los que
+    /// comparten algún valor de `K` con ese evento) o solo `K` (los que la tienen).
+    /// `K` es un `rel` de links o una dim (ver `relate`).
+    pub join: Option<&'a str>,
     pub infer_level: bool,
     pub until_epoch: i64,
 }
@@ -190,13 +194,13 @@ pub(crate) fn comma_list(raw: &str, upper: bool) -> String {
 impl EventScope<'_> {
     pub fn is_empty(&self) -> bool {
         self.until_epoch <= 0
-            && [self.source, self.grep, self.level, self.kind, self.entity, self.attr].iter().all(|v| v.map_or(true, str::is_empty))
+            && [self.source, self.grep, self.level, self.kind, self.entity, self.attr, self.join].iter().all(|v| v.map_or(true, str::is_empty))
     }
 
     /// Solo filtra por fuente y/o texto: lo único que saben responder los
     /// rollups de `patterns`.
     pub fn only_source_grep(&self) -> bool {
-        self.until_epoch <= 0 && [self.level, self.kind, self.entity, self.attr].iter().all(|v| v.map_or(true, str::is_empty))
+        self.until_epoch <= 0 && [self.level, self.kind, self.entity, self.attr, self.join].iter().all(|v| v.map_or(true, str::is_empty))
     }
 
     /// Como `sql`, para otros crates (la cabecera del MCP cuenta con los mismos filtros).
@@ -222,6 +226,18 @@ impl EventScope<'_> {
                 first + 1
             ));
             params.extend([like, s.to_string()]);
+        }
+        if let Some(j) = self.join.filter(|j| !j.trim().is_empty()) {
+            // Una clave inválida no casa nada (como un valor que no existe).
+            let n = first + params.len();
+            match crate::relate::join_clause(t, j, &format!("?{n}")) {
+                Some((clause, Some(value))) => {
+                    sql.push_str(&format!(" AND {clause}"));
+                    params.push(value);
+                }
+                Some((clause, None)) => sql.push_str(&format!(" AND {clause}")),
+                None => sql.push_str(" AND 0"),
+            }
         }
         let mut push = |clause: &str, value: String| {
             let n = first + params.len();

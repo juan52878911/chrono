@@ -351,6 +351,7 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
                 kind: sc.kind,
                 entity: sc.entity,
                 attr: sc.attr,
+                join: sc.join,
                 infer_level: sc.infer_level,
                 until_epoch: sc.until_epoch,
             };
@@ -445,6 +446,7 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
                 grep: sc.grep,
                 entity: sc.entity,
                 attr: sc.attr,
+                join: sc.join,
                 infer_level: sc.infer_level,
             };
             events(conn, &filter, limit)?
@@ -502,6 +504,7 @@ pub(crate) fn scope_from(args: &Value) -> chrono_metrics::EventScope<'_> {
         kind: s("kind"),
         entity: s("entity"),
         attr: s("attr"),
+        join: s("join"),
         infer_level: args.get("infer_level").and_then(Value::as_bool).unwrap_or(false),
         until_epoch: s("until").map_or(0, since_to_epoch),
     }

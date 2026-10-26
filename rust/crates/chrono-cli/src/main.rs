@@ -67,7 +67,8 @@ Symbols (git, needs 'init --symbols'):
 Log-native (multi-source). timeline, stats, top, patterns and events share the same filters:
   --since/--until (window; until exclusive), --level FATAL,ERROR (list, any case),
   --entity svc1,svc2 (the service in logs, the file in git), --source <kind|id|cmd:name>,
-  --kind <kind|prefix*>, --grep <text>, --attr key:value (e.g. container:db-1), --infer-level (also lines with no level whose text says it).
+  --kind <kind|prefix*>, --grep <text>, --attr key:value (e.g. container:db-1), --infer-level (also lines with no level whose text says it),
+  --join K=value | K=@<id> | K (relation key: a link rel or a dim; @<id> = sharing a value with that event).
   timeline             Event counts per time bucket (--bucket 1h, --by level|kind).
   stats <attr>         min/p50/p95/max/sum of a numeric attribute per group
                        (--by level|kind|entity|attr:<k>).
@@ -85,8 +86,15 @@ Log-native (multi-source). timeline, stats, top, patterns and events share the s
                        precedes each one (errors/warnings in --window 2m, levels inferred from the
                        text), plus the precursors common to several episodes. --gap 2m splits
                        episodes; --before-levels FATAL,ERROR narrows the precursors (* = any, even none).
+                       --join K: only precursors sharing the episode's value of K (same session, trace…).
+                       Each common precursor brings expected (base rate) and lift; totals cover every episode.
   correlate <id>       Events from OTHER sources within ±Δt of an event (--delta 1h;
-                       --kind commit,ci.* keeps only those kinds).
+                       --kind commit,ci.* keeps only those kinds). --via K: instead of time, every
+                       event (any source) sharing a value of relation key K, counted by source and kind.
+  gaps --from A --to B --via K [--by U]
+                       «X without Y»: K values on side A that no event on side B has (tests without
+                       a result, sessions without a commit with --by sessionId). A side is a source
+                       (name, kind or id) plus kind=, level=, entity=, grep=, attr= (space separated).
 
 Process × outcome (Nod sessions + git):
   session_patterns     Per task and per session: tokens, cost, agent vs human
@@ -152,7 +160,8 @@ Símbolos (git, requiere 'init --symbols'):
 Log-native (multi-fuente). timeline, stats, top, patterns y events comparten filtros:
   --since/--until (ventana; until exclusivo), --level FATAL,ERROR (lista, sin mayúsculas),
   --entity svc1,svc2 (el servicio en logs, el fichero en git), --source <tipo|id|cmd:nombre>,
-  --kind <tipo|prefijo*>, --grep <texto>, --attr clave:valor (p.ej. container:db-1), --infer-level (también líneas sin nivel cuyo texto lo dice).
+  --kind <tipo|prefijo*>, --grep <texto>, --attr clave:valor (p.ej. container:db-1), --infer-level (también líneas sin nivel cuyo texto lo dice),
+  --join K=valor | K=@<id> | K (clave de relación: un rel de links o una dim; @<id> = comparte un valor con ese evento).
   timeline             Conteo de eventos por bucket temporal (--bucket 1h, --by level|kind).
   stats <attr>         min/p50/p95/max/suma de un atributo numérico por grupo
                        (--by level|kind|entity|attr:<c>).
@@ -170,8 +179,15 @@ Log-native (multi-fuente). timeline, stats, top, patterns y events comparten fil
                        precede a cada uno (errores/avisos en --window 2m, con el nivel deducido del
                        texto), más los precursores comunes a varios episodios. --gap 2m separa
                        episodios; --before-levels FATAL,ERROR acota los precursores (* = cualquiera, también sin nivel).
+                       --join K: solo precursores con el mismo valor de K que el episodio (sesión, traza…).
+                       Cada precursor común trae lo esperado (frecuencia base) y el lift; las cifras, de todos los episodios.
   correlate <id>       Eventos de OTRAS fuentes en ±Δt de un evento (--delta 1h;
-                       --kind commit,ci.* se queda solo con esos tipos).
+                       --kind commit,ci.* se queda solo con esos tipos). --via K: en vez del tiempo,
+                       todo evento (de cualquier fuente) que comparte un valor de la clave K, contado.
+  gaps --from A --to B --via K [--by U]
+                       «X sin Y»: los valores de K del lado A que ningún evento del lado B tiene
+                       (pruebas sin resultado; sesiones sin commit con --by sessionId). Un lado es una
+                       fuente (nombre, tipo o id) más kind=, level=, entity=, grep=, attr= (con espacios).
 
 Proceso × resultado (sesiones de Nod + git):
   session_patterns     Por tarea y por sesión: tokens, costo, tiempo del agente
@@ -213,6 +229,10 @@ struct Flags {
     limit: Option<String>,
     entity: Option<String>,
     attr: Option<String>,
+    join: Option<String>,
+    via: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
     infer_level: bool,
     symbols: bool,
     source: Option<String>,
@@ -288,6 +308,22 @@ fn parse_args(args: &[String]) -> Flags {
             "--attr" if i + 1 < args.len() => {
                 i += 1;
                 f.attr = Some(args[i].clone());
+            }
+            "--join" if i + 1 < args.len() => {
+                i += 1;
+                f.join = Some(args[i].clone());
+            }
+            "--via" if i + 1 < args.len() => {
+                i += 1;
+                f.via = Some(args[i].clone());
+            }
+            "--from" if i + 1 < args.len() => {
+                i += 1;
+                f.from = Some(args[i].clone());
+            }
+            "--to" if i + 1 < args.len() => {
+                i += 1;
+                f.to = Some(args[i].clone());
             }
             "--entity" if i + 1 < args.len() => {
                 i += 1;
@@ -581,6 +617,7 @@ fn main() {
         kind: f.kind.as_deref(),
         entity: f.entity.as_deref(),
         attr: f.attr.as_deref(),
+        join: f.join.as_deref(),
         infer_level: f.infer_level,
         until_epoch: 0,
     };
@@ -680,8 +717,12 @@ fn main() {
         ),
         "correlate" => {
             let id = require_pos(&f, "correlate needs an <id>", "correlate necesita un <id>");
-            query::correlate(&store, &id, f.delta.as_deref(), f.kind.as_deref(), f.limit.as_deref())
+            match f.via.as_deref() {
+                Some(via) => query::correlate_via(&store, &id, via, f.kind.as_deref(), f.limit.as_deref()),
+                None => query::correlate(&store, &id, f.delta.as_deref(), f.kind.as_deref(), f.limit.as_deref()),
+            }
         }
+        "gaps" => query::gaps(&store, &window, f.from.as_deref(), f.to.as_deref(), f.via.as_deref(), f.by.as_deref(), f.limit.as_deref()),
         "trace" => {
             let id = require_pos(&f, "trace needs an <id>", "trace necesita un <id>");
             query::trace(&store, &id, f.depth.as_deref(), f.limit.as_deref())
