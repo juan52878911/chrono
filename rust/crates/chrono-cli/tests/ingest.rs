@@ -296,6 +296,97 @@ fn cambiar_las_dims_con_un_fichero_borrado_no_pierde_sus_eventos() {
 }
 
 #[test]
+fn un_fichero_de_mas_de_64_mb_no_se_relee_por_un_chmod_o_un_touch() {
+    let env = Env::new("huella-grande", r#"{"version":2}"#);
+    let d = env.dir().join("datos");
+    // 70 líneas de ~1 MB: pasa de 64 MB con pocos eventos.
+    let pad = "x".repeat(1 << 20);
+    let line = |i: usize| format!("{{\"ts\":\"2024-01-01T00:00:00Z\",\"msg\":\"linea {i:03}\",\"pad\":\"{pad}\"}}\n");
+    write(&d, "big.jsonl", &(0..70).map(line).collect::<String>());
+    let big = d.join("big.jsonl");
+    assert!(std::fs::metadata(&big).unwrap().len() > 64 * 1024 * 1024);
+    env.ok(&["add", &path_s(&d.join("*.jsonl")), "--as", "jsonl"]);
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["70"]);
+
+    // chmod (ctime) y touch (mtime) con el mismo contenido: antes se releía entero.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&big, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let out = env.ok(&["sync"]);
+        assert!(out.contains("sync: 0 new events") && !out.contains("reread"), "{out}");
+    }
+    std::fs::File::options().write(true).open(&big).unwrap().set_modified(std::time::SystemTime::now()).unwrap();
+    let out = env.ok(&["sync"]);
+    assert!(out.contains("sync: 0 new events") && !out.contains("reread"), "{out}");
+
+    // Un append entra solo (sin releer lo de antes).
+    let mut f = std::fs::OpenOptions::new().append(true).open(&big).unwrap();
+    std::io::Write::write_all(&mut f, line(70).as_bytes()).unwrap();
+    drop(f);
+    let out = env.ok(&["sync"]);
+    assert!(out.contains("sync: 1 new events") && !out.contains("reread"), "{out}");
+
+    // Un cambio dentro de la muestra (aquí, al principio) con el mismo tamaño sí se relee.
+    let s = std::fs::read_to_string(&big).unwrap();
+    std::fs::write(&big, s.replacen("linea 000", "linea zzz", 1)).unwrap();
+    let out = env.ok(&["sync"]);
+    assert!(out.contains("sync: 0 new events, 71 reread"), "{out}");
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events WHERE title = 'linea zzz'"), ["1"]);
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["71"]);
+}
+
+#[test]
+fn sync_distingue_lo_nuevo_de_lo_releido_tras_cambiar_las_dims() {
+    let cfg = |dims: &str| format!(r#"{{"version":2,"source_options":{{"logs":{{{dims}}}}}}}"#);
+    let env = Env::new("dims-releidos", &cfg(""));
+    let d = env.dir().join("datos");
+    let line = |host: &str| format!("{{\"ts\":\"2024-01-01T00:00:00Z\",\"msg\":\"hola {host}\",\"host\":\"{host}\"}}\n");
+    write(&d, "a.jsonl", &(line("h1") + &line("h2")));
+    env.ok(&["add", &path_s(&d.join("*.jsonl")), "--as", "jsonl", "--name", "logs"]);
+    write(&d, "b.jsonl", &line("h3"));
+    env.set_config(&cfg(r#""dims":"host""#));
+    let out = env.ok(&["sync"]);
+    // Antes: «sync: 3 new events», con 2 que ya estaban.
+    assert!(out.contains("sync: 1 new events, 2 reread"), "{out}");
+    // Igual con un fichero suelto (no glob).
+    let env = Env::new("dims-releidos-fichero", r#"{"version":2}"#);
+    write(env.dir(), "app.jsonl", &(line("h1") + &line("h2")));
+    let app = path_s(&env.dir().join("app.jsonl"));
+    env.ok(&["add", &app]);
+    env.set_config(&format!(r#"{{"version":2,"source_options":{{"{app}":{{"dims":"host"}}}}}}"#));
+    let out = env.ok(&["sync"]);
+    assert!(out.contains("reindexing") && out.contains("sync: 0 new events, 2 reread"), "{out}");
+}
+
+#[cfg(unix)]
+#[test]
+fn un_fichero_de_una_glob_que_se_vuelve_ilegible_deja_sync_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new("glob-ilegible", r#"{"version":2}"#);
+    let d = env.dir().join("datos");
+    let line = |msg: &str| format!("{{\"ts\":\"2024-01-01T00:00:00Z\",\"msg\":\"{msg}\"}}\n");
+    write(&d, "a.jsonl", &line("uno"));
+    write(&d, "b.jsonl", &line("dos"));
+    env.ok(&["add", &path_s(&d.join("*.jsonl")), "--as", "jsonl"]);
+    let a = d.join("a.jsonl");
+    std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&a).is_ok() {
+        // root lee igual: no hay nada que probar.
+        return;
+    }
+    let out = env.run(&["sync", "--db", &env.db()]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o644)).unwrap();
+    // Antes: sync salía bien y el fichero dejaba de seguirse sin decir nada.
+    assert!(!out.status.success() && err.contains("a.jsonl") && err.contains("are kept"), "{err}");
+    assert!(env.ok(&["sources"]).contains("sync_error"));
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["2"]);
+    env.ok(&["sync"]);
+    assert!(!env.ok(&["sources"]).contains("sync_error"));
+}
+
+#[test]
 fn init_sobre_un_indice_viejo_no_pierde_las_fuentes_anadidas() {
     let env = Env::new("init-viejo", r#"{"version":2}"#);
     let line = "{\"ts\":\"2024-01-01T00:00:00Z\",\"msg\":\"hola\"}\n";

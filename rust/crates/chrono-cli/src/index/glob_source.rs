@@ -18,15 +18,21 @@
 //! mtime (`touch -r`, `rsync -t`, una copia que conserva fechas) no se releía,
 //! ni uno editado en medio y crecido (solo entraba lo añadido). Cada fichero
 //! guarda además su ctime, que el usuario no puede fijar, y una huella de lo ya
-//! leído (`[0, tamaño)`): el contenido entero hasta `FULL_HASH_MAX`; por encima,
-//! solo los primeros y últimos 64 KB. Si tamaño, mtime y ctime siguen igual, no
-//! se lee nada (un `sync` sin cambios no abre ningún fichero). Si algo cambió,
-//! se recalcula la huella de lo ya leído: distinta, el fichero se relee entero
-//! (se borran sus eventos y se reingiere); igual, con más tamaño es un append
-//! (se lee desde el watermark) y con el mismo, nada. El coste es releer los
-//! ficheros tocados. Por encima de `FULL_HASH_MAX` la huella no ve el medio:
-//! con el mismo tamaño y otro mtime o ctime se relee entero sin mirarla, pero
-//! una edición en medio seguida de un append no se ve (solo entra lo añadido).
+//! leído (`[0, tamaño)`): el contenido entero hasta `FULL_HASH_MAX` (64 MB); por
+//! encima, una muestra: los primeros y últimos 64 KB y 16 bloques de 64 KB
+//! repartidos por el medio (1,1 MB leídos, sea cual sea el tamaño). Si tamaño,
+//! mtime y ctime siguen igual, no se lee nada (un `sync` sin cambios no abre
+//! ningún fichero). Si algo cambió, se recalcula la huella de lo ya leído:
+//! distinta, el fichero se relee entero (se borran sus eventos y se reingiere);
+//! igual, con más tamaño es un append (se lee desde el watermark) y con el
+//! mismo, nada (un `chmod` o un `touch` no releen nada, tampoco un fichero de
+//! GB). El coste es releer los ficheros que de verdad cambiaron.
+//!
+//! Límite: por encima de `FULL_HASH_MAX` la huella no ve lo que cae entre los
+//! bloques de la muestra. Una edición ahí, con el mismo tamaño o seguida de un
+//! append, no se ve (solo entra lo añadido). Para logs, que solo crecen, no
+//! pasa; un fichero de más de 64 MB que se edita en medio hay que volver a
+//! añadirlo (`chrono add`) para releerlo.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -44,17 +50,30 @@ use crate::i18n::t;
 /// ya leído no se relee: los ids son deterministas, pero cuesta tiempo).
 const SAVE_EVERY: usize = 200;
 
-/// Bytes del principio y del final que entran en la huella de un fichero
-/// mayor que `FULL_HASH_MAX`.
+/// Tamaño de cada bloque de la muestra de un fichero mayor que `FULL_HASH_MAX`.
 const FINGERPRINT_SPAN: u64 = 64 * 1024;
+
+/// Bloques de la muestra repartidos entre el primero y el último.
+const FINGERPRINT_SAMPLES: u64 = 16;
 
 /// Hasta este tamaño la huella cubre el fichero entero (una sesión de Claude
 /// rara vez pasa de 50 MB; un log de GB no se relee entero en cada `tail`).
 const FULL_HASH_MAX: u64 = 64 * 1024 * 1024;
 
 /// Prefijo de las huellas de este formato: una sin él es de antes (solo
-/// primeros/últimos 64 KB) y no se puede comparar.
+/// primeros/últimos 64 KB) y no se puede comparar. `v2:` es la del contenido
+/// entero (hasta `FULL_HASH_MAX`); `v3:`, la de la muestra (por encima).
 const FP_VERSION: &str = "v2:";
+const FP_SAMPLED: &str = "v3:";
+
+/// Prefijo de la huella que da [`fingerprints`] para un prefijo de `size` bytes.
+fn fp_prefix(size: u64) -> &'static str {
+    if size <= FULL_HASH_MAX {
+        FP_VERSION
+    } else {
+        FP_SAMPLED
+    }
+}
 
 /// Lo que se sabe de un fichero tras leerlo.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,13 +141,13 @@ impl Hasher {
         for b in &self.carry {
             h = (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3);
         }
-        format!("{FP_VERSION}{h:016x}")
+        format!("{}{h:016x}", fp_prefix(size))
     }
 }
 
 /// Huellas de los `sizes` primeros bytes de `path` (crecientes), en una sola
-/// lectura: el contenido entero hasta `FULL_HASH_MAX`; por encima, los
-/// primeros y últimos `FINGERPRINT_SPAN` bytes de ese prefijo.
+/// lectura: el contenido entero hasta `FULL_HASH_MAX`; por encima, la muestra
+/// de ese prefijo (primer y último bloque y `FINGERPRINT_SAMPLES` entre medias).
 fn fingerprints(path: &Path, sizes: &[u64]) -> std::io::Result<Vec<String>> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path)?;
@@ -150,11 +169,16 @@ fn fingerprints(path: &Path, sizes: &[u64]) -> std::io::Result<Vec<String>> {
         }
         let mut h = Hasher::new();
         let mut part = Vec::new();
-        f.seek(SeekFrom::Start(0))?;
-        (&mut f).take(FINGERPRINT_SPAN).read_to_end(&mut part)?;
-        f.seek(SeekFrom::Start(size - FINGERPRINT_SPAN))?;
-        (&mut f).take(FINGERPRINT_SPAN).read_to_end(&mut part)?;
-        h.update(&part);
+        let last = size - FINGERPRINT_SPAN;
+        let offsets = std::iter::once(0)
+            .chain((1..=FINGERPRINT_SAMPLES).map(|k| last / (FINGERPRINT_SAMPLES + 1) * k))
+            .chain(std::iter::once(last));
+        for off in offsets {
+            part.clear();
+            f.seek(SeekFrom::Start(off))?;
+            (&mut f).take(FINGERPRINT_SPAN).read_to_end(&mut part)?;
+            h.update(&part);
+        }
         out.push(h.finish(size));
         // El hash completo ya no sirve para los tamaños siguientes (mayores).
         pos = u64::MAX;
@@ -175,6 +199,11 @@ pub(crate) struct GlobSource {
 /// Resultado de un paso de ingesta de una fuente glob.
 pub(crate) struct GlobSync {
     pub events: usize,
+    /// De `events`, los que sustituyen a eventos borrados de ficheros que se
+    /// releyeron enteros (no son nuevos).
+    pub reread: usize,
+    /// Ficheros ya indexados que no se pudieron leer (`fichero: error`).
+    pub errors: Vec<String>,
     /// Ficheros abiertos en esta pasada (nuevos o cambiados).
     pub files_read: usize,
     /// Ficheros que casan con el patrón.
@@ -277,7 +306,7 @@ impl GlobSource {
         let base = self.base();
         let mut state = self.load_state(store)?;
         let options_keys = self.options_keys();
-        let mut out = GlobSync { events: 0, files_read: 0, files_total: files.len(), diverged: false, watermark: String::new() };
+        let mut out = GlobSync { events: 0, reread: 0, errors: Vec::new(), files_read: 0, files_total: files.len(), diverged: false, watermark: String::new() };
         let mut stderr = std::io::stderr();
         let (files_word, events_word) = (t("files", "ficheros"), t("events", "eventos"));
         for (i, path) in files.iter().enumerate() {
@@ -296,12 +325,20 @@ impl GlobSource {
                 }
                 // Más corto: truncado o rotado, lo resuelve el adaptador (divergencia).
                 if len >= p.size {
-                    let Ok(fps) = fingerprints(path, &[p.size, len]) else { continue };
+                    let fps = match fingerprints(path, &[p.size, len]) {
+                        Ok(fps) => fps,
+                        Err(e) => {
+                            // Antes se callaba: el fichero dejaba de seguirse sin que nadie lo supiera.
+                            eprintln!("{}", t(
+                                format!("  warning: {rel}: {e} — its indexed events are kept"),
+                                format!("  aviso: {rel}: {e} — se conservan sus eventos indexados"),
+                            ));
+                            out.errors.push(format!("{rel}: {e}"));
+                            continue;
+                        }
+                    };
                     let (fp_old, fp_len) = (&fps[0], &fps[1]);
-                    if p.size == len && len > FULL_HASH_MAX {
-                        // La huella no cubre el medio y un append no es: se relee.
-                        rewritten = true;
-                    } else if p.fingerprint.starts_with(FP_VERSION) {
+                    if p.fingerprint.starts_with(fp_prefix(p.size)) {
                         // Lo ya leído cambió: no es un append, se relee entero.
                         rewritten = fp_old != &p.fingerprint;
                     } else if p.size == len && p.mtime_ns != mtime_ns {
@@ -321,13 +358,16 @@ impl GlobSource {
             let wm = prev
                 .filter(|p| !p.watermark.is_empty() && !rewritten)
                 .map(|p| Watermark { kind: adapter.kind().to_string(), value: p.watermark });
+            let mut deleted = 0;
             if rewritten {
+                deleted = store.count_source_events(&self.id, Some(&rel))?;
                 store.delete_source_file_events(&self.id, &rel)?;
                 out.diverged = true;
             }
             let (n, new_wm) = match ingest_source(adapter, path, wm, store, index_root, &ctx) {
                 Ok((n, w, _)) => (n, w),
                 Err(IngestError::Diverged) => {
+                    deleted = store.count_source_events(&self.id, Some(&rel))?;
                     store.delete_source_file_events(&self.id, &rel)?;
                     out.diverged = true;
                     let (n, w, _) = ingest_source(adapter, path, None, store, index_root, &ctx).map_err(|e| e.into_boxed())?;
@@ -336,6 +376,7 @@ impl GlobSource {
                 Err(IngestError::Other(e)) => {
                     // Un fichero ilegible no para al resto; se reintenta en el próximo sync.
                     eprintln!("{}", t(format!("  warning: {rel}: {e} — skipped"), format!("  aviso: {rel}: {e} — se omite")));
+                    out.errors.push(format!("{rel}: {e}"));
                     continue;
                 }
             };
@@ -345,6 +386,7 @@ impl GlobSource {
             };
             state.insert(rel, FileState { size: len, mtime_ns, watermark: new_wm.value, ctime_ns, fingerprint });
             out.events += n;
+            out.reread += n.min(deleted);
             out.files_read += 1;
             if out.files_read.is_multiple_of(SAVE_EVERY) {
                 self.save_state(store, &state)?;
@@ -399,6 +441,33 @@ mod tests {
         let mut h = Hasher::new();
         h.update(&data[..100]);
         assert_eq!(fps, [h.finish(100), whole.finish(1000)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn la_huella_de_un_fichero_grande_mira_la_muestra_y_nada_mas() {
+        use std::io::{Seek, SeekFrom, Write};
+        let dir = std::env::temp_dir().join(format!("chrono-huella-grande-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("f");
+        let size = FULL_HASH_MAX + 3 * FINGERPRINT_SPAN;
+        std::fs::File::create(&p).unwrap().set_len(size).unwrap();
+        let fp = || fingerprints(&p, &[size]).unwrap().remove(0);
+        let poke = |off: u64| {
+            let mut f = std::fs::File::options().write(true).open(&p).unwrap();
+            f.seek(SeekFrom::Start(off)).unwrap();
+            f.write_all(b"z").unwrap();
+        };
+        let a = fp();
+        assert!(a.starts_with(FP_SAMPLED), "{a}");
+        // Un bloque del medio de la muestra: cambia.
+        let block = (size - FINGERPRINT_SPAN) / (FINGERPRINT_SAMPLES + 1) * 8;
+        poke(block + 100);
+        let b = fp();
+        assert_ne!(a, b);
+        // Entre dos bloques: no se ve (el límite documentado).
+        poke(block + FINGERPRINT_SPAN + 100);
+        assert_eq!(fp(), b);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
