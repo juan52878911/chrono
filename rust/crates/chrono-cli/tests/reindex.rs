@@ -310,3 +310,34 @@ fn las_consultas_no_fallan_mientras_corre_un_reindex() {
     assert!(baks(&db).is_empty(), "{:?}", baks(&db));
     assert!(!PathBuf::from(format!("{db_s}.new")).exists());
 }
+
+#[test]
+fn remove_quita_una_fuente_que_ya_no_existe() {
+    let (dir, db) = dos_fuentes("remove", 10);
+    let root = &dir.0;
+    let db_s = db.to_string_lossy().into_owned();
+    std::fs::remove_file(root.join("logs/app.jsonl")).unwrap();
+    // Un nombre que no casa: error con las fuentes que hay.
+    let out = run(root, &["remove", "nada.jsonl", "--db", &db_s]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && err.contains("no source matches") && err.contains("app.jsonl"), "{err}");
+    // Por su ruta, aunque el fichero ya no esté.
+    let out = run(root, &["remove", "logs/app.jsonl", "--db", &db_s]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("removed jsonl:") && err.contains("(2 events)") && err.contains("now has 1 sources"), "{err}");
+    assert_eq!(sql(&db, "SELECT COUNT(*) FROM sources"), ["1"]);
+    assert_eq!(sql(&db, "SELECT COUNT(*) FROM events WHERE title IN ('falla A', 'va bien')"), ["0"]);
+    assert_eq!(sql(&db, "SELECT COUNT(*) FROM events_fts WHERE events_fts MATCH 'falla'"), ["0"]);
+    let total = sql(&db, "SELECT COUNT(*) FROM events");
+    assert_eq!(sql(&db, "SELECT SUM(count) FROM dim_rollups"), total);
+    // sync ya no la echa de menos y reindex sale bien.
+    let out = run(root, &["sync", "--db", &db_s]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = run(root, &["reindex", "--db", &db_s]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // Sin índice, el error de las consultas y no se crea uno.
+    let nada = root.join("nada.db");
+    let out = run(root, &["remove", "x", "--db", &nada.to_string_lossy()]);
+    assert!(!out.status.success() && !nada.exists());
+}

@@ -308,6 +308,29 @@ impl Store {
         Ok(())
     }
 
+    /// Quita una fuente del índice: sus eventos (con touches, labels, links y
+    /// dims), su fila de `sources` y lo que cuelga de ella (rollups, plantillas,
+    /// claves de attrs, marcadores y sus `meta`). Actores y entidades se quedan:
+    /// son compartidos. Devuelve cuántos eventos tenía. FTS y rollups quedan por
+    /// reconstruir (lo hace quien llama).
+    pub fn remove_source(&self, source_id: &str) -> Result<usize> {
+        let n = self.count_source_events(source_id, None)?;
+        self.delete_source_events(source_id)?;
+        let tx = self.conn.unchecked_transaction()?;
+        for table in ["rollups", "dim_rollups", "attr_keys", "source_dims"] {
+            tx.execute(&format!("DELETE FROM {table} WHERE source_ref = (SELECT ref FROM sources WHERE id = ?1)"), params![source_id])?;
+        }
+        for table in ["templates", "markers"] {
+            tx.execute(&format!("DELETE FROM {table} WHERE source_id = ?1"), params![source_id])?;
+        }
+        for key in ["sync_error", "stale_dims", "glob_state"] {
+            tx.execute("DELETE FROM meta WHERE key = ?1", params![format!("{key}:{source_id}")])?;
+        }
+        tx.execute("DELETE FROM sources WHERE id = ?1", params![source_id])?;
+        tx.commit()?;
+        Ok(n)
+    }
+
     /// Cambia las dims con que se ingiere la fuente SIN reindexarla (no se puede
     /// releer entera): lo nuevo entra con `keys` y los eventos que ya estaban
     /// (rid hasta el máximo de hoy) conservan las de antes. Eso queda en

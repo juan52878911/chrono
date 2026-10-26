@@ -5,7 +5,7 @@
 use std::process::Command;
 
 const COMANDOS: &[&str] = &[
-    "init", "add", "sync", "reindex", "config", "tail", "bench", "hotspots", "coupling", "owners", "bugs", "churn", "tickets", "prs",
+    "init", "add", "remove", "sync", "reindex", "config", "tail", "bench", "hotspots", "coupling", "owners", "bugs", "churn", "tickets", "prs",
     "branches", "phases", "sources", "search", "similar", "show", "explain", "timeline", "stats", "top", "patterns", "trace",
     "events", "informe", "precede", "correlate", "gaps", "session_patterns", "mcp", "hook",
 ];

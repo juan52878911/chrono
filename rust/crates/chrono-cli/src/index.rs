@@ -366,6 +366,50 @@ pub fn add_glob(db: &Path, pattern: &str, as_kind: Option<&str>, alias: Option<&
     Ok(())
 }
 
+/// `chrono remove <fuente>`: quita una fuente y sus eventos del índice. La
+/// fuente se nombra por su id (`jsonl:/ruta`), su alias (`--name`), su ruta o
+/// patrón tal como se añadió, o `cmd:<nombre>`. Es la salida para una fuente
+/// que ya no existe y no se quiere seguir viendo en `sources` ni en `sync`.
+pub fn remove(db: &Path, arg: &str) -> Result<()> {
+    // Sin índice, el mismo error que las consultas (y no se crea uno vacío).
+    drop(Store::open_read(db)?);
+    let _lock = lock_ingest(db)?;
+    let store = Store::open(db)?;
+    let sources = store.list_sources()?;
+    let path = match arg.strip_prefix(crate::command::PREFIX) {
+        Some(name) => crate::command::cache_path(db, name),
+        None => PathBuf::from(arg),
+    };
+    let abs = std::fs::canonicalize(&path).map(|p| p.to_string_lossy().into_owned());
+    let pattern = glob_source::absolutize(arg);
+    let alias = |s: &chrono_store::SourceRow| manifest_value(&s.manifest_json, "alias");
+    let found = sources.iter().find(|s| {
+        s.id == arg
+            || alias(s).as_deref() == Some(arg)
+            || abs.as_deref().is_ok_and(|a| a == s.path)
+            || (s.path == pattern && GlobSource::from_row(&s.id, &s.manifest_json).is_some())
+            // Un fichero que ya no está no se puede canonicalizar: su ruta absoluta.
+            || std::path::absolute(&path).is_ok_and(|p| p.to_string_lossy() == s.path)
+    });
+    let Some(s) = found else {
+        let names: Vec<String> = sources.iter().map(|s| alias(s).unwrap_or_else(|| s.id.clone())).collect();
+        return Err(t(
+            format!("no source matches {arg:?}. Sources: {} (see chrono sources)", names.join(", ")),
+            format!("ninguna fuente casa con {arg:?}. Fuentes: {} (ver chrono sources)", names.join(", ")),
+        )
+        .into());
+    };
+    let n = store.remove_source(&s.id)?;
+    store.rebuild_fts()?;
+    finalize(&index_root_of(db), &store, &[], false, false)?;
+    let total = store.list_sources()?.len();
+    eprintln!("{}", t(
+        format!("chrono: removed {} ({n} events). Index now has {total} sources.", s.id),
+        format!("chrono: quitada {} ({n} eventos). El índice tiene ya {total} fuentes.", s.id),
+    ));
+    Ok(())
+}
+
 /// `chrono sync [path]`: sincroniza TODAS las fuentes registradas (o solo la de
 /// `path`, si se pasa), ingiriendo el delta desde el watermark de cada una. Si
 /// una fuente diverge (rebase/force-push, log rotado), reindexa SOLO esa fuente.
@@ -572,8 +616,8 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
             return Ok(());
         }
         Err(t(
-            format!("sync: {} source(s) could not be read: {} (their events are kept; see `sources`)", failed.len(), failed.join(", ")),
-            format!("sync: {} fuente(s) no se pudieron leer: {} (sus eventos se conservan; ver `sources`)", failed.len(), failed.join(", ")),
+            format!("sync: {} source(s) could not be read: {} (their events are kept; see `sources`; chrono remove <source> drops one for good)", failed.len(), failed.join(", ")),
+            format!("sync: {} fuente(s) no se pudieron leer: {} (sus eventos se conservan; ver `sources`; chrono remove <fuente> quita una del todo)", failed.len(), failed.join(", ")),
         )
         .into())
     };

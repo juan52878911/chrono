@@ -41,6 +41,8 @@ Index:
                        --as <kind> forces the adapter (e.g. --as template, config-defined;
                        --as nod for a Nod event file that is still empty).
   sync [path]          Process only the delta since the last watermark (all sources).
+  remove <source>      Remove a source and its events from the index (by id, alias, path or
+                       cmd:<name>), e.g. a log file that no longer exists.
   reindex              Rebuild the index from scratch with the same sources (git, logs, globs,
                        commands), e.g. after a chrono upgrade that changes the index schema.
                        Queries keep using the current index until the new one replaces it.
@@ -150,6 +152,8 @@ Uso:
                        --as <kind> fuerza el adaptador (p.ej. --as template, definido por config;
                        --as nod para un fichero de eventos de Nod aún vacío).
   sync [ruta]          Procesa solo el delta desde la última marca (todas las fuentes).
+  remove <fuente>      Quita una fuente y sus eventos del índice (por id, alias, ruta o
+                       cmd:<nombre>), p. ej. un fichero de log que ya no existe.
   reindex              Reconstruye el índice desde cero con las mismas fuentes (git, logs, globs,
                        comandos), p. ej. tras actualizar chrono a una versión con otro esquema.
                        Las consultas siguen con el índice actual hasta que el nuevo lo sustituye.
@@ -601,7 +605,7 @@ fn check_source(store: &chrono_store::Store, s: &str, arg: &str) {
 
 /// Subcomandos que entiende `main` (los que no abren índice y las consultas).
 const COMMANDS: &[&str] = &[
-    "version", "help", "config", "init", "hook", "mcp", "sync", "reindex", "add", "tail", "hotspots", "coupling", "owners",
+    "version", "help", "config", "init", "hook", "mcp", "sync", "reindex", "add", "remove", "tail", "hotspots", "coupling", "owners",
     "bugs", "churn", "tickets", "prs", "branches", "phases", "sources", "search", "similar", "timeline", "stats", "top",
     "patterns", "events", "bench", "explain", "informe", "precede", "correlate", "gaps", "trace", "session_patterns", "show",
 ];
@@ -849,6 +853,13 @@ fn main() {
             // Hecho, pero con menos que antes: la copia vieja queda y se dice.
             Ok(true) => std::process::exit(3),
             Err(e) => fatal(e),
+        }
+        return;
+    }
+    if cmd == "remove" {
+        let arg = require_pos(&f, "remove needs a <source> (its id, alias or path; see chrono sources)", "remove necesita una <fuente> (su id, alias o ruta; ver chrono sources)");
+        if let Err(e) = index::remove(&db, &arg) {
+            fatal_open(e, &db, &f);
         }
         return;
     }
