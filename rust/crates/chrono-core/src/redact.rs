@@ -38,10 +38,23 @@ pub fn redact(s: &str) -> (String, usize) {
     let s = redact_pem(s, &mut n);
     let mut out = String::with_capacity(s.len());
     let mut after_bearer = false;
+    // Una clave sensible sin valor (`password:`, `"token":`): el valor es el
+    // trozo siguiente (`password: x`, JSON con formato, YAML).
+    let mut after_key = false;
     // Se recorre por trozos separados por espacio, conservando los separadores.
     for (i, piece) in s.split(' ').enumerate() {
         if i > 0 {
             out.push(' ');
+        }
+        if piece.is_empty() {
+            continue;
+        }
+        if std::mem::take(&mut after_key) {
+            if let Some(r) = redact_spaced_value(piece) {
+                out.push_str(&r);
+                n += 1;
+                continue;
+            }
         }
         if after_bearer && piece.len() >= 16 && is_token_chars(trim_edges(piece)) {
             let t = trim_edges(piece);
@@ -52,6 +65,7 @@ pub fn redact(s: &str) -> (String, usize) {
         }
         let t = trim_edges(piece);
         after_bearer = t.eq_ignore_ascii_case("bearer") || t.eq_ignore_ascii_case("basic");
+        after_key = key_without_value(piece);
         out.push_str(&redact_piece(piece, &mut n));
     }
     (out, n)
@@ -140,14 +154,12 @@ pub fn redact_event(ev: &mut crate::Event) -> usize {
 /// Un trozo sin espacios: credenciales en URL, `clave=valor` sensible, o
 /// subtokens con forma de secreto (prefijo de proveedor o JWT).
 fn redact_piece(piece: &str, n: &mut usize) -> String {
-    if let Some(r) = redact_url_password(piece) {
+    let redone = redact_url_password(piece).or_else(|| redact_key_value(piece));
+    if redone.is_some() {
         *n += 1;
-        return r;
     }
-    if let Some(r) = redact_key_value(piece) {
-        *n += 1;
-        return r;
-    }
+    // El resto del trozo puede llevar otro secreto (`ghp_…=valor`).
+    let piece = redone.as_deref().unwrap_or(piece);
     // Subtokens: tiras de caracteres de token separadas por cualquier otra cosa.
     let mut out = String::with_capacity(piece.len());
     let mut start: Option<usize> = None;
@@ -199,13 +211,14 @@ fn is_jwt(tok: &str) -> bool {
 fn redact_url_password(piece: &str) -> Option<String> {
     let scheme_end = piece.find("://")? + 3;
     let rest = &piece[scheme_end..];
-    let at = rest.find('@')?;
+    // El host va tras la ÚLTIMA `@` de la autoridad: una clave con `@`
+    // (`u:p@ss@host`) dejaba la cola a la vista.
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let at = authority.rfind('@')?;
     let userinfo = &rest[..at];
-    if userinfo.contains('/') {
-        return None;
-    }
     let colon = userinfo.find(':')?;
-    if userinfo.len() - colon - 1 == 0 {
+    let password = &userinfo[colon + 1..];
+    if password.is_empty() || password == MARK {
         return None;
     }
     Some(format!("{}{}:{MARK}{}", &piece[..scheme_end], &userinfo[..colon], &rest[at..]))
@@ -215,7 +228,7 @@ fn redact_url_password(piece: &str) -> Option<String> {
 /// caracteres: se cambia solo el valor.
 fn redact_key_value(piece: &str) -> Option<String> {
     let sep = piece.find(['=', ':'])?;
-    let key = piece[..sep].trim_matches(|c: char| c == '"' || c == '\'' || c == '{' || c == ',').to_ascii_lowercase();
+    let key = piece[..sep].trim_matches(|c: char| c == '"' || c == '\'' || c == '{' || c == ',').to_ascii_lowercase().replace("<secret>", "");
     if key.is_empty() || key.len() > 40 || !KEYS.iter().any(|k| key.contains(k)) {
         return None;
     }
@@ -233,6 +246,33 @@ fn redact_key_value(piece: &str) -> Option<String> {
     Some(format!("{}{MARK}{}", &piece[..start], &piece[start + value.len()..]))
 }
 
+/// `password:`, `"token":`, `api_key=`: una clave sensible cuyo valor viene
+/// en el trozo siguiente.
+fn key_without_value(piece: &str) -> bool {
+    let p = piece.trim_end_matches(['"', '\'']);
+    let Some(key) = p.strip_suffix(':').or_else(|| p.strip_suffix('=')) else { return false };
+    let key = key.trim_matches(|c: char| c == '"' || c == '\'' || c == '{' || c == ',').to_ascii_lowercase().replace("<secret>", "");
+    !key.is_empty() && key.len() <= 40 && !key.contains([':', '=']) && KEYS.iter().any(|k| key.contains(k))
+}
+
+/// El valor tras `clave: ` (con espacio). Entre comillas se redacta como en
+/// `clave=valor`; sin comillas, además no puede ser una palabra corriente
+/// (`password: required`, `token: invalid signature`).
+fn redact_spaced_value(piece: &str) -> Option<String> {
+    let value = piece.trim_matches(|c: char| c == '"' || c == '\'' || c == ',' || c == '}' || c == ';');
+    let quoted = piece.starts_with(['"', '\'']);
+    if value.len() < 8
+        || value.starts_with(['<', '/', '~'])
+        || value.contains("://")
+        || value.bytes().all(|b| b.is_ascii_digit())
+        || (!quoted && value.chars().all(|c| c.is_alphabetic() || c == '_' || c == '-'))
+    {
+        return None;
+    }
+    let start = piece.find(value)?;
+    Some(format!("{}{MARK}{}", &piece[..start], &piece[start + value.len()..]))
+}
+
 /// Bloques PEM de clave privada enteros.
 fn redact_pem(s: &str, n: &mut usize) -> String {
     let mut out = String::new();
@@ -246,7 +286,14 @@ fn redact_pem(s: &str, n: &mut usize) -> String {
             rest = &rest[b + he..];
             continue;
         }
-        let Some(e) = rest[b..].find("-----END ") else { break };
+        let Some(e) = rest[b..].find("-----END ") else {
+            // Sin cierre (línea cortada): de la cabecera al final.
+            out.push_str(&rest[..b]);
+            out.push_str(MARK);
+            *n += 1;
+            rest = "";
+            break;
+        };
         let end = rest[b + e + 9..].find("-----").map(|i| b + e + 9 + i + 5).unwrap_or(rest.len());
         out.push_str(&rest[..b]);
         out.push_str(MARK);
