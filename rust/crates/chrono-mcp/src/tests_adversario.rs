@@ -147,3 +147,64 @@ fn attr_invalida_es_error_y_valor_con_dos_puntos() {
     let v: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(v["events"].as_array().unwrap().len(), 13, "{text}");
 }
+
+/// `%`, `_` y `\` en `grep`, en el prefijo de `kind` y en el de una `attr` son
+/// literales, por todos los caminos (eventos, plantillas, cubo).
+#[test]
+fn comodines_de_like_son_literales() {
+    let db = TempDb(std::env::temp_dir().join(format!("chrono-mcp-test-adversario-like-{}.db", std::process::id())));
+    let _ = std::fs::remove_file(&db.0);
+    let mut store = Store::open(&db.0).unwrap();
+    let mut w = store.writer().unwrap();
+    let filas = [
+        ("user_id ok", "a_b", "x_1"),
+        ("user-id ok", "axb", "xy1"),
+        ("100% done", "a_b", "x_2"),
+        ("1000 done", "axb", "xz2"),
+        (r"c:\tmp ok", "axb", r"x\3"),
+        ("c:xtmp ok", "axb", "xx3"),
+    ];
+    for (i, (title, kind, p)) in filas.iter().enumerate() {
+        let at_epoch = 1_700_000_000_000 + i as i64 * 60_000;
+        let mut e = Event {
+            id: format!("l{i}"),
+            source_id: "jsonl:/app".into(),
+            kind: kind.to_string(),
+            at: crate::contract::iso(at_epoch),
+            at_epoch,
+            level: "INFO".into(),
+            title: title.to_string(),
+            ..Default::default()
+        };
+        e.attrs.insert("p".into(), p.to_string());
+        w.add_event(&e).unwrap();
+    }
+    w.commit().unwrap();
+    store.rebuild_fts().unwrap();
+    store.build_rollups(60_000).unwrap();
+    let total = |tool: &str, args: Value| -> i64 {
+        let mut args = args;
+        args["format"] = json!("json");
+        let text = crate::run_tool_text(&store, tool, &args).unwrap();
+        let v: Value = serde_json::from_str(&text).unwrap();
+        v["meta"]["total"].as_i64().unwrap_or_else(|| panic!("{tool}: {text}"))
+    };
+    for tool in ["events", "top", "timeline"] {
+        let base = if tool == "top" { json!({"dim": "level"}) } else { json!({}) };
+        let with = |k: &str, v: &str| {
+            let mut a = base.clone();
+            a[k] = json!(v);
+            a
+        };
+        assert_eq!(total(tool, with("grep", "user_id")), 1, "{tool} grep user_id");
+        assert_eq!(total(tool, with("grep", "100%")), 1, "{tool} grep 100%");
+        assert_eq!(total(tool, with("grep", r"c:\t")), 1, "{tool} grep c:\\t");
+        assert_eq!(total(tool, with("kind", "a_*")), 2, "{tool} kind a_*");
+        assert_eq!(total(tool, with("attr", "p:x_*")), 2, "{tool} attr p:x_*");
+        assert_eq!(total(tool, with("attr", r"p:x\*")), 1, "{tool} attr p:x\\*");
+    }
+    let text = crate::run_tool_text(&store, "patterns", &json!({"grep": "user_id", "format": "json"})).unwrap();
+    let v: Value = serde_json::from_str(&text).unwrap();
+    let n: i64 = v["patterns"].as_array().unwrap().iter().map(|p| p["count"].as_i64().unwrap()).sum();
+    assert_eq!(n, 1, "patterns grep user_id: {text}");
+}
