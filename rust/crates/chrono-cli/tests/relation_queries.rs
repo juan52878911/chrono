@@ -327,8 +327,9 @@ fn gaps_errores_de_uso() {
 }
 
 /// `ediciones` (dim `sesion`, clave `ruta`) y `commits` (clave `ruta`):
-///   ediciones: S1 a.rs 10:00 · S2 b.rs 10:00, c.rs 12:00
+///   ediciones: S1 a.rs 10:00 · S2 b.rs 10:00, c.rs 12:00 · S3 sin ruta 10:05 · sin sesión d.rs 10:06
 ///   commits:   a.rs 09:00 (ANTES de la edición) · c.rs 11:00 (después del primer evento de S2)
+/// Títulos `edit N ok` (con espacios, para `grep=`).
 fn orden_env(tag: &str) -> Env {
     let env = Env::new(
         tag,
@@ -340,10 +341,16 @@ fn orden_env(tag: &str) -> Env {
                 {"source": "commits", "field": "ruta"}]}
         }),
     );
-    let e = |ts: &str, n: u32, sesion: &str, ruta: &str| line(ts, &format!("edit-{n}"), json!({"sesion": sesion, "ruta": ruta}));
+    let e = |ts: &str, n: u32, sesion: &str, ruta: &str| line(ts, &format!("edit {n} ok"), json!({"sesion": sesion, "ruta": ruta}));
     env.add_source(
         "ediciones",
-        &[e("2026-01-01T10:00:00Z", 1, "S1", "a.rs"), e("2026-01-01T10:00:01Z", 2, "S2", "b.rs"), e("2026-01-01T12:00:00Z", 3, "S2", "c.rs")],
+        &[
+            e("2026-01-01T10:00:00Z", 1, "S1", "a.rs"),
+            e("2026-01-01T10:00:01Z", 2, "S2", "b.rs"),
+            e("2026-01-01T12:00:00Z", 3, "S2", "c.rs"),
+            line("2026-01-01T10:05:00Z", "edit 4 ok", json!({"sesion": "S3"})),
+            line("2026-01-01T10:06:00Z", "edit 5 ok", json!({"ruta": "d.rs"})),
+        ],
     );
     env.add_source(
         "commits",
@@ -357,11 +364,11 @@ fn gaps_por_defecto_un_to_anterior_al_from_no_cubre() {
     let env = orden_env("gaps-orden");
     let args = ["gaps", "--from", "ediciones", "--to", "commits", "--via", "ruta"];
     // Por clave: a.rs se commiteó ANTES de editarse (no cubre); c.rs, a las 11:00,
-    // es anterior a su edición de las 12:00 (tampoco); b.rs, sin commit.
+    // es anterior a su edición de las 12:00 (tampoco); b.rs y d.rs, sin commit.
     let v = env.q(&args);
     assert_eq!(v["result"]["order"], "to_after_first_from", "{v}");
     assert!(v["result"]["criterion"].as_str().unwrap().contains("--any-order"), "{v}");
-    assert_eq!((v["result"]["units"].as_i64(), v["result"]["covered"].as_i64()), (Some(3), Some(0)), "{v}");
+    assert_eq!((v["result"]["units"].as_i64(), v["result"]["covered"].as_i64()), (Some(4), Some(0)), "{v}");
     let v = env.q(&[&args[..], &["--any-order"]].concat());
     assert_eq!(v["result"]["order"], "any", "{v}");
     assert_eq!(v["result"]["covered"], 2, "a.rs y c.rs, en cualquier orden: {v}");
@@ -374,6 +381,47 @@ fn gaps_por_defecto_un_to_anterior_al_from_no_cubre() {
     assert_eq!(sample_units(&v), ["S1"]);
     let v = env.q(&[&by[..], &["--any-order"]].concat());
     assert_eq!(v["result"]["covered"], 2, "{v}");
+}
+
+#[test]
+fn gaps_lado_con_grep_con_espacios() {
+    let env = orden_env("gaps-grep");
+    for side in ["ediciones grep=edit 3 ok", "ediciones:grep=edit 3", "ediciones grep=\"edit 3\" kind=log", "grep=edit 3 source=ediciones"] {
+        let v = env.q(&["gaps", "--from", side, "--to", "commits", "--via", "ruta", "--any-order"]);
+        assert_eq!((v["result"]["units"].as_i64(), v["result"]["covered"].as_i64()), (Some(1), Some(1)), "{side:?}: {v}");
+        assert_eq!(sample_units(&v), Vec::<String>::new(), "{side:?}");
+    }
+    // Dos fuentes siguen siendo un error, y unas comillas sin cerrar también.
+    let t = env.fail(&["gaps", "--from", "ediciones commits", "--to", "commits", "--via", "ruta"]);
+    assert!(t.contains("one source"), "{t}");
+    let t = env.fail(&["gaps", "--from", "ediciones grep=\"edit", "--to", "commits", "--via", "ruta"]);
+    assert!(t.contains("quote"), "{t}");
+}
+
+#[test]
+fn gaps_until_acota_los_dos_lados() {
+    let env = orden_env("gaps-until");
+    // Hasta las 10:30: en from a.rs, b.rs y d.rs (c.rs es de las 12:00); en to solo
+    // a.rs (el commit de c.rs es de las 11:00). Con --any-order, solo a.rs cubre.
+    let v = env.q(&["gaps", "--from", "ediciones", "--to", "commits", "--via", "ruta", "--until", "2026-01-01T10:30:00Z", "--any-order"]);
+    let r = &v["result"];
+    assert_eq!((r["units"].as_i64(), r["covered"].as_i64(), r["to_values"].as_i64()), (Some(3), Some(1), Some(1)), "{v}");
+    assert_eq!(r["until"], "2026-01-01T10:30:00Z");
+    // Desde las 10:00:01 en from (S2 b.rs, S3, d.rs y c.rs); los commits, de cualquier momento.
+    let v = env.q(&["gaps", "--from", "ediciones", "--to", "commits", "--via", "ruta", "--since", "2026-01-01T10:00:01Z", "--any-order"]);
+    assert_eq!((v["result"]["units"].as_i64(), v["result"]["covered"].as_i64(), v["result"]["to_values"].as_i64()), (Some(3), Some(1), Some(2)), "{v}");
+}
+
+#[test]
+fn gaps_cuenta_los_eventos_de_from_sin_clave() {
+    let env = orden_env("gaps-sin-clave");
+    // Sin --by: solo `edit 4` (S3) no tiene ruta.
+    let v = env.q(&["gaps", "--from", "ediciones", "--to", "commits", "--via", "ruta"]);
+    assert_eq!(v["result"]["from_without_key"], 1, "{v}");
+    // Con --by sesion: además `edit 5` (d.rs), sin sesión.
+    let v = env.q(&["gaps", "--from", "ediciones", "--to", "commits", "--via", "ruta", "--by", "sesion"]);
+    assert_eq!(v["result"]["from_without_key"], 2, "{v}");
+    assert_eq!(v["result"]["units"], 2, "S3 sin ruta y d.rs sin sesión no son unidad: {v}");
 }
 
 // ───────────────────────── correlate --via ─────────────────────────

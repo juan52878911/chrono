@@ -190,6 +190,113 @@ pub fn correlate_via(conn: &Connection, event_id: &str, key: &str, kinds: &[Stri
     Ok(Via { anchor, key: key.to_string(), values, total, by_source, by_kind_level, related })
 }
 
+/// Por qué no se entiende un lado de `gaps` (cada frontal lo dice en su idioma).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SideError {
+    /// Una segunda palabra sin `=` (dos fuentes en un lado).
+    TwoSources(String),
+    /// Un filtro que no es source, kind, level, entity, grep, attr ni join.
+    UnknownKey(String),
+    /// Unas comillas sin cerrar.
+    UnclosedQuote,
+    Empty,
+}
+
+impl SideError {
+    pub fn en(&self) -> String {
+        match self {
+            SideError::TwoSources(t) => format!("{t:?}: only one source per side"),
+            SideError::UnknownKey(k) => format!("{k:?}: use source, kind, level, entity, grep, attr or join"),
+            SideError::UnclosedQuote => "unclosed quote".into(),
+            SideError::Empty => "empty side".into(),
+        }
+    }
+    pub fn es(&self) -> String {
+        match self {
+            SideError::TwoSources(t) => format!("{t:?}: una sola fuente por lado"),
+            SideError::UnknownKey(k) => format!("{k:?}: usa source, kind, level, entity, grep, attr o join"),
+            SideError::UnclosedQuote => "comillas sin cerrar".into(),
+            SideError::Empty => "lado vacío".into(),
+        }
+    }
+}
+
+/// Un lado de `gaps`: `"<fuente> kind=… level=… entity=… grep=… attr=… join=…"`.
+/// La primera palabra sin `=` es la fuente (nombre, tipo o id); el resto,
+/// filtros. `grep=` admite espacios: sigue hasta el siguiente filtro
+/// (`grep=exit code 1 level=ERROR`), o entre comillas (`grep="a  b"`, literal).
+/// `<fuente>:<filtro>=…` también vale (`claude:grep=exit code`).
+pub fn parse_side(raw: &str) -> std::result::Result<EventScope<'_>, SideError> {
+    const KEYS: [&str; 7] = ["source", "kind", "level", "entity", "grep", "attr", "join"];
+    let mut sc = EventScope::default();
+    // Inicio del valor de un `grep=` sin comillas que aún puede crecer.
+    let mut grep_from: Option<usize> = None;
+    let mut i = 0;
+    while i < raw.len() {
+        let rest = &raw[i..];
+        let skip = rest.len() - rest.trim_start().len();
+        i += skip;
+        if i >= raw.len() {
+            break;
+        }
+        let end = raw[i..].find(char::is_whitespace).map_or(raw.len(), |n| i + n);
+        let tok = &raw[i..end];
+        let filter = tok.split_once('=').and_then(|(k, _)| {
+            if KEYS.contains(&k) {
+                Some((None, k))
+            } else {
+                k.rsplit_once(':').filter(|(src, kk)| !src.is_empty() && KEYS.contains(kk)).map(|(src, kk)| (Some(src), kk))
+            }
+        });
+        let Some((src, key)) = filter else {
+            // Una palabra más del texto de `grep=`, o la fuente.
+            if let Some(g) = grep_from {
+                sc.grep = Some(&raw[g..end]);
+            } else if tok.contains('=') {
+                return Err(SideError::UnknownKey(tok.split_once('=').map_or(tok, |(k, _)| k).to_string()));
+            } else if sc.source.is_none() {
+                sc.source = Some(tok);
+            } else {
+                return Err(SideError::TwoSources(tok.to_string()));
+            }
+            i = end;
+            continue;
+        };
+        if let Some(s) = src {
+            if sc.source.is_some() {
+                return Err(SideError::TwoSources(s.to_string()));
+            }
+            sc.source = Some(s);
+        }
+        let vs = i + tok.find('=').unwrap_or(0) + 1;
+        let (value, quoted) = match raw[vs..].chars().next() {
+            Some(q @ ('"' | '\'')) => {
+                let close = raw[vs + 1..].find(q).ok_or(SideError::UnclosedQuote)? + vs + 1;
+                i = close + 1;
+                (&raw[vs + 1..close], true)
+            }
+            _ => {
+                i = end;
+                (&raw[vs..end], false)
+            }
+        };
+        grep_from = (key == "grep" && !quoted).then_some(vs);
+        match key {
+            "source" => sc.source = Some(value),
+            "kind" => sc.kind = Some(value),
+            "level" => sc.level = Some(value),
+            "entity" => sc.entity = Some(value),
+            "grep" => sc.grep = Some(value),
+            "attr" => sc.attr = Some(value),
+            _ => sc.join = Some(value),
+        }
+    }
+    if sc.is_empty() {
+        return Err(SideError::Empty);
+    }
+    Ok(sc)
+}
+
 /// Una unidad del lado `from` sin pareja en el lado `to`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GapUnit {
@@ -211,6 +318,9 @@ pub struct Gaps {
     pub missing: i64,
     /// Valores distintos de `via` en el lado `to`.
     pub to_values: i64,
+    /// Eventos del lado `from` (en la ventana) que no son unidad: sin valor de
+    /// `via`, o de `by` si se pide. No cuentan ni como cubiertos ni como hueco.
+    pub from_without_key: i64,
     /// Las primeras `limit` unidades del hueco, de la más reciente a la más antigua.
     pub sample: Vec<GapUnit>,
 }
@@ -220,6 +330,9 @@ pub struct Gaps {
 pub struct GapsOpts {
     /// Acota el lado `from` (`0` = sin límite).
     pub since_epoch: i64,
+    /// Fin (exclusivo) de los DOS lados: el estado a esa fecha, así que un
+    /// `to` posterior no cubre (`0` = sin límite).
+    pub until_epoch: i64,
     /// Cubre cualquier `to` con el valor, aunque sea ANTERIOR al primer `from`
     /// de la unidad (un commit de antes de la edición). Por defecto, no.
     pub any_order: bool,
@@ -233,9 +346,10 @@ pub struct GapsOpts {
 /// commit»). Por defecto importa el orden: solo cubre un evento `to` en o
 /// después del primer evento `from` de la unidad (un `to` sin tiempo no
 /// cubre); con `any_order`, cualquiera. Exacto: cuenta todas las unidades;
-/// `limit` solo acota la muestra. `since` acota el lado `from`; en `to` vale
-/// cualquier momento (con orden, lo anterior al `from` ya no cubre). Un evento
-/// de `from` sin valor de `by` no es unidad.
+/// `limit` solo acota la muestra. `since` acota el lado `from` (en `to`, con
+/// orden, lo anterior al `from` ya no cubre; con `any_order`, cualquiera vale);
+/// `until` acota los dos. Un evento de `from` sin valor de `via` o de `by` no
+/// es unidad: se cuenta aparte (`from_without_key`).
 pub fn gaps(conn: &Connection, from: &EventScope, to: &EventScope, via: &str, by: Option<&str>, o: &GapsOpts) -> Result<Gaps> {
     check_key(via)?;
     if let Some(b) = by {
@@ -255,6 +369,8 @@ pub fn gaps(conn: &Connection, from: &EventScope, to: &EventScope, via: &str, by
             }
         }
     }
+    let from = EventScope { until_epoch: o.until_epoch, ..from.clone() };
+    let to = EventScope { until_epoch: o.until_epoch, ..to.clone() };
     let (ff, fp) = from.sql(3);
     let (tf, tp) = to.sql(3 + fp.len());
     let vals = key_values_sql(via);
@@ -282,10 +398,13 @@ pub fn gaps(conn: &Connection, from: &EventScope, to: &EventScope, via: &str, by
     for p in fp.iter().chain(&tp) {
         bound.push(p);
     }
-    let (units, covered, to_values): (i64, i64, i64) = conn.query_row(
-        &format!("{ctes} SELECT (SELECT COUNT(DISTINCT unit) FROM f), (SELECT COUNT(*) FROM cov), (SELECT COUNT(*) FROM t)"),
+    let (units, covered, to_values, from_without_key): (i64, i64, i64, i64) = conn.query_row(
+        &format!(
+            "{ctes} SELECT (SELECT COUNT(DISTINCT unit) FROM f), (SELECT COUNT(*) FROM cov), (SELECT COUNT(*) FROM t),
+                    (SELECT COUNT(*) FROM events e WHERE (?1 = 0 OR e.at_epoch >= ?1) {ff} AND e.rid NOT IN (SELECT rid FROM f))"
+        ),
         rusqlite::params_from_iter(bound.iter()),
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
     let lim = o.limit as i64;
     let n = bound.len() + 1;
@@ -304,7 +423,7 @@ pub fn gaps(conn: &Connection, from: &EventScope, to: &EventScope, via: &str, by
             Ok(GapUnit { unit: r.get(0)?, events: r.get(1)?, first_at: r.get(2)?, last_at: r.get(3)? })
         })?
         .collect::<std::result::Result<_, _>>()?;
-    Ok(Gaps { units, covered, missing: units - covered, to_values, sample })
+    Ok(Gaps { units, covered, missing: units - covered, to_values, from_without_key, sample })
 }
 
 /// Valores de una clave y en cuántas fuentes aparece cada uno: lo que lista

@@ -790,30 +790,6 @@ pub fn correlate_via(store: &Store, id: &str, via: &str, kind: Option<&str>, lim
     envelope(store, "correlate", &w, limit, n, result)
 }
 
-/// Un lado de `gaps`: `"<fuente> kind=… level=… entity=… grep=… attr=… join=…"`.
-/// La primera palabra sin `=` es la fuente (nombre, tipo o id); el resto, filtros.
-pub fn parse_side(raw: &str) -> std::result::Result<chrono_metrics::EventScope<'_>, String> {
-    let mut sc = chrono_metrics::EventScope::default();
-    for tok in raw.split_whitespace() {
-        match tok.split_once('=') {
-            None if sc.source.is_none() => sc.source = Some(tok),
-            None => return Err(format!("{tok:?}: only one source per side")),
-            Some(("source", v)) => sc.source = Some(v),
-            Some(("kind", v)) => sc.kind = Some(v),
-            Some(("level", v)) => sc.level = Some(v),
-            Some(("entity", v)) => sc.entity = Some(v),
-            Some(("grep", v)) => sc.grep = Some(v),
-            Some(("attr", v)) => sc.attr = Some(v),
-            Some(("join", v)) => sc.join = Some(v),
-            Some((k, _)) => return Err(format!("{k:?}: use source, kind, level, entity, grep, attr or join")),
-        }
-    }
-    if sc.is_empty() {
-        return Err("empty side".into());
-    }
-    Ok(sc)
-}
-
 /// `gaps --from A --to B --via K [--by U]`: «X sin Y» con cifras exactas.
 pub fn gaps(
     store: &Store,
@@ -822,6 +798,7 @@ pub fn gaps(
     to: Option<&str>,
     via: Option<&str>,
     by: Option<&str>,
+    until: Option<&str>,
     any_order: bool,
     limit: Option<&str>,
 ) -> Result<Json> {
@@ -836,11 +813,11 @@ pub fn gaps(
     };
     let (from_raw, to_raw, via) = (need(from, "from")?, need(to, "to")?, need(via, "via")?);
     fn side<'a>(raw: &'a str, flag: &str) -> Result<chrono_metrics::EventScope<'a>> {
-        parse_side(raw).map_err(|e| t(format!("--{flag}: {e}"), format!("--{flag}: {e}")).into())
+        chrono_metrics::parse_side(raw).map_err(|e| t(format!("--{flag}: {}", e.en()), format!("--{flag}: {}", e.es())).into())
     }
     let (fs, ts) = (side(&from_raw, "from")?, side(&to_raw, "to")?);
     let limit = parse_limit(limit, 25)?;
-    let o = chrono_metrics::GapsOpts { since_epoch: w.since_epoch, any_order, limit };
+    let o = chrono_metrics::GapsOpts { since_epoch: w.since_epoch, until_epoch: until_epoch(until)?, any_order, limit };
     let g = chrono_metrics::gaps(store.conn(), &fs, &ts, &via, by, &o)?;
     let sample: Vec<Json> = g
         .sample
@@ -875,6 +852,8 @@ pub fn gaps(
         .set("covered", Json::Int(g.covered))
         .set("missing", Json::Int(g.missing))
         .set("to_values", Json::Int(g.to_values))
+        .set("from_without_key", Json::Int(g.from_without_key))
+        .set("until", until.filter(|u| !u.is_empty()).map_or(Json::Null, Json::str))
         .set("missing_sample", Json::Arr(sample));
     envelope(store, "gaps", w, limit, n, result)
 }

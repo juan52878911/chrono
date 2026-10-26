@@ -96,6 +96,8 @@ Log-native (multi-source). timeline, stats, top, patterns and events share the s
                        a result, sessions without a commit with --by sessionId). A side is a source
                        (name, kind or id) plus kind=, level=, entity=, grep=, attr= (space separated).
                        Only a B event at or after the unit's first A event covers it (--any-order: any).
+                       grep= takes spaces up to the next filter; --since bounds A, --until both sides;
+                       from_without_key counts the A events with no K (or U) value.
 
 Process × outcome (Nod sessions + git):
   session_patterns     Per task and per session: tokens, cost, agent vs human
@@ -190,6 +192,8 @@ Log-native (multi-fuente). timeline, stats, top, patterns y events comparten fil
                        (pruebas sin resultado; sesiones sin commit con --by sessionId). Un lado es una
                        fuente (nombre, tipo o id) más kind=, level=, entity=, grep=, attr= (con espacios).
                        Solo cubre un evento de B en o después del primero de A en esa unidad (--any-order: cualquiera).
+                       grep= admite espacios hasta el siguiente filtro; --since acota A, --until los dos lados;
+                       from_without_key cuenta los eventos de A sin valor de K (o de U).
 
 Proceso × resultado (sesiones de Nod + git):
   session_patterns     Por tarea y por sesión: tokens, costo, tiempo del agente
@@ -733,6 +737,7 @@ fn main() {
             f.to.as_deref(),
             f.via.as_deref(),
             f.by.as_deref(),
+            f.until.as_deref(),
             f.any_order,
             f.limit.as_deref(),
         ),

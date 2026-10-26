@@ -242,7 +242,7 @@ pub fn tool_defs() -> Vec<Value> {
         ),
         tool(
             "gaps",
-            "«X sin Y» con cifras exactas: los valores de la clave via del lado from que ningún evento del lado to tiene (pruebas sin resultado, resultados sin decisión). Con by=U, la unidad es el valor de U y cuenta como cubierta si alguna de sus claves está en to (sesiones sin commit: by=sessionId). Un lado es una fuente (nombre, tipo o id) seguida de filtros kind= level= entity= grep= attr= join= separados por espacios.",
+            "«X sin Y» con cifras exactas: los valores de la clave via del lado from que ningún evento del lado to tiene (pruebas sin resultado, resultados sin decisión). Con by=U, la unidad es el valor de U y cuenta como cubierta si alguna de sus claves está en to (sesiones sin commit: by=sessionId). Un lado es una fuente (nombre, tipo o id) seguida de filtros kind= level= entity= grep= attr= join= separados por espacios (grep= admite espacios hasta el siguiente filtro). Solo cubre un to en o después del primer from de la unidad (any_order=true: cualquiera); from_without_key cuenta los from sin valor de via/by.",
             json!({
                 "from": str_prop("Lado X, p. ej. \"claude kind=tool_use entity=Edit,Write\""),
                 "to": str_prop("Lado Y, p. ej. \"git\""),
@@ -250,6 +250,7 @@ pub fn tool_defs() -> Vec<Value> {
                 "by": str_prop("Unidad que se cuenta, si no es la propia clave (p. ej. sessionId) (opcional)"),
                 "any_order": json!({"type": "boolean", "description": "Cubre un to aunque sea anterior al primer from de la unidad (por defecto false: solo en o después)"}),
                 "since": since_prop(),
+                "until": str_prop("Fin de la ventana (ISO), en los dos lados: un to posterior no cubre (opcional)"),
                 "limit": json!({"type": "integer", "description": "Muestra de unidades sin pareja (por defecto 25; las cifras son de todas)"})
             }),
             &["from", "to", "via"],
@@ -450,14 +451,15 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
         "gaps" => {
             let side = |k: &str| -> Result<chrono_metrics::EventScope<'_>> {
                 let raw = arg_str(args, k)?;
-                parse_side(raw).map_err(|e| format!("{k}: {e}").into())
+                chrono_metrics::parse_side(raw).map_err(|e| format!("{k}: {}", e.es()).into())
             };
             let (from, to) = (side("from")?, side("to")?);
             let via = arg_str(args, "via")?;
             let by = args.get("by").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
             let limit = arg_i64(args, "limit", 25).max(1) as usize;
             let any_order = args.get("any_order").and_then(Value::as_bool).unwrap_or(false);
-            let o = chrono_metrics::GapsOpts { since_epoch, any_order, limit };
+            let until_epoch = args.get("until").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).map_or(0, since_to_epoch);
+            let o = chrono_metrics::GapsOpts { since_epoch, until_epoch, any_order, limit };
             let g = chrono_metrics::gaps(conn, &from, &to, via, by, &o)?;
             let sample: Vec<Value> =
                 g.sample.iter().map(|u| json!({"unit": u.unit, "events": u.events, "first_at": u.first_at, "last_at": u.last_at})).collect();
@@ -466,7 +468,7 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
             } else {
                 "cubierta si un evento de to con el valor está en o después del primer evento de from de la unidad"
             };
-            json!({"via": via, "by": by, "order": if any_order { "any" } else { "to_after_first_from" }, "criterion": criterion, "units": g.units, "covered": g.covered, "missing": g.missing, "to_values": g.to_values, "missing_sample": sample})
+            json!({"via": via, "by": by, "order": if any_order { "any" } else { "to_after_first_from" }, "criterion": criterion, "units": g.units, "covered": g.covered, "missing": g.missing, "to_values": g.to_values, "from_without_key": g.from_without_key, "missing_sample": sample})
         }
         "patterns" => {
             let limit = arg_i64(args, "limit", 25).max(1) as usize;
@@ -557,30 +559,6 @@ pub(crate) fn common_json(c: &chrono_metrics::Common, total: usize) -> Value {
     let r2 = |x: f64| (x * 100.0).round() / 100.0;
     json!({"before_episodes": format!("{}/{}", c.episodes, total), "level": c.level, "template": c.template,
            "expected": c.expected.map(|x| (x * 10.0).round() / 10.0), "lift": c.lift.map(r2)})
-}
-
-/// Un lado de `gaps`: `"<fuente> kind=… level=… entity=… grep=… attr=… join=…"`
-/// (lo mismo que `--from`/`--to` en el CLI).
-fn parse_side(raw: &str) -> std::result::Result<chrono_metrics::EventScope<'_>, String> {
-    let mut sc = chrono_metrics::EventScope::default();
-    for tok in raw.split_whitespace() {
-        match tok.split_once('=') {
-            None if sc.source.is_none() => sc.source = Some(tok),
-            None => return Err(format!("{tok:?}: una sola fuente por lado")),
-            Some(("source", v)) => sc.source = Some(v),
-            Some(("kind", v)) => sc.kind = Some(v),
-            Some(("level", v)) => sc.level = Some(v),
-            Some(("entity", v)) => sc.entity = Some(v),
-            Some(("grep", v)) => sc.grep = Some(v),
-            Some(("attr", v)) => sc.attr = Some(v),
-            Some(("join", v)) => sc.join = Some(v),
-            Some((k, _)) => return Err(format!("{k:?}: usa source, kind, level, entity, grep, attr o join")),
-        }
-    }
-    if sc.is_empty() {
-        return Err("lado vacío".into());
-    }
-    Ok(sc)
 }
 
 pub(crate) fn scope_from(args: &Value) -> chrono_metrics::EventScope<'_> {
