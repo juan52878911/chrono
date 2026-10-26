@@ -550,10 +550,9 @@ fn loki_index(job: &Value) -> R<()> {
     let root = PathBuf::from(job["root"].as_str().ok_or("sin root")?);
     let dir = root.join(".chrono/mcp");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let lock = dir.join("loki.index.lock");
-    if std::fs::create_dir(&lock).is_err() {
+    let Some(_lock) = try_lock_file(&dir.join("loki.index.flock"))? else {
         return Ok(()); // otro proceso indexando
-    }
+    };
     let res = (|| -> R<()> {
         let cover_p = dir.join("loki.cover.json");
         let mut cover: Vec<Value> = std::fs::read_to_string(&cover_p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -576,8 +575,22 @@ fn loki_index(job: &Value) -> R<()> {
         log(&format!("loki-index {selector} → {} líneas{}", rows.len(), if more { " (incompleto)" } else { "" }));
         Ok(())
     })();
-    let _ = std::fs::remove_dir(&lock);
     res
+}
+
+/// Cerrojo exclusivo del SO sobre `path` sin esperar: `None` si otro proceso lo
+/// tiene. Se suelta al soltar el fichero, también si el proceso muere: antes
+/// era un directorio (`loki.index.lock`) que, si el proceso moría, se quedaba
+/// para siempre y todo `loki_index` posterior salía bien sin traer nada. Ese
+/// directorio viejo se quita si está.
+fn try_lock_file(path: &Path) -> R<Option<std::fs::File>> {
+    let _ = std::fs::remove_dir(path.with_file_name("loki.index.lock"));
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).map_err(|e| e.to_string())?;
+    match f.try_lock() {
+        Ok(()) => Ok(Some(f)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(e.to_string()),
+    }
 }
 
 // ── Ingesta y resumen ─────────────────────────────────────────────────────────
@@ -1456,5 +1469,26 @@ mod tests {
         assert!(looked_truncated(Some(&r), 100));
         let r = json!([{"type": "text", "text": "{\"data\":[],\"metadata\":{\"linesReturned\":7,\"maxLinesAllowed\":100,\"resultsTruncated\":false}}"}]);
         assert!(!looked_truncated(Some(&r), 100));
+    }
+
+    #[test]
+    fn el_cerrojo_de_loki_no_se_queda_colgado() {
+        let dir = std::env::temp_dir().join(format!("chrono-loki-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("loki.index.lock")).unwrap();
+        let path = dir.join("loki.index.flock");
+        // El directorio que dejó un proceso muerto ya no bloquea.
+        let held = try_lock_file(&path).unwrap().expect("libre");
+        assert!(!dir.join("loki.index.lock").exists());
+        assert!(try_lock_file(&path).unwrap().is_none(), "mientras otro lo tiene, no");
+        drop(held);
+        // Al soltarlo (o morir el proceso), se libera. Otros tests lanzan comandos
+        // en paralelo y entre su `fork` y su `exec` el hijo hereda el descriptor.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while try_lock_file(&path).unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "el cerrojo no se soltó");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
