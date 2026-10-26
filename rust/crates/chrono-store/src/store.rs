@@ -425,21 +425,20 @@ impl Store {
         let drb = crate::DIM_ROLLUP_BUCKET_MS;
 
         // Fase 1: escanear eventos (solo el delta si no es reset) y agregar en
-        // memoria. `rollups`: (source_id, template, bucket) -> (count, last_rid),
+        // memoria. `rollups`: (source_ref, template, bucket) -> (count, last_rid),
         // solo eventos con tiempo. `dim_rollups`: además kind, nivel, nivel
         // efectivo y entidad, TODOS los eventos (los sin tiempo en el bucket -1).
         type DimKey = (i64, String, String, String, String, i64, i64);
-        let mut agg: BTreeMap<(String, String, i64), (i64, i64)> = BTreeMap::new();
+        let mut agg: BTreeMap<(i64, String, i64), (i64, i64)> = BTreeMap::new();
         let mut dagg: BTreeMap<DimKey, (i64, i64)> = BTreeMap::new();
         {
-            // rollups.source_id sigue siendo TEXT (v5 solo cambió events): se
-            // recupera el string por JOIN a sources. ORDER BY e.rid conserva el
-            // determinismo del last_rid. El LEFT JOIN cuenta los touches del evento.
+            // ORDER BY e.rid conserva el determinismo del last_rid. El LEFT JOIN
+            // cuenta los touches del evento.
             let mut stmt = self.conn.prepare(
-                "SELECT e.rid, e.source_ref, s.id, e.kind, e.level,
+                "SELECT e.rid, e.source_ref, e.kind, e.level,
                         COALESCE(NULLIF(e.level, ''), json_extract(e.attrs, '$.level_inferred'), ''),
                         e.at_epoch, e.title, COUNT(t.entity_id), COALESCE(MIN(t.entity_id), 0)
-                 FROM events e JOIN sources s ON s.ref = e.source_ref
+                 FROM events e
                  LEFT JOIN touches t ON t.event_rid = e.rid
                  WHERE e.rid > ?1 GROUP BY e.rid ORDER BY e.rid",
             )?;
@@ -447,14 +446,13 @@ impl Store {
             while let Some(r) = rows.next()? {
                 let rid: i64 = r.get(0)?;
                 let source_ref: i64 = r.get(1)?;
-                let source_id: String = r.get(2)?;
-                let kind: String = r.get(3)?;
-                let level: String = r.get(4)?;
-                let level_inf: String = r.get(5)?;
-                let at_epoch: i64 = r.get(6)?;
-                let title: String = r.get(7)?;
-                let n_touches: i64 = r.get(8)?;
-                let one_entity: i64 = r.get(9)?;
+                let kind: String = r.get(2)?;
+                let level: String = r.get(3)?;
+                let level_inf: String = r.get(4)?;
+                let at_epoch: i64 = r.get(5)?;
+                let title: String = r.get(6)?;
+                let n_touches: i64 = r.get(7)?;
+                let one_entity: i64 = r.get(8)?;
                 let template = chrono_core::templatize(&title);
                 // Un commit recibe touches de símbolos después: nunca por rollup.
                 let entity = match n_touches {
@@ -469,7 +467,7 @@ impl Store {
                 d.1 = rid;
                 if at_epoch > 0 {
                     let bucket = at_epoch - at_epoch.rem_euclid(bucket_ms);
-                    let entry = agg.entry((source_id, template, bucket)).or_insert((0, 0));
+                    let entry = agg.entry((source_ref, template, bucket)).or_insert((0, 0));
                     entry.0 += 1;
                     entry.1 = rid; // último (iteración en orden de rid → determinista)
                 }
@@ -493,9 +491,9 @@ impl Store {
             )?;
             let mut tpl_id = tx.prepare("SELECT id FROM templates WHERE source_id = ?1 AND template = ?2")?;
             let mut ins_rollup = tx.prepare(
-                "INSERT INTO rollups(source_id, template_id, bucket_epoch, count, last_rid)
+                "INSERT INTO rollups(source_ref, template_id, bucket_epoch, count, last_rid)
                  VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(source_id, template_id, bucket_epoch) DO UPDATE SET
+                 ON CONFLICT(source_ref, template_id, bucket_epoch) DO UPDATE SET
                     count = count + excluded.count,
                     last_rid = excluded.last_rid",
             )?;
@@ -527,9 +525,10 @@ impl Store {
                 tpl_cache.insert((source_id.to_string(), template.to_string()), id);
                 Ok(id)
             };
-            for ((source_id, template, bucket), (count, last_rid)) in &agg {
+            for ((source_ref, template, bucket), (count, last_rid)) in &agg {
+                let source_id = source_ids.get(source_ref).map(String::as_str).unwrap_or("");
                 let id = tpl(source_id, template, &mut n_templates)?;
-                ins_rollup.execute(params![source_id, id, bucket, count, last_rid])?;
+                ins_rollup.execute(params![source_ref, id, bucket, count, last_rid])?;
                 n_rollups += 1;
             }
             for ((source_ref, template, kind, level, level_inf, entity, bucket), (count, last_rid)) in &dagg {

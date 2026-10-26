@@ -204,14 +204,13 @@ CREATE TABLE IF NOT EXISTS templates (
 -- Rollups: conteo de eventos por (fuente, plantilla, bucket temporal). Permiten
 -- `patterns`/timeline a escala (millones de líneas) sin escanear `events`.
 CREATE TABLE IF NOT EXISTS rollups (
-    source_id    TEXT NOT NULL,
+    source_ref   INTEGER NOT NULL,       -- v6: sources.ref (antes el id en texto)
     template_id  INTEGER NOT NULL REFERENCES templates(id),
     bucket_epoch INTEGER NOT NULL,       -- inicio del bucket (múltiplo de ROLLUP_BUCKET_SECS)
     count        INTEGER NOT NULL DEFAULT 0,
     last_rid     INTEGER NOT NULL DEFAULT 0, -- v6: último evento del bucket (events.rid)
-    PRIMARY KEY (source_id, template_id, bucket_epoch)
+    PRIMARY KEY (source_ref, template_id, bucket_epoch)
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS idx_rollups_template ON rollups(template_id);
 CREATE INDEX IF NOT EXISTS idx_rollups_bucket   ON rollups(bucket_epoch);
 
 -- v6 · Rollups por dimensión (P-ESC-1): fuente × plantilla × kind × nivel ×

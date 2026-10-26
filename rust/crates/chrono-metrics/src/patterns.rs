@@ -46,8 +46,8 @@ pub fn patterns_filtered(
              FROM rollups r
              JOIN templates t ON t.id = r.template_id
              WHERE (?1 = 0 OR r.bucket_epoch >= ?1)
-               AND (?3 IS NULL OR r.source_id LIKE ?3
-                    OR r.source_id IN (SELECT id FROM sources WHERE json_extract(manifest_json, '$.alias') = ?5))
+               AND (?3 IS NULL OR r.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?3
+                                                   OR json_extract(manifest_json, '$.alias') = ?5))
                AND (?4 IS NULL OR t.template LIKE ?4)
              GROUP BY r.template_id
              ORDER BY c DESC, t.template ASC
