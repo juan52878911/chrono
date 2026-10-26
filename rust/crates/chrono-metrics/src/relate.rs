@@ -37,14 +37,17 @@ pub(crate) fn key_values_sql(key: &str) -> String {
     )
 }
 
-/// Rids con la clave `key` igual a (o, con `like`, que empieza por) el
-/// parámetro `p`. Por los índices únicos `(rel, target)` y `(key, value)`.
-pub(crate) fn key_rids_sql(key: &str, p: &str, like: bool) -> String {
-    let op = if like { "LIKE" } else { "=" };
+/// Rids con la clave `key` igual a (o, con `prefix`, que empieza por) el
+/// parámetro `p`. Por los índices únicos `(rel, target)` y `(key, value)`. El
+/// prefijo es literal y distingue mayúsculas, como la igualdad (no `LIKE`).
+pub(crate) fn key_rids_sql(key: &str, p: &str, prefix: bool) -> String {
+    let cmp = |col: &str| if prefix { format!("substr({col}, 1, length({p})) = {p}") } else { format!("{col} = {p}") };
     format!(
-        "SELECT el.event_rid FROM link_targets lt JOIN event_links el ON el.target_id = lt.id WHERE lt.rel = '{key}' AND lt.target {op} {p}
+        "SELECT el.event_rid FROM link_targets lt JOIN event_links el ON el.target_id = lt.id WHERE lt.rel = '{key}' AND {}
          UNION ALL
-         SELECT d.event_rid FROM dim_values v JOIN event_dims d ON d.dim_id = v.id WHERE v.key = '{key}' AND v.value {op} {p}"
+         SELECT d.event_rid FROM dim_values v JOIN event_dims d ON d.dim_id = v.id WHERE v.key = '{key}' AND {}",
+        cmp("lt.target"),
+        cmp("v.value")
     )
 }
 
@@ -71,7 +74,7 @@ pub(crate) fn join_clause(t: &str, raw: &str, param: &str) -> Option<(String, Op
     } else if let Some(id) = v.strip_prefix('@') {
         (format!("{t}.rid IN ({})", key_rids_of_event_sql(k, param)), Some(id.to_string()))
     } else if let Some(prefix) = v.strip_suffix('*') {
-        (format!("{t}.rid IN ({})", key_rids_sql(k, param, true)), Some(format!("{prefix}%")))
+        (format!("{t}.rid IN ({})", key_rids_sql(k, param, true)), Some(prefix.to_string()))
     } else {
         (format!("{t}.rid IN ({})", key_rids_sql(k, param, false)), Some(v.to_string()))
     })
