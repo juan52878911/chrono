@@ -514,7 +514,13 @@ fn sources(conn: &Connection) -> Result<Value> {
             })
         })
         .collect();
-    Ok(json!({"sources": items}))
+    // Secretos cambiados por <SECRET> al indexar (acumulado del índice).
+    let redacted: i64 = conn
+        .query_row("SELECT value FROM meta WHERE key = 'redacted_total'", [], |r| r.get::<_, String>(0))
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    Ok(json!({"sources": items, "secrets_redacted": redacted}))
 }
 
 pub(crate) fn hotspots(conn: &Connection, since_epoch: i64) -> Result<Value> {

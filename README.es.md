@@ -178,6 +178,10 @@ El servidor se lanza bajo demanda y muere con la sesión (serverless). Auto-desc
 
 `chrono init` crea `.chrono/config.json`, versionable y ajustable por repo: `fix_keywords`, `ticket_patterns`, `exclude_globs`, `bug_labels`, y `bug_categories` (taxonomía `categoría → palabras clave` para clasificar los fixes).
 
+Los secretos (tokens de proveedores, JWT, `Bearer …`, contraseñas en URLs, valores tipo `password=…`, claves
+privadas) se cambian por `<SECRET>` antes de entrar al índice; `sources` dice cuántos. Para guardar una fuente tal
+cual: `"source_options": {"app.log": {"redact": "off"}}`.
+
 ---
 
 ## Idioma

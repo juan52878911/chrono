@@ -634,6 +634,9 @@ fn ingest_source(
     if max_events > 0 {
         let _ = store.set_meta("max_events_per_source", &max_events.to_string());
     }
+    // Secretos fuera del índice salvo `"redact": "off"` en las opciones de la fuente.
+    let redact = source_cfg.options.get("redact").map(String::as_str) != Some("off");
+    let mut redacted = 0usize;
     let classifier = RulesClassifier::new(cfg);
     // Nod es telemetría del PROCESO (sesiones con agentes), no cambios del
     // repo: no se clasifica (un tool `fix_*` o un prompt no son un fix).
@@ -674,6 +677,9 @@ fn ingest_source(
                     }
                     ev.body.truncate(cut);
                 }
+                if redact {
+                    redacted += chrono_core::redact_event(&mut ev);
+                }
                 w.add_event(&ev)?;
                 if classify {
                     let labels = classifier.classify(&ev);
@@ -701,6 +707,11 @@ fn ingest_source(
         }
     }
 
+    if redacted > 0 {
+        // Acumulado del índice (no por fuente ni por sync): `sources` lo enseña.
+        let prev: usize = store.meta("redacted_total")?.and_then(|v| v.parse().ok()).unwrap_or(0);
+        store.set_meta("redacted_total", &(prev + redacted).to_string())?;
+    }
     let wm = cur.watermark();
     let manifest = cur.manifest();
     Ok((count, wm, manifest))

@@ -205,6 +205,10 @@ The server starts on demand and dies with the session (serverless). It auto-disc
 - **bug_labels**: PR/issue labels that count as a bug (deterministic forge signal).
 - **bug_categories**: taxonomy `category → keywords` used to classify fixes.
 
+Secrets (provider tokens, JWTs, `Bearer …`, passwords in URLs, `password=…`-style values, private keys) are
+replaced by `<SECRET>` before anything reaches the index; `sources` reports how many. To keep a source verbatim:
+`"source_options": {"app.log": {"redact": "off"}}`.
+
 ---
 
 ## Language
