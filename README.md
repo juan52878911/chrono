@@ -58,9 +58,9 @@ Detects your platform, downloads the matching binary from the latest release, ve
 curl -fsSL https://raw.githubusercontent.com/juan52878911/chrono/main/install.sh | sh
 ```
 
-No clone, no Go, no compiler. Works on macOS (Apple Silicon & Intel) and Linux (x86-64 & arm64).
+No clone, no compiler. Works on macOS (Apple Silicon & Intel) and Linux (x86-64 & arm64).
 
-- Pin a version: `curl -fsSL https://raw.githubusercontent.com/juan52878911/chrono/main/install.sh | VERSION=v0.1.0 sh`
+- Pin a version: `curl -fsSL https://raw.githubusercontent.com/juan52878911/chrono/main/install.sh | VERSION=v0.6.0 sh`
 - Choose the install dir: `... | PREFIX="$HOME/.local/bin" sh`
 - By default it installs to `/usr/local/bin` when writable, otherwise `~/.local/bin` (the script prints a PATH hint if needed).
 
@@ -70,15 +70,15 @@ Download the `.tar.gz` for your platform from the [Releases page](https://github
 
 **macOS (Apple Silicon / M1–M4):**
 ```bash
-tar -xzf chrono-v0.1.0-darwin-arm64.tar.gz
-sudo mv chrono-v0.1.0-darwin-arm64/chrono /usr/local/bin/
+tar -xzf chrono-vX.Y.Z-darwin-arm64.tar.gz
+sudo mv chrono-vX.Y.Z-darwin-arm64/chrono /usr/local/bin/
 ```
 **macOS (Intel):** use `...-darwin-amd64.tar.gz`.
 
 **Linux x86-64 (Debian/Ubuntu, Arch, …):**
 ```bash
-tar -xzf chrono-v0.1.0-linux-amd64.tar.gz
-sudo install -m755 chrono-v0.1.0-linux-amd64/chrono /usr/local/bin/chrono
+tar -xzf chrono-vX.Y.Z-linux-amd64.tar.gz
+sudo install -m755 chrono-vX.Y.Z-linux-amd64/chrono /usr/local/bin/chrono
 ```
 > The Linux binary is **static** (no system dependencies): the same file works on Debian, Ubuntu, Arch, Alpine, etc.
 
@@ -104,7 +104,7 @@ The Nix package wraps `git` and `gh` automatically.
 
 ### Verify
 ```bash
-chrono version        # -> chrono v0.1.0
+chrono version        # -> chrono X.Y.Z
 ```
 
 ---

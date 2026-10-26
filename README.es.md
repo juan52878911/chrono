@@ -61,7 +61,7 @@ curl -fsSL https://raw.githubusercontent.com/juan52878911/chrono/main/install.sh
 
 Sin clonar, sin compilador. Funciona en macOS (Apple Silicon e Intel) y Linux (x86-64 y arm64).
 
-- Fijar una versión: `curl -fsSL https://raw.githubusercontent.com/juan52878911/chrono/main/install.sh | VERSION=v0.1.0 sh`
+- Fijar una versión: `curl -fsSL https://raw.githubusercontent.com/juan52878911/chrono/main/install.sh | VERSION=v0.6.0 sh`
 - Elegir el directorio de instalación: `... | PREFIX="$HOME/.local/bin" sh`
 - Por defecto instala en `/usr/local/bin` si tiene permisos; si no, en `~/.local/bin` (el script te avisa si hay que añadirlo al `PATH`).
 
@@ -71,15 +71,15 @@ Descarga el `.tar.gz` de tu plataforma desde la [página de Releases](https://gi
 
 **macOS (Apple Silicon / M1–M4):**
 ```bash
-tar -xzf chrono-v0.1.0-darwin-arm64.tar.gz
-sudo mv chrono-v0.1.0-darwin-arm64/chrono /usr/local/bin/
+tar -xzf chrono-vX.Y.Z-darwin-arm64.tar.gz
+sudo mv chrono-vX.Y.Z-darwin-arm64/chrono /usr/local/bin/
 ```
 **macOS (Intel):** usa `...-darwin-amd64.tar.gz`.
 
 **Linux x86-64 (Debian/Ubuntu, Arch, …):**
 ```bash
-tar -xzf chrono-v0.1.0-linux-amd64.tar.gz
-sudo install -m755 chrono-v0.1.0-linux-amd64/chrono /usr/local/bin/chrono
+tar -xzf chrono-vX.Y.Z-linux-amd64.tar.gz
+sudo install -m755 chrono-vX.Y.Z-linux-amd64/chrono /usr/local/bin/chrono
 ```
 > El binario de Linux es **estático** (sin dependencias de sistema): el mismo archivo vale para Debian, Ubuntu, Arch, Alpine, etc.
 

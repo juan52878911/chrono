@@ -10,15 +10,22 @@
 # Order of preference:
 #   1. Prebuilt tarball in ./dist for your platform (when run from a checkout)
 #   2. Download the matching binary from the GitHub release + verify SHA256
-#   3. Build from source with Go
+#   3. Build from source with cargo (from a checkout, when there is no downloader)
 #
 # Env overrides:
-#   VERSION=v0.6.0   pin a release (default: latest)
+#   VERSION=vX.Y.Z   pin a release (default: latest)
 #   PREFIX=/usr/local/bin   install dir (default: /usr/local/bin if writable, else ~/.local/bin)
 set -eu
 
 REPO="juan52878911/chrono"
 VERSION="${VERSION:-}"
+# Version used when the latest release can't be resolved. From a checkout it
+# comes from rust/Cargo.toml; the constant is only for the curl | sh one-liner.
+DEFAULT_VERSION="v0.6.0"
+if [ -f rust/Cargo.toml ]; then
+  v=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -n1)
+  if [ -n "$v" ]; then DEFAULT_VERSION="v$v"; fi
+fi
 
 # --- pick an install dir on PATH -------------------------------------------
 if [ -z "${PREFIX:-}" ]; then
@@ -91,7 +98,7 @@ install_from_tarball() { # install_from_tarball TARBALL
 }
 
 # --- 1) local tarball from a checkout ---------------------------------------
-localtar="dist/chrono-${VERSION:-v0.6.0}-$os-$arch.tar.gz"
+localtar="dist/chrono-${VERSION:-$DEFAULT_VERSION}-$os-$arch.tar.gz"
 if [ -f "$localtar" ]; then
   echo "Installing prebuilt binary from $localtar ($os/$arch)..."
   install_from_tarball "$localtar"
@@ -100,7 +107,7 @@ if [ -f "$localtar" ]; then
 elif have curl || have wget; then
   if [ -z "$VERSION" ]; then
     VERSION=$(resolve_latest || true)
-    [ -n "$VERSION" ] || VERSION="v0.6.0"
+    [ -n "$VERSION" ] || VERSION="$DEFAULT_VERSION"
   fi
   asset="chrono-$VERSION-$os-$arch.tar.gz"
   base="https://github.com/$REPO/releases/download/$VERSION"
