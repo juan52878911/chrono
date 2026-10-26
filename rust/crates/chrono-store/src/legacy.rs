@@ -55,6 +55,14 @@ impl std::fmt::Display for SchemaMismatch {
 
 impl std::error::Error for SchemaMismatch {}
 
+/// El error de abrir un índice dice que el fichero no es una base SQLite o que
+/// está dañado (y no que esté ocupado, sin permisos o inaccesible): lo único que
+/// justifica apartarlo y crear otro.
+pub fn is_corrupt(e: &(dyn std::error::Error + 'static)) -> bool {
+    use rusqlite::ErrorCode::{DatabaseCorrupt, NotADatabase};
+    e.downcast_ref::<rusqlite::Error>().and_then(rusqlite::Error::sqlite_error_code).is_some_and(|c| matches!(c, NotADatabase | DatabaseCorrupt))
+}
+
 /// Las fuentes registradas en un índice de cualquier versión, en el orden en
 /// que se añadieron, sin comprobar el esquema ni escribir nada.
 pub fn read_sources_any_version(path: &Path) -> Result<Vec<SourceRow>> {

@@ -9,7 +9,7 @@ mod legacy;
 mod store;
 mod writer;
 
-pub use legacy::{count_events_any_version, read_meta_any_version, read_sources_any_version, SchemaMismatch};
+pub use legacy::{count_events_any_version, is_corrupt, read_meta_any_version, read_sources_any_version, SchemaMismatch};
 pub use store::{SourceRow, Store};
 pub use writer::{Writer, WriterCaches};
 

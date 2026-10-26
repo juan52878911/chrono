@@ -676,17 +676,23 @@ fn lock_ingest(db: &Path) -> Result<std::fs::File> {
 }
 
 /// Abre el índice para `init`, que lo rehace con una sola fuente (`source_id`).
-/// Si es de otro esquema:
+/// Si ya tiene otras fuentes (añadidas con `add`), `init` las borraría: error
+/// que dice cuáles y manda a `sync`/`reindex`/`add`, del esquema que sea. Si no:
 /// - de un chrono más nuevo, error (actualizar chrono; no se toca);
-/// - más viejo y con otras fuentes además de esta (añadidas con `add`), error
-///   que manda a `chrono reindex`, que las rehace todas: antes se borraba y se
-///   perdían, con un mensaje que decía a la vez «reindex» y «desde cero»;
 /// - más viejo y sin más fuentes que esta, se borra y se crea de nuevo.
 ///
-/// Un fichero que no es un índice (corrupto, otra cosa) se rehace como antes.
+/// Un fichero dañado o que no es un índice se aparta como `<db>.corrupt.bak` y
+/// se crea otro. Cualquier otro error al abrir (ocupado, sin permisos) se
+/// devuelve sin tocar nada: antes todo caía en «ilegible» y se borraba.
 fn open_or_recreate(db: &Path, source_id: &str, explicit_db: bool) -> Result<Store> {
     let e = match Store::open(db) {
-        Ok(s) => return Ok(s),
+        Ok(s) => {
+            let others: Vec<String> = s.list_sources()?.into_iter().map(|s| s.id).filter(|id| id != source_id).collect();
+            if !others.is_empty() {
+                return Err(init_would_drop(db, None, &others, explicit_db).into());
+            }
+            return Ok(s);
+        }
         Err(e) if db.exists() => e,
         Err(e) => return Err(e),
     };
@@ -700,36 +706,81 @@ fn open_or_recreate(db: &Path, source_id: &str, explicit_db: bool) -> Result<Sto
                 .filter(|id| id != source_id)
                 .collect();
             if !others.is_empty() {
-                let cmd = if explicit_db { format!("chrono --db {} reindex", db.display()) } else { "chrono reindex".to_string() };
-                return Err(t(
-                    format!(
-                        "the index {} was built by an older chrono (schema {}) and has {} more source(s) that init would drop ({}).\n\
-                         Rebuild it with all its sources: {cmd}  (or delete it to start over with this one only)",
-                        db.display(), m.found_label(), others.len(), others.join(", ")
-                    ),
-                    format!(
-                        "el índice {} es de una versión anterior de chrono (esquema {}) y tiene {} fuente(s) más que init perdería ({}).\n\
-                         Reconstrúyelo con todas sus fuentes: {cmd}  (o bórralo para empezar solo con esta)",
-                        db.display(), m.found_label(), others.len(), others.join(", ")
-                    ),
-                )
-                .into());
+                return Err(init_would_drop(db, Some(&m.found_label()), &others, explicit_db).into());
             }
             t(
                 format!("chrono: index from an older chrono (schema {}) with no other source; building it again", m.found_label()),
                 format!("chrono: índice de una versión anterior (esquema {}) sin más fuentes; se crea de nuevo", m.found_label()),
             )
         }
-        None => t(
-            format!("chrono: unreadable index ({e}); building it again"),
-            format!("chrono: índice ilegible ({e}); se crea de nuevo"),
-        ),
+        None if chrono_store::is_corrupt(&*e) => {
+            let bak = PathBuf::from(format!("{}.corrupt.bak", db.display()));
+            if bak.exists() {
+                return Err(t(
+                    format!("the index {} is damaged ({e}) and {} already exists: move one of them away and run init again", db.display(), bak.display()),
+                    format!("el índice {} está dañado ({e}) y ya existe {}: aparta uno de los dos y repite init", db.display(), bak.display()),
+                )
+                .into());
+            }
+            std::fs::rename(db, &bak)?;
+            for suffix in ["-wal", "-shm"] {
+                let side = format!("{}{suffix}", db.display());
+                if Path::new(&side).exists() {
+                    std::fs::rename(&side, format!("{}{suffix}", bak.display()))?;
+                }
+            }
+            t(
+                format!("chrono: damaged index ({e}); kept as {} and building a new one", bak.display()),
+                format!("chrono: índice dañado ({e}); se guarda como {} y se crea otro", bak.display()),
+            )
+        }
+        None => {
+            return Err(t(
+                format!("can't open the index {}: {e}. Nothing was touched (if another process holds it, wait; check its permissions)", db.display()),
+                format!("no se pudo abrir el índice {}: {e}. No se ha tocado nada (si otro proceso lo tiene, espera; revisa sus permisos)", db.display()),
+            )
+            .into())
+        }
     };
     eprintln!("{msg}");
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", db.display()));
     }
     Store::open(db)
+}
+
+/// Error de `init` sobre un índice con más fuentes que la suya: rehacerlo con
+/// una sola las borraría. `old_schema`: el esquema, si es de un chrono anterior.
+fn init_would_drop(db: &Path, old_schema: Option<&str>, others: &[String], explicit_db: bool) -> String {
+    let pre = if explicit_db { format!("chrono --db {} ", db.display()) } else { "chrono ".to_string() };
+    match old_schema {
+        Some(v) => t(
+            format!(
+                "the index {} was built by an older chrono (schema {v}) and has {} more source(s) that init would drop ({}).\n\
+                 Rebuild it with all its sources: {pre}reindex  (or delete it to start over with this one only)",
+                db.display(), others.len(), others.join(", ")
+            ),
+            format!(
+                "el índice {} es de una versión anterior de chrono (esquema {v}) y tiene {} fuente(s) más que init perdería ({}).\n\
+                 Reconstrúyelo con todas sus fuentes: {pre}reindex  (o bórralo para empezar solo con esta)",
+                db.display(), others.len(), others.join(", ")
+            ),
+        ),
+        None => t(
+            format!(
+                "the index {} already has {} more source(s) that init would drop ({}).\n\
+                 To update them all: {pre}sync · to reread only this one: {pre}add <path> · to rebuild everything: {pre}reindex  \
+                 (or delete the index to start over with this one only)",
+                db.display(), others.len(), others.join(", ")
+            ),
+            format!(
+                "el índice {} ya tiene {} fuente(s) más que init borraría ({}).\n\
+                 Para ponerlas todas al día: {pre}sync · para releer solo esta: {pre}add <ruta> · para rehacerlo todo: {pre}reindex  \
+                 (o borra el índice para empezar solo con esta)",
+                db.display(), others.len(), others.join(", ")
+            ),
+        ),
+    }
 }
 
 /// De dónde salen las opciones de una ingesta y, en una fuente glob, a qué

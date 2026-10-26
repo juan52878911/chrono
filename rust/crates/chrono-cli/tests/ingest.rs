@@ -232,6 +232,65 @@ fn init_sobre_un_indice_viejo_no_pierde_las_fuentes_anadidas() {
     assert_eq!(env.sql("SELECT value FROM meta WHERE key = 'schema_version'"), ["7"]);
 }
 
+#[test]
+fn init_repetido_no_borra_las_fuentes_anadidas() {
+    let env = Env::new("init-repetido", r#"{"version":2}"#);
+    let line = "{\"ts\":\"2024-01-01T00:00:00Z\",\"msg\":\"hola\"}\n";
+    write(env.dir(), "app.jsonl", line);
+    write(env.dir(), "logs/a.jsonl", &line.repeat(3));
+    let app = path_s(&env.dir().join("app.jsonl"));
+    env.ok(&["init", &app]);
+    env.ok(&["add", &path_s(&env.dir().join("logs/*.jsonl")), "--as", "jsonl"]);
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["4"]);
+
+    // Antes: 1 fuente y los 3 eventos de la glob perdidos, sin aviso.
+    let out = env.run(&["init", &app, "--db", &env.db()]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("would drop") && err.contains("logs/*.jsonl") && err.contains("sync"), "{err}");
+    assert_eq!(env.sql("SELECT COUNT(*) FROM sources"), ["2"]);
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["4"]);
+
+    // Con solo su fuente, init se repite como siempre.
+    let solo = Env::new("init-repetido-solo", r#"{"version":2}"#);
+    write(solo.dir(), "app.jsonl", line);
+    let app = path_s(&solo.dir().join("app.jsonl"));
+    solo.ok(&["init", &app]);
+    solo.ok(&["init", &app]);
+    assert_eq!(solo.sql("SELECT COUNT(*) FROM events"), ["1"]);
+}
+
+#[test]
+fn init_aparta_un_indice_danado_y_no_toca_uno_que_no_puede_abrir() {
+    let env = Env::new("init-danado", r#"{"version":2}"#);
+    write(env.dir(), "app.jsonl", "{\"ts\":\"2024-01-01T00:00:00Z\",\"msg\":\"hola\"}\n");
+    let app = path_s(&env.dir().join("app.jsonl"));
+    // Algo que no es un índice: se guarda aparte (no se borra) y se crea otro.
+    std::fs::write(env.db(), "esto no es sqlite, pero es mío ".repeat(200)).unwrap();
+    let out = env.ok(&["init", &app]);
+    assert!(out.contains("corrupt.bak"), "{out}");
+    let bak = std::fs::read_to_string(format!("{}.corrupt.bak", env.db())).unwrap();
+    assert!(bak.starts_with("esto no es sqlite"));
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["1"]);
+
+    // Sin permisos de lectura (como root se leería igual: no hay nada que probar).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let size = std::fs::metadata(env.db()).unwrap().len();
+        std::fs::set_permissions(env.db(), std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(env.db()).is_err() {
+            let out = env.run(&["init", &app, "--db", &env.db()]);
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(!out.status.success() && err.contains("Nothing was touched"), "{err}");
+            std::fs::set_permissions(env.db(), std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(std::fs::metadata(env.db()).unwrap().len(), size);
+            assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["1"]);
+        }
+        std::fs::set_permissions(env.db(), std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+}
+
 /// `tail` durante un ciclo y se mata (no termina solo).
 fn tail_once(env: &Env, then: impl FnOnce()) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_chrono"))
