@@ -41,7 +41,36 @@ impl Store {
     /// versión de esquema distinta, devuelve `Err` (el llamador debe reindexar).
     /// Aplica los PRAGMAs de ingesta rápida (el índice es regenerable).
     pub fn open(path: &Path) -> Result<Store> {
-        let conn = Connection::open(path)?;
+        Store::open_with(path, true)
+    }
+
+    /// Con varias aperturas a la vez sobre un fichero nuevo, el paso a WAL y la
+    /// creación del esquema pueden dar `SQLITE_BUSY` sin pasar por el
+    /// `busy_timeout` (SQLite no espera si podría haber un interbloqueo): se
+    /// reintenta la apertura entera durante unos segundos.
+    fn open_with(path: &Path, create: bool) -> Result<Store> {
+        let start = std::time::Instant::now();
+        loop {
+            match Store::try_open(path, create) {
+                Err(e) if is_busy(&*e) && start.elapsed() < std::time::Duration::from_secs(10) => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                r => return r,
+            }
+        }
+    }
+
+    fn try_open(path: &Path, create: bool) -> Result<Store> {
+        let conn = if create {
+            Connection::open(path)?
+        } else {
+            // Una consulta sobre una ruta sin índice no deja un `.db` vacío.
+            if !path.is_file() {
+                return Err(format!("no hay índice en {} (créalo con chrono init)", path.display()).into());
+            }
+            use rusqlite::OpenFlags;
+            Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX)?
+        };
 
         // PRAGMAs de conexión: se pierden al reabrir, así que se reaplican siempre.
         // `foreign_keys = OFF`: el índice es un derivado regenerable y el `Writer`
@@ -50,22 +79,45 @@ impl Store {
         // añadía una búsqueda aleatoria extra en la PK de `events` por cada
         // touch/label (medido: cuello de ingesta a escala). `wal_autocheckpoint`
         // acota el WAL entre lotes de ingesta (ver `ingest` por lotes en el CLI).
+        // `busy_timeout` primero: el cambio a WAL también espera si otro proceso
+        // está creando el mismo índice.
         conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
+            "PRAGMA busy_timeout = 5000;
+             PRAGMA journal_mode = WAL;
              PRAGMA foreign_keys = OFF;
-             PRAGMA busy_timeout = 5000;
              PRAGMA wal_autocheckpoint = 10000;",
         )?;
 
-        let is_new = !table_exists(&conn, "meta")?;
+        // El esquema se crea en una transacción IMMEDIATE y se vuelve a mirar
+        // dentro: con varias consultas a la vez sobre una ruta nueva, otra veía
+        // `meta` sin `schema_version` todavía y daba un falso «esquema ?».
+        let mut is_new = !table_exists(&conn, "meta")?;
         if is_new {
-            conn.execute_batch(crate::schema_sql())?;
-            conn.execute(
-                "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![SCHEMA_VERSION.to_string()],
-            )?;
-        } else {
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            let r = (|| -> Result<bool> {
+                if table_exists(&conn, "meta")? {
+                    return Ok(false);
+                }
+                conn.execute_batch(crate::schema_sql())?;
+                conn.execute(
+                    "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![SCHEMA_VERSION.to_string()],
+                )?;
+                Ok(true)
+            })();
+            match r {
+                Ok(created) => {
+                    conn.execute_batch("COMMIT")?;
+                    is_new = created;
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(e);
+                }
+            }
+        }
+        if !is_new {
             let version: Option<String> = conn
                 .query_row(
                     "SELECT value FROM meta WHERE key = 'schema_version'",
@@ -105,7 +157,7 @@ impl Store {
     /// el RSS de 440-613 MB a 24-77 MB con el mismo tiempo en las consultas
     /// filtradas; `informe` tarda un 27 % más (9,5 → 12,1 s) mientras recorra `events`.
     pub fn open_read(path: &Path) -> Result<Store> {
-        let store = Store::open(path)?;
+        let store = Store::open_with(path, false)?;
         store.conn.execute_batch(
             "PRAGMA cache_size = -16384;
              PRAGMA mmap_size = 0;",
@@ -723,10 +775,28 @@ impl Store {
 /// hacer) y la espera no corta a los 5 s del `busy_timeout`: copiar los links de
 /// un índice grande tarda más.
 fn migrate_v6_links(conn: &Connection) -> Result<()> {
-    conn.busy_timeout(std::time::Duration::from_secs(600))?;
+    let wait = MIGRATION_WAIT_MS.with(std::cell::Cell::get);
+    conn.busy_timeout(std::time::Duration::from_millis(wait))?;
     let r = migrate_v6_links_locked(conn);
     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
-    r
+    // Tras la espera, un «database is locked» a secas no decía qué pasaba.
+    r.map_err(|e| {
+        if is_busy(&*e) {
+            format!(
+                "otro proceso sigue migrando el índice (v6 → v7) tras {} s de espera: deja que acabe y repite ({e})",
+                wait / 1000
+            )
+            .into()
+        } else {
+            e
+        }
+    })
+}
+
+thread_local! {
+    /// Cuánto espera la migración v6 → v7 a otra que esté en curso (ms; los
+    /// tests lo acortan en su hilo).
+    pub(crate) static MIGRATION_WAIT_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(600_000) };
 }
 
 fn migrate_v6_links_locked(conn: &Connection) -> Result<()> {
@@ -766,6 +836,13 @@ fn migrate_v6_links_locked(conn: &Connection) -> Result<()> {
         let _ = conn.execute_batch("ROLLBACK");
     }
     Ok(r?)
+}
+
+/// Error de SQLite «ocupado» o «bloqueado».
+fn is_busy(e: &(dyn std::error::Error + 'static)) -> bool {
+    e.downcast_ref::<rusqlite::Error>()
+        .and_then(rusqlite::Error::sqlite_error_code)
+        .is_some_and(|c| matches!(c, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
 }
 
 fn table_exists(conn: &Connection, name: &str) -> Result<bool> {

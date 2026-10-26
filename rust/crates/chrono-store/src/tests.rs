@@ -486,3 +486,55 @@ fn la_migracion_v6_con_aperturas_simultaneas_no_falla() {
     let n: i64 = store.conn().query_row("SELECT COUNT(*) FROM links", [], |r| r.get(0)).unwrap();
     assert_eq!(n, 200_000);
 }
+
+/// Esperar a otra migración más de la cuenta da un error que lo dice, no un
+/// «database is locked» a secas.
+#[test]
+fn la_espera_de_otra_migracion_agotada_lo_dice() {
+    let db = TempDb::new("v6-espera");
+    let conn = rusqlite::Connection::open(db.path()).unwrap();
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         INSERT INTO meta VALUES ('schema_version', '6');
+         CREATE TABLE links(event_rid INTEGER NOT NULL, rel TEXT NOT NULL, target TEXT NOT NULL,
+                            PRIMARY KEY (event_rid, rel, target)) WITHOUT ROWID;
+         BEGIN IMMEDIATE;",
+    )
+    .unwrap();
+    crate::store::MIGRATION_WAIT_MS.with(|w| w.set(300));
+    let err = Store::open(db.path()).err().expect("con la migración de otro en curso no abre").to_string();
+    assert!(err.contains("otro proceso sigue migrando"), "{err}");
+    conn.execute_batch("ROLLBACK").unwrap();
+}
+
+/// Varias aperturas a la vez sobre una ruta nueva: una crea el esquema y las
+/// demás lo ven entero (antes alguna veía `meta` sin versión: «esquema ?»).
+#[test]
+fn aperturas_simultaneas_sobre_una_ruta_nueva_no_fallan() {
+    for round in 0..5 {
+        let db = TempDb::new(&format!("nueva-a-la-vez-{round}"));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(6));
+        let handles: Vec<_> = (0..6)
+            .map(|_| {
+                let (path, barrier) = (db.path().to_path_buf(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Store::open(&path).map(|_| ()).map_err(|e| e.to_string())
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap().expect("ninguna apertura ve el esquema a medias");
+        }
+    }
+}
+
+/// Una consulta sobre una ruta sin índice falla diciéndolo y no crea un `.db` vacío.
+#[test]
+fn open_read_sin_indice_no_crea_nada() {
+    let db = TempDb::new("sin-indice");
+    let err = Store::open_read(db.path()).err().expect("sin índice no abre").to_string();
+    assert!(err.contains("no hay índice"), "{err}");
+    assert!(!db.path().exists());
+}
