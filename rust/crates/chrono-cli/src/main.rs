@@ -42,7 +42,7 @@ Index:
   sync [path]          Process only the delta since the last watermark (all sources).
   config check         Validate .chrono/config.json: each problem with its key path.
 
-Queries (JSON, schema_version 2: `entity`/`id`; add --compact for a plain-text table of `result`
+Queries (JSON with `schema_version`, `entity`/`id`; add --compact for a plain-text table of `result`
 only, without metadata: about 2-5x smaller and byte-identical for the same index, meant for agents):
   hotspots             Entities that change most and weigh most.
   coupling <entity>    What changes together with this entity.
@@ -111,14 +111,18 @@ Diagnostics:
   bench                Measure query latencies + index stats on this index.
 
 Integration:
-  mcp                  MCP server (wired separately).
+  mcp                  MCP server over stdio: the same queries as tools (informe, top, patterns…).
+                       Uses --db PATH or auto-discovers the index; without one, tools ask for chrono init.
+  hook <mode>          Claude Code hook (intermediary: prompt, read, after-read, post, stop, prefetch,
+                       after-edit, loki-index); reads the hook event JSON on stdin. Set CHRONO_INTERMEDIARIO=0 to disable.
 
 Options:
   --db PATH            Explicit index (otherwise auto-discovers .chrono/index.db).
   --since DATE         Time window (e.g. 2025-01-01).
   --lang en|es         Message language (default: auto from OS locale).
+  -h, --help           Help for a command (chrono top --help, chrono help top).
 
-Other: version, help
+Other: version, help [command]
 ";
 
 const USAGE_ES: &str = "chrono {v} — conocimiento del historial de Git, acotado para una IA (port Rust).
@@ -137,7 +141,8 @@ Uso:
   sync [ruta]          Procesa solo el delta desde la última marca (todas las fuentes).
   config check         Valida .chrono/config.json: cada problema con la ruta de su clave.
 
-Consulta (JSON, schema_version 2: `entity`/`id`):
+Consulta (JSON con `schema_version`, `entity`/`id`; con --compact, una tabla de texto solo con
+`result`, sin metadatos: 2-5 veces más pequeña e idéntica byte a byte para el mismo índice, pensada para agentes):
   hotspots             Entidades que más cambian y más pesan.
   coupling <entity>    Qué cambia junto a esta entidad.
   owners <ruta>        Propiedad por autor y bus factor.
@@ -206,14 +211,18 @@ Diagnóstico:
   bench                Mide latencias de consulta + estadísticas del índice.
 
 Integración:
-  mcp                  Servidor MCP (se cablea aparte).
+  mcp                  Servidor MCP por stdio: las mismas consultas como tools (informe, top, patterns…).
+                       Usa --db RUTA o autodescubre el índice; sin él, las tools piden chrono init.
+  hook <modo>          Hook de Claude Code (intermediario: prompt, read, after-read, post, stop, prefetch,
+                       after-edit, loki-index); lee el JSON del evento por stdin. CHRONO_INTERMEDIARIO=0 lo apaga.
 
 Opciones:
   --db RUTA            Índice explícito (si no, se auto-descubre .chrono/index.db).
   --since FECHA        Ventana temporal (p.ej. 2025-01-01).
   --lang en|es         Idioma de los mensajes (por defecto: auto según el SO).
+  -h, --help           Ayuda de un comando (chrono top --help, chrono help top).
 
-Otros: version, help
+Otros: version, help [comando]
 ";
 
 #[derive(Default)]
@@ -250,6 +259,10 @@ struct Flags {
     session: Option<String>,
     hotspots: Option<String>,
     compact: bool,
+    /// `-h`/`--help` en cualquier posición: ayuda del subcomando, sin abrir el índice.
+    help: bool,
+    /// Flags que no reconoce ninguna consulta (se ignoran, con aviso).
+    unknown: Vec<String>,
     pos: Vec<String>,
 }
 
@@ -381,7 +394,8 @@ fn parse_args(args: &[String]) -> Flags {
                 i += 1;
                 f.hotspots = Some(args[i].clone());
             }
-            a if a.starts_with("--") && a != "--version" && a != "--help" => {}
+            "--help" | "-h" => f.help = true,
+            a if a.starts_with("--") && a != "--version" => f.unknown.push(a.to_string()),
             a => f.pos.push(a.to_string()),
         }
         i += 1;
@@ -392,6 +406,62 @@ fn parse_args(args: &[String]) -> Flags {
 fn usage() -> String {
     let raw = t(USAGE_EN, USAGE_ES);
     raw.replace("{v}", VERSION)
+}
+
+/// Ayuda de un subcomando, sacada de la general para que no haya dos textos:
+/// su entrada (la línea que empieza por `  <cmd>` y las continuaciones más
+/// sangradas), las notas comunes de su sección (las líneas `  --…`, p. ej. los
+/// filtros de las consultas log-native, solo en las que los aceptan) y las
+/// opciones globales. `None` si el subcomando no tiene entrada propia.
+fn command_help(cmd: &str) -> Option<String> {
+    const WITH_FILTERS: [&str; 7] = ["timeline", "stats", "top", "patterns", "events", "precede", "informe"];
+    let full = usage();
+    let mut entry = String::new();
+    let mut notes = String::new();
+    let mut options = String::new();
+    for section in full.split("\n\n") {
+        let mut lines = section.lines();
+        let heading = lines.next().unwrap_or("");
+        let is_options = heading.starts_with("Options") || heading.starts_with("Opciones");
+        let mut in_entry = false;
+        let mut sec_notes = String::new();
+        let mut found = false;
+        for l in lines {
+            let body = l.trim_start();
+            let indent = l.len() - body.len();
+            if is_options {
+                options.push_str(l);
+                options.push('\n');
+                continue;
+            }
+            if indent == 2 {
+                in_entry = body.split_whitespace().next() == Some(cmd);
+                if body.starts_with('-') {
+                    sec_notes.push_str(l);
+                    sec_notes.push('\n');
+                }
+            } else if indent < 2 {
+                in_entry = false;
+            }
+            if in_entry {
+                entry.push_str(l);
+                entry.push('\n');
+                found = true;
+            }
+        }
+        if found {
+            notes = sec_notes;
+        }
+    }
+    if entry.is_empty() {
+        return None;
+    }
+    let mut out = format!("chrono {cmd}\n\n{entry}");
+    if !notes.is_empty() && WITH_FILTERS.contains(&cmd) {
+        out.push_str(&format!("\n{}\n{notes}", t("Filters:", "Filtros:")));
+    }
+    out.push_str(&format!("\n{}\n{options}", t("Options:", "Opciones:")));
+    Some(out)
 }
 
 /// Ejecuta las fuentes de comando de la config (todas, o solo `only`) y
@@ -473,6 +543,28 @@ fn main() {
     let mut f = parse_args(&args);
     i18n::init(f.lang.as_deref());
 
+    // `chrono <cmd> -h|--help` y `chrono help <cmd>`: la ayuda, sin abrir el
+    // índice ni ejecutar nada (antes `top --help` tomaba `--help` como dim y
+    // `mcp --help` arrancaba el servidor).
+    let help_of = match f.pos.first().map(String::as_str) {
+        Some("help") => Some(f.pos.get(1).cloned()),
+        _ if f.help => Some(f.pos.first().cloned()),
+        _ => None,
+    };
+    if let Some(cmd) = help_of {
+        print!("{}", cmd.as_deref().and_then(command_help).unwrap_or_else(usage));
+        return;
+    }
+    for u in &f.unknown {
+        eprintln!(
+            "{}",
+            t(
+                format!("chrono: warning: unknown flag {u} (ignored; see chrono help)"),
+                format!("chrono: aviso: flag desconocida {u} (se ignora; ver chrono help)"),
+            )
+        );
+    }
+
     let Some(cmd) = f.pos.first().map(String::as_str) else {
         eprint!("{}", usage());
         std::process::exit(2);
@@ -481,10 +573,6 @@ fn main() {
     match cmd {
         "version" | "--version" | "-v" => {
             println!("chrono {VERSION}");
-            return;
-        }
-        "help" | "--help" | "-h" => {
-            print!("{}", usage());
             return;
         }
         "config" => {
@@ -779,6 +867,18 @@ mod tests {
     fn flags_desconocidas_se_ignoran() {
         let f = parse_args(&args(&["hotspots", "--foo", "bar"]));
         assert_eq!(f.pos, vec!["hotspots", "bar"]);
+        assert_eq!(f.unknown, vec!["--foo"]);
+    }
+
+    #[test]
+    fn help_no_es_un_posicional() {
+        for h in ["--help", "-h"] {
+            let f = parse_args(&args(&["top", h, "--grep", "-h"]));
+            assert!(f.help);
+            assert_eq!(f.pos, vec!["top"]);
+            // El valor de una flag nunca se toma por -h.
+            assert_eq!(f.grep.as_deref(), Some("-h"));
+        }
     }
 
     #[test]
