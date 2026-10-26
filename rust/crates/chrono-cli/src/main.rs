@@ -592,6 +592,90 @@ const COMMANDS: &[&str] = &[
     "patterns", "events", "bench", "explain", "informe", "precede", "correlate", "gaps", "trace", "session_patterns", "show",
 ];
 
+/// Flags de consulta que se pasaron (las de `Flags` con valor), por su nombre.
+fn given_flags(f: &Flags) -> Vec<&'static str> {
+    let s = |o: &Option<String>| o.is_some();
+    [
+        ("--since", s(&f.since)),
+        ("--until", s(&f.until)),
+        ("--bucket", s(&f.bucket)),
+        ("--gap", s(&f.gap)),
+        ("--window", s(&f.window)),
+        ("--before-levels", s(&f.before_levels)),
+        ("--delta", s(&f.delta)),
+        ("--by", s(&f.by)),
+        ("--limit", s(&f.limit)),
+        ("--infer-level", f.infer_level),
+        ("--any-order", f.any_order),
+        ("--attr", s(&f.attr)),
+        ("--join", s(&f.join)),
+        ("--via", s(&f.via)),
+        ("--from", s(&f.from)),
+        ("--to", s(&f.to)),
+        ("--entity", s(&f.entity)),
+        ("--symbols", f.symbols),
+        ("--source", s(&f.source)),
+        ("--kind", s(&f.kind)),
+        ("--level", s(&f.level)),
+        ("--grep", s(&f.grep)),
+        ("--depth", s(&f.depth)),
+        ("--interval", s(&f.interval)),
+        ("--as", s(&f.as_kind)),
+        ("--preset", s(&f.preset)),
+        ("--name", s(&f.name)),
+        ("--task", s(&f.task)),
+        ("--session", s(&f.session)),
+        ("--hotspots", s(&f.hotspots)),
+    ]
+    .into_iter()
+    .filter_map(|(n, on)| on.then_some(n))
+    .collect()
+}
+
+/// Los filtros comunes (`EventScope`) de las consultas sobre eventos.
+const SCOPE_FLAGS: &[&str] = &["--source", "--grep", "--level", "--kind", "--entity", "--attr", "--join", "--infer-level"];
+
+/// Flags que usa cada consulta, además de `--db`, `--lang` y `--compact`
+/// (`None`: comandos que no son consultas, sin comprobar). Con `true`, también
+/// los filtros comunes.
+fn query_flags(cmd: &str) -> Option<(&'static [&'static str], bool)> {
+    Some(match cmd {
+        "hotspots" | "coupling" | "owners" | "churn" => (&["--since", "--by"], false),
+        "bugs" => (&["--since"], false),
+        "tickets" | "prs" | "phases" | "sources" | "similar" | "bench" | "branches" => (&[], false),
+        "search" | "explain" => (&["--limit"], false),
+        "timeline" => (&["--since", "--until", "--bucket", "--by", "--limit"], true),
+        "stats" => (&["--since", "--until", "--by", "--limit"], true),
+        "top" | "patterns" | "events" => (&["--since", "--until", "--limit"], true),
+        "informe" => (&["--since", "--until"], true),
+        "precede" => (&["--since", "--until", "--gap", "--window", "--before-levels", "--limit"], true),
+        "correlate" => (&["--delta", "--kind", "--via", "--limit"], false),
+        "gaps" => (&["--since", "--until", "--from", "--to", "--via", "--by", "--any-order", "--limit"], false),
+        "trace" => (&["--depth", "--limit"], false),
+        "session_patterns" => (&["--since", "--task", "--session", "--hotspots", "--limit"], false),
+        "show" => (&["--entity"], false),
+        _ => return None,
+    })
+}
+
+/// Una flag que existe pero no aplica al comando (`top --by`, `search
+/// --since`) se ignoraba en silencio: se avisa como una desconocida.
+fn warn_inapplicable(cmd: &str, f: &Flags) {
+    let Some((own, scope)) = query_flags(cmd) else { return };
+    for flag in given_flags(f) {
+        let applies = own.contains(&flag) || (scope && SCOPE_FLAGS.contains(&flag));
+        if !applies {
+            eprintln!(
+                "{}",
+                t(
+                    format!("chrono: warning: {flag} does not apply to {cmd} (ignored; see chrono {cmd} --help)"),
+                    format!("chrono: aviso: {flag} no aplica a {cmd} (se ignora; ver chrono {cmd} --help)"),
+                )
+            );
+        }
+    }
+}
+
 /// Distancia de edición (Levenshtein) entre dos palabras cortas.
 fn edit_distance(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
@@ -709,6 +793,7 @@ fn main() {
         other if !COMMANDS.contains(&other) => unknown_command(other),
         _ => {}
     }
+    warn_inapplicable(cmd, &f);
 
     // Comandos que necesitan un índice existente.
     let db = resolve_db(&f);

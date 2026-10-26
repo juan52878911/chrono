@@ -68,6 +68,20 @@ fn flags_que_se_ignoraban() {
 }
 
 #[test]
+fn flags_que_no_aplican_al_comando_avisan() {
+    let d = indice("no-aplica");
+    let (ok, _, err) = run(&d.0, &["top", "level", "--by", "kind"]);
+    assert!(ok && err.contains("--by does not apply to top"), "{err}");
+    let (ok, _, err) = run(&d.0, &["search", "evento", "--since", "2026-01-01"]);
+    assert!(ok && err.contains("--since does not apply to search"), "{err}");
+    // Las que sí aplican no avisan.
+    let (ok, _, err) = run(&d.0, &["top", "level", "--since", "2026-01-01", "--level", "ERROR", "--limit", "3", "--compact"]);
+    assert!(ok && err.is_empty(), "{err}");
+    let (ok, _, err) = run(&d.0, &["timeline", "--by", "level", "--bucket", "1h", "--grep", "evento"]);
+    assert!(ok && err.is_empty(), "{err}");
+}
+
+#[test]
 fn sources_y_phases_no_se_dan_por_truncadas() {
     let d = indice("sources");
     for cmd in ["sources", "phases"] {
