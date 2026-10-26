@@ -495,6 +495,8 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
         if s.kind == "git" {
             if let Ok(head) = chrono_source_git::head_sha(&path) {
                 if s.watermark == format!("sha:{head}") {
+                    // Se leyó bien: un error de un sync anterior ya no vale.
+                    store.delete_meta(&format!("sync_error:{}", s.id))?;
                     continue;
                 }
             }

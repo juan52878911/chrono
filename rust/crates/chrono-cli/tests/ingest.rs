@@ -155,6 +155,21 @@ fn init_en_un_repo_sin_commits_y_add_y_sync_despues() {
 }
 
 #[test]
+fn un_sync_sin_commits_nuevos_limpia_el_sync_error_de_git() {
+    let env = Env::new("git-sync-error", r#"{"version":2}"#);
+    git(env.dir(), &["init", "-q"]);
+    git(env.dir(), &["commit", "-q", "--allow-empty", "-m", "primero"]);
+    env.ok(&["init"]);
+    // Un error de un sync anterior (el repo no se pudo leer entonces).
+    env.sql("INSERT INTO meta(key, value) SELECT 'sync_error:' || id, '2024-01-01T00:00:00Z boom' FROM sources");
+    assert!(env.ok(&["sources"]).contains("sync_error"));
+    // El HEAD no cambió (atajo): antes el error se quedaba pegado.
+    env.ok(&["sync"]);
+    assert!(!env.ok(&["sources"]).contains("sync_error"));
+    assert_eq!(env.sql("SELECT COUNT(*) FROM meta WHERE key LIKE 'sync_error:%'"), ["0"]);
+}
+
+#[test]
 fn un_fichero_reescrito_con_el_mismo_tamano_y_mtime_se_relee() {
     let env = Env::new("huella", r#"{"version":2}"#);
     let d = env.dir().join("datos");
