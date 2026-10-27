@@ -311,6 +311,10 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
                 .then(b.count.cmp(&a.count))
                 .then(a.last_before_secs.cmp(&b.last_before_secs))
                 .then(a.template.cmp(&b.template))
+                // Sin esto, dos precursores que solo difieren en la entidad salían en
+                // el orden del HashMap: distinto en cada ejecución.
+                .then(a.level.cmp(&b.level))
+                .then(a.entity.cmp(&b.entity))
         });
         list.truncate(o.per_episode);
         ep.preceding = list;
@@ -354,6 +358,8 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
 
 /// Precursor interno del barrido: (nivel, plantilla, entidad).
 type PreKey = (String, String, String);
+/// (cuenta, último epoch, fila del ejemplo) de un precursor en un episodio.
+type PreAgg = (i64, i64, Option<usize>);
 
 /// Lo que precede a cada episodio, sacado de un solo barrido ([`sweep`]).
 struct Swept {
@@ -362,7 +368,7 @@ struct Swept {
     /// Id de cada fila leída (el ejemplo de un precursor es su índice aquí).
     ids: Vec<String>,
     /// Por episodio: precursor → (cuenta, último epoch, fila del ejemplo).
-    per_ep: Vec<HashMap<u32, (i64, i64, Option<usize>)>>,
+    per_ep: Vec<HashMap<u32, PreAgg>>,
 }
 
 impl Swept {
