@@ -1,6 +1,7 @@
 //! Tiempo sin zona, redacción de términos prohibidos y lectura tolerante de los
 //! ficheros de un trabajo (nombres nuevos en inglés y legados en español).
 
+use chrono_core::time;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
@@ -87,67 +88,16 @@ pub fn epoch_s_to_ms(s: f64) -> Option<i64> {
     (ms.is_finite() && ms >= MIN_MS as f64 && ms <= MAX_MS as f64).then_some(ms as i64)
 }
 
-fn days_in_month(y: i64, m: i64) -> i64 {
-    match m {
-        2 if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,
-        2 => 28,
-        4 | 6 | 9 | 11 => 30,
-        _ => 31,
-    }
-}
-
-/// Días desde 1970-01-01 de una fecha civil (Hinnant).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = if m > 2 { m - 3 } else { m + 9 };
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
 /// `YYYY-MM-DDThh:mm:ss[.fff][Z|±hh:mm]` → `(ms leídos como si fueran UTC, offset explícito en s)`.
-/// delega escribe hora local SIN zona; el offset se aplica fuera.
+/// delega escribe hora local SIN zona; el offset se aplica fuera. El parser es
+/// el de `chrono_core::time` (mismas fechas imposibles fuera que el resto de
+/// fuentes); aquí solo se añade el tope de ±18 h al desfase.
 pub fn parse_ts(s: &str) -> Option<(i64, Option<i64>)> {
-    let s = s.trim();
-    let b = s.as_bytes();
-    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || !(b[10] == b'T' || b[10] == b' ') || b[13] != b':' || b[16] != b':' {
-        return None;
+    let (ms, tz) = time::parse_rfc3339_zoned(s.trim())?;
+    match tz {
+        Some(o) if o.abs() > MAX_OFFSET_S => None,
+        _ => Some((ms, tz)),
     }
-    let n = |r: std::ops::Range<usize>| s.get(r).and_then(|x| x.parse::<i64>().ok());
-    let (y, mo, d, h, mi, se) = (n(0..4)?, n(5..7)?, n(8..10)?, n(11..13)?, n(14..16)?, n(17..19)?);
-    // El año son cuatro cifras (sin signo): «-001» o «+999» no son fechas. El día,
-    // el del mes (antes un 31 de febrero pasaba como 3 de marzo).
-    if !s.as_bytes()[..4].iter().all(u8::is_ascii_digit) || !(1..=12).contains(&mo) || d < 1 || d > days_in_month(y, mo) || h > 23 || mi > 59 || se > 60 {
-        return None;
-    }
-    let mut rest = &s[19..];
-    let mut ms = 0i64;
-    if let Some(frac) = rest.strip_prefix('.') {
-        let digits: String = frac.chars().take_while(char::is_ascii_digit).collect();
-        rest = &frac[digits.len()..];
-        let d3: String = digits.chars().chain("000".chars()).take(3).collect();
-        ms = d3.parse().unwrap_or(0);
-    }
-    let tz = match rest {
-        "" => None,
-        "Z" => Some(0),
-        r if (r.starts_with('+') || r.starts_with('-')) && r.len() >= 5 => {
-            let sign = if r.starts_with('-') { -1 } else { 1 };
-            let r = r[1..].replace(':', "");
-            let hh: i64 = r.get(0..2)?.parse().ok()?;
-            let mm: i64 = r.get(2..4)?.parse().ok()?;
-            let off = hh * 3600 + mm * 60;
-            if mm > 59 || off > MAX_OFFSET_S {
-                return None;
-            }
-            Some(sign * off)
-        }
-        _ => return None,
-    };
-    let secs = days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + se;
-    Some((secs * 1000 + ms, tz))
 }
 
 /// ms UTC de una marca de delega: con zona explícita la usa; sin ella resta `offset_s`

@@ -81,25 +81,13 @@ fn hash_prefix(path: &Path, limit: u64) -> String {
     format!("{:016x}", simhash::fnv1a64(&buf[..total]))
 }
 
-/// `±hh:mm` / `±hhmm` / `Z` → segundos.
+/// `±hh:mm` / `±hhmm` / `±hh` / `Z` (o `0`) → segundos, con tope de ±18 h.
 fn parse_offset(s: &str) -> Option<i64> {
     let s = s.trim();
-    if s == "Z" || s == "0" {
+    if s == "0" {
         return Some(0);
     }
-    let sign = match s.as_bytes().first()? {
-        b'+' => 1,
-        b'-' => -1,
-        _ => return None,
-    };
-    let r = s[1..].replace(':', "");
-    if r.len() != 2 && r.len() != 4 || !r.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let hh: i64 = r.get(0..2)?.parse().ok()?;
-    let mm: i64 = r.get(2..4).unwrap_or("00").parse().ok()?;
-    let off = hh * 3600 + mm * 60;
-    (mm < 60 && off <= util::MAX_OFFSET_S).then_some(sign * off)
+    chrono_core::time::parse_zone(s).filter(|o| o.abs() <= util::MAX_OFFSET_S)
 }
 
 #[derive(Debug, Default, PartialEq)]

@@ -271,7 +271,7 @@ pub fn tool_defs() -> Vec<Value> {
                 "orchestrators": str_prop("Sesiones de Nod (o trozos de su cwd) del orquestador, separadas por comas, además de las deducidas (opcional)"),
                 "stale_hours": json!({"type": "integer", "description": "Horas sin actividad para dar por caído un trabajo sin cierre (por defecto 6)"}),
                 "limit": json!({"type": "integer", "description": "Elementos por lista (por defecto 10)"}),
-                "format": str_prop("text (por defecto) | json")
+                "format": enum_prop("text (por defecto) | json", &["text", "json"])
             }),
             &[],
         ),

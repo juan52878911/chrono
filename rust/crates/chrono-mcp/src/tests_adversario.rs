@@ -370,3 +370,22 @@ fn correlate_por_tiempo_respeta_kind() {
     let e = error_de(&store, "correlate", json!({"id": "c0", "via": "session", "delta_secs": 60}));
     assert!(e.contains("'delta_secs'") && e.contains("'via'"), "{e}");
 }
+
+/// `delega` pasa por la misma validación que las demás: argumento de más,
+/// tipo equivocado, `format` fuera de su lista y ventana imposible son error.
+#[test]
+fn delega_valida_sus_argumentos() {
+    let (_db, store) = fixture("delega");
+    for (args, k) in [
+        (json!({"profile": "x"}), "profile"),
+        (json!({"limit": "diez"}), "limit"),
+        (json!({"stale_hours": 0}), "stale_hours"),
+        (json!({"orchestrators": ["a"]}), "orchestrators"),
+        (json!({"format": "yaml"}), "format"),
+        (json!({"since": "2026-02-30"}), "since"),
+    ] {
+        let e = error_de(&store, "delega", args.clone());
+        assert!(e.contains(&format!("'{k}'")), "{args}: {e}");
+    }
+    crate::run_tool_text(&store, "delega", &json!({"format": "json", "limit": "3", "stale_hours": 2})).unwrap();
+}

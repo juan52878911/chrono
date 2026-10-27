@@ -141,6 +141,33 @@ pub fn parse_rfc3339(s: &str) -> Option<i64> {
     parse_since(s)
 }
 
+/// Como `parse_rfc3339`, pero sin aplicar la zona: `(ms leídos como si la hora
+/// fuera UTC, desfase explícito en segundos o None si no trae zona)`. Para las
+/// fuentes que escriben hora local sin zona y aplican el desfase fuera (delega).
+pub fn parse_rfc3339_zoned(s: &str) -> Option<(i64, Option<i64>)> {
+    parse_rfc3339(s)?; // valida todo, zona incluida; desde aquí `s` es ASCII
+    let tail = &s[19..];
+    let frac = match tail.as_bytes().first() {
+        Some(b'.' | b',') => 1 + tail[1..].bytes().take_while(u8::is_ascii_digit).count(),
+        _ => 0,
+    };
+    let zone = &tail[frac..];
+    let offset = if zone.is_empty() { None } else { Some(parse_zone(zone)?) };
+    Some((parse_rfc3339(&s[..19 + frac])?, offset))
+}
+
+/// Una zona suelta, entera: `Z`, `±hh`, `±hhmm` o `±hh:mm` → segundos al este
+/// de UTC (`-05:00` → -18000). Cualquier otra cosa: `None`.
+pub fn parse_zone(s: &str) -> Option<i64> {
+    if !s.is_ascii() || !(s.starts_with(['+', '-']) || s.eq_ignore_ascii_case("z")) {
+        return None;
+    }
+    match split_zone(s)? {
+        ("", off) => Some(off),
+        _ => None,
+    }
+}
+
 /// Epoch UTC en ms de un valor de tiempo EN TEXTO: primero como epoch
 /// entero/decimal (se asume en segundos y se pasa a ms, salvo que el valor ya
 /// parezca ms —|v| > 1e12—, en cuyo caso se toma tal cual), y si no parsea
@@ -290,6 +317,35 @@ mod tests {
         ] {
             assert_eq!(parse_rfc3339(bad), None, "{bad:?} debía rechazarse");
             assert_eq!(parse_time_str(bad), None, "{bad:?} debía rechazarse");
+        }
+    }
+
+    /// La hora local y el desfase por separado; mismas fechas imposibles fuera.
+    #[test]
+    fn rfc3339_zoned_tabla() {
+        let base = 1_704_067_200_000; // 2024-01-01T00:00:00 leída como UTC
+        for (s, want) in [
+            ("2024-01-01T00:00:00", (base, None)),
+            ("2024-01-01 00:00:00.5", (base + 500, None)),
+            ("2024-01-01T00:00:00Z", (base, Some(0))),
+            ("2024-01-01T00:00:00.123-05:00", (base + 123, Some(-18_000))),
+            ("2024-01-01T00:00:00+0530", (base, Some(19_800))),
+            ("2024-01-01T00:00:00,25+02", (base + 250, Some(7_200))),
+        ] {
+            assert_eq!(parse_rfc3339_zoned(s), Some(want), "{s:?}");
+        }
+        for bad in [
+            "2024-02-30T00:00:00", "2023-02-29T00:00:00", "2024-01-01T24:00:00", "2024-01-01T10:00:61", "-001-01-01T00:00:00",
+            "+999-01-01T00:00:00", "2024-01-01T00:00:00+25:00", "2024-01-01T00:00:00+05:99", "2024-01-01T00:00:00.",
+            "2024-01-01T00:00:00Zbasura", "2024-01-01T00:00:00＋02:00", "2024-01-01",
+        ] {
+            assert_eq!(parse_rfc3339_zoned(bad), None, "{bad:?} debía rechazarse");
+        }
+        for (s, want) in [("Z", Some(0)), ("+05", Some(18_000)), ("-0530", Some(-19_800)), ("+14:00", Some(50_400))] {
+            assert_eq!(parse_zone(s), want, "{s:?}");
+        }
+        for bad in ["", "0", "5", "-5:00", "+24:00", "+05:60", "abc", "−05:00", "+٠٥:٠٠", "+é0"] {
+            assert_eq!(parse_zone(bad), None, "{bad:?} debía rechazarse");
         }
     }
 
