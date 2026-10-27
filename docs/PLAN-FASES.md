@@ -17,12 +17,16 @@ Las cifras marcadas como *objetivo* son estimaciones que valida la fase correspo
 
 ## Estado (2026-10-26, tras F4 y sus pendientes)
 
-**0.7.1: arreglos sobre 0.7.0 (esquema v7, sin reindex).** Tests 647 → **649**. Lift de `precede --join` sobre
+**0.7.1: arreglos sobre 0.7.0 (esquema v7, sin reindex).** Tests 647 → **653**. Lift de `precede --join` sobre
 las ventanas de cada valor de la clave (`lift_base`, decisión 39); `truncated` exacto en CLI y MCP; las tools MCP
 validan sus argumentos contra el esquema y sus errores llegan como `isError: true`; un solo parser de fechas en
 `chrono-core` para todas las fuentes (delega incluida); huella de glob completa a cualquier tamaño (decisión 34);
-`unknown` en rollups corregido con `entity_via` tardío; `Basic` corto en redact; posicionales de más en el CLI. Sigue
-abierto: los esquemas MCP (F5) y la escala de `informe` y `top attr:` (otra rama, se completará al fusionarla).
+`unknown` en rollups corregido con `entity_via` tardío; `Basic` corto en redact; posicionales de más en el CLI.
+Escala (medianas de 5 en Linux a 10M, mismas cifras): `informe` 27,5 → **6,9 s** (precursores en un barrido por
+tramos de la unión de ventanas, anclas y precursores por `idx_events_level`); `top attr:host --level ERROR` 5,93 →
+**0,13 s** y con `--entity svc-3` 9,92 → **0,08 s** (tabla `attr_rollups`, al día en `sync` y con `entity_via`
+tardío); `precede --level FATAL` 2,63 → **0,47 s**; ingesta +5 % (4:25 → 4:40) e índice +0,8 %. Desempate
+determinista de precursores por nivel y entidad. Sigue abierto: los esquemas MCP (F5).
 
 **Pendientes de F2–F4 resueltos → 0.7.0 (esquema v7, sin reindex).** Sin dependencias nuevas (solo la feature
 `backup` de rusqlite). Tests 523 → **641**, en verde en macOS y en Linux (contenedor `rust:1.90` en trycorepc).
@@ -106,15 +110,16 @@ Segunda vuelta (tras una segunda auditoría, tests adversarios y estrés en remo
 Sin verificar o pendiente:
 - Con `--join` sigue sin lift: falta una frecuencia base por clave. (resuelto en 0.7.1)
 - Glob por encima de 64 MB: una edición entre los bloques de la muestra no se ve. (resuelto en 0.7.1)
-- `informe` a 10M tarda 27 s y `top attr:k` 8 s (F7).
+- `informe` a 10M tarda 27 s y `top attr:k` 8 s (F7). (resuelto en 0.7.1)
 - Redact no tapa `Basic` con base64 corto; por MCP un `since` inválido o un filtro de tipo erróneo se ignoran sin
   aviso. (resuelto en 0.7.1)
 - Los agentes Claude no corren en los nodos remotos con la cuenta personal (sin token ni Rust allí); los nodos se
   usaron solo para cómputo en contenedores.
 - Lo ya indexado de una fuente irrecuperable conserva las dims u opciones de antes (se cuenta, no se arregla).
-- `informe` sigue contando cada episodio con una consulta (1,72 s a 1M): falta el barrido ordenado.
+- `informe` sigue contando cada episodio con una consulta (1,72 s a 1M): falta el barrido ordenado. (resuelto en 0.7.1)
 - `token_budget.truncated` sigue siendo `returned >= max` en las listas con `limit`. (resuelto en 0.7.1)
-- `top attr:k` con filtros sigue uniendo `event_dims` con `events` por rid (venía de F3).
+- `top attr:k` con filtros sigue uniendo `event_dims` con `events` por rid (venía de F3). (resuelto en 0.7.1 con
+  `attr_rollups` para claves de ≤ 10 000 valores y rollups al día; con `grep` o claves mayores, igual que antes)
 - Un resultado ya agregado en rollups cuyo uso llega en un `sync` posterior sigue en `unknown` (venía de F4).
   (resuelto en 0.7.1)
 - Esquemas MCP en ~24,6 KB hasta F5.
@@ -178,6 +183,7 @@ Sin verificar o pendiente:
   (Resueltos en 0.7.0 el reindexado por `entity_via` y la migración a la vez; lo de `unknown`, en 0.7.1)
 - `Pattern` hace vuelta atrás sin memo: un patrón como `.*.*.*x` sobre un título largo es polinómico.
 - `informe` paga +1,1 s por contar todos los episodios: un solo barrido ordenado en vez de una consulta por episodio.
+  (resuelto en 0.7.1)
 - `token_budget.truncated` es `returned >= max`: con exactamente `limit` unidades dice truncado sin estarlo (venía de antes).
   (resuelto en 0.7.1)
 

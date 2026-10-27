@@ -35,6 +35,17 @@ fuente `delega` indexada antes se reindexa sola una vez, ver abajo).
   de 23 h) deja el evento sin tiempo en todas las fuentes; antes alguna la convertía en otra fecha (el 30 de
   febrero como 1 o 2 de marzo).
 
+**Escala** (medianas de 5 en Linux a 10M de eventos; mismas cifras, solo cambia el orden de empates)
+- `informe` 27,5 → 6,9 s: los precursores de los episodios salen de un barrido (una consulta por tramo de la unión
+  de ventanas, no una por episodio), las anclas y los precursores con nivel usan `idx_events_level` y los
+  servicios por nivel salen del cubo en una pasada.
+- `top attr:host --level ERROR` 5,93 → 0,13 s y con `--entity svc-3` 9,92 → 0,08 s: tabla nueva `attr_rollups`
+  (claves de hasta 10 000 valores), creada en el build completo de rollups, al día en cada `sync` y corregida
+  también por `entity_via` tardío.
+- `precede --level FATAL` 2,63 → 0,47 s.
+- Coste: ingesta +5 % (4:25 → 4:40) e índice +0,8 %.
+- `precede`: dos precursores que solo difieren en nivel o entidad salen en un orden fijo (antes, el del HashMap).
+
 **Arreglado**
 - Glob: la huella de lo ya leído es completa a cualquier tamaño; una edición en medio de un fichero de más de 64 MB
   entre los bloques de la muestra ya se relee. Los estados de 0.7.0 pasan solos a la huella nueva.
