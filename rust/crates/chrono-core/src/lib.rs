@@ -14,6 +14,7 @@ pub mod pattern;
 pub mod redact;
 pub mod source;
 pub mod template;
+pub mod time;
 
 pub use classify::{Chain, Classifier};
 pub use template::templatize;

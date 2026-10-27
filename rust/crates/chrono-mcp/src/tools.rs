@@ -27,6 +27,11 @@ fn str_prop(desc: &str) -> Value {
     json!({"type": "string", "description": desc})
 }
 
+/// Cadena con valores cerrados: el `enum` lo comprueba [`crate::args::validate`].
+fn enum_prop(desc: &str, values: &[&str]) -> Value {
+    json!({"type": "string", "description": desc, "enum": values})
+}
+
 /// Texto de la propiedad `since`, compartido por todos los tools que aceptan
 /// ventana temporal.
 fn since_prop() -> Value {
@@ -46,8 +51,8 @@ fn with_scope(own: Value) -> Value {
         "kind": str_prop("Tipo de evento: commit, log, ci.run… o prefijo con * (ci.*) (opcional)"),
         "grep": str_prop("Subcadena del mensaje/título (opcional)"),
         "infer_level": json!({"type": "boolean", "description": "Incluir las líneas SIN nivel de la fuente cuyo texto lo dice (FATAL:, ERROR:…). Para ENCONTRAR, no para contar: las cifras por nivel se dan sin esto (por defecto false)"}),
-        "format": str_prop("text (por defecto: tabla compacta con cabecera total/coverage/truncated/index/q) | json"),
-        "depth": str_prop("counts (solo cifras) | summary (sin sub-tablas por fila) | full. Por defecto summary en precede, full en el resto"),
+        "format": enum_prop("text (por defecto: tabla compacta con cabecera total/coverage/truncated/index/q) | json", &["text", "json"]),
+        "depth": enum_prop("counts (solo cifras) | summary (sin sub-tablas por fila) | full. Por defecto summary en precede, full en el resto", &["counts", "summary", "full"]),
         "attr": str_prop("Atributo clave:valor, p. ej. container:crm_aura_sandbox_postgres (valor con * = prefijo; varios con coma) (opcional)"),
         "join": str_prop("Clave de relación (relations, link o dim): K=valor | K=prefijo* | K=@<id> (comparte valor con ese evento) | K (opcional)")
     });
@@ -196,7 +201,7 @@ pub fn tool_defs() -> Vec<Value> {
             "Los eventos en orden cronológico con todos los filtros: leer los mensajes reales de una ventana (p.ej. lo que pasó justo antes de un reinicio, o una traza completa de product_service). Con order=desc, los más recientes primero (lo último que pasó).",
             with_scope(json!({
                 "limit": json!({"type": "integer", "description": "Máximo de eventos (por defecto 25; la cabecera dice el total)"}),
-                "order": str_prop("asc (por defecto: del más viejo al más nuevo) | desc (los más recientes primero)")
+                "order": enum_prop("asc (por defecto: del más viejo al más nuevo) | desc (los más recientes primero)", &["asc", "desc"])
             })),
             &[],
         ),
@@ -266,7 +271,7 @@ pub fn tool_defs() -> Vec<Value> {
                 "orchestrators": str_prop("Sesiones de Nod (o trozos de su cwd) del orquestador, separadas por comas, además de las deducidas (opcional)"),
                 "stale_hours": json!({"type": "integer", "description": "Horas sin actividad para dar por caído un trabajo sin cierre (por defecto 6)"}),
                 "limit": json!({"type": "integer", "description": "Elementos por lista (por defecto 10)"}),
-                "format": str_prop("text (por defecto) | json")
+                "format": enum_prop("text (por defecto) | json", &["text", "json"])
             }),
             &[],
         ),
@@ -274,7 +279,7 @@ pub fn tool_defs() -> Vec<Value> {
             "informe",
             "EMPIEZA AQUÍ. Informe completo y exacto en UNA llamada. tipo=logs (por defecto): cobertura, líneas por nivel, en qué servicios/contenedores cae cada nivel, mensajes más repetidos por nivel, picos, episodios de FATAL/CRITICAL con lo que los precede, y las consultas siguientes sugeridas. tipo=codigo con target=fichero[:A-B]: por qué está así (explain), dueños, qué cambia con él y si es hotspot.",
             with_scope(json!({
-                "tipo": str_prop("logs (por defecto) | codigo"),
+                "tipo": enum_prop("logs (por defecto) | codigo", &["logs", "codigo", "código", "code"]),
                 "target": str_prop("Para tipo=codigo: fichero o fichero:DESDE-HASTA")
             })),
             &[],
@@ -310,7 +315,17 @@ pub fn call_tool(state: &State, params: &Value) -> Result<Value> {
         Some(s) => s,
         None => return Ok(text_content(state.open_error().unwrap_or_else(no_index_text))),
     };
-    run_tool(&store, name, args)
+    // El error de la herramienta (un argumento mal, un id que no existe) va en
+    // el resultado con `isError`, como pide MCP: el modelo lo lee y corrige la
+    // llamada. Los errores de protocolo (falta `name`) siguen siendo JSON-RPC.
+    match run_tool(&store, name, args) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            let mut v = text_content(format!("chrono: {e}"));
+            v["isError"] = json!(true);
+            Ok(v)
+        }
+    }
 }
 
 /// Texto de la respuesta de una herramienta (lo mismo que ve el modelo por MCP):
@@ -321,6 +336,9 @@ pub fn run_tool_text(store: &chrono_store::Store, name: &str, args: &Value) -> R
 }
 
 fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Value> {
+    // Argumentos que no existen, de otro tipo o mal formados: error, nunca
+    // descartarlos en silencio.
+    crate::args::validate(name, args)?;
     let conn = store.conn();
     let since = args.get("since").and_then(Value::as_str).unwrap_or("");
     let since_epoch = since_to_epoch(since);
@@ -371,12 +389,12 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
             let by = args.get("by").and_then(Value::as_str).filter(|s| !s.is_empty());
             let limit = arg_i64(args, "limit", 500).max(1) as usize;
             let scope = scope_from(args);
-            let rows = chrono_metrics::timeline_scoped(conn, since_epoch, scope.until_epoch, bucket_ms, by, &scope, limit)?;
+            let (rows, more) = cut(chrono_metrics::timeline_scoped(conn, since_epoch, scope.until_epoch, bucket_ms, by, &scope, limit + 1)?, limit);
             let buckets: Vec<Value> = rows
                 .iter()
                 .map(|b| json!({"bucket_epoch": b.bucket_epoch, "key": b.key, "count": b.count}))
                 .collect();
-            let mut out = json!({"bucket_ms": bucket_ms, "by": by, "buckets": buckets});
+            let mut out = json!({"bucket_ms": bucket_ms, "by": by, "buckets": buckets, MORE: more});
             // Los eventos sin tiempo no caben en ningún bucket ni en `total`: se dicen.
             let untimed = chrono_metrics::untimed_events(conn, &scope)?;
             if untimed > 0 {
@@ -400,9 +418,9 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
                 infer_level: sc.infer_level,
                 until_epoch: sc.until_epoch,
             };
-            let rows = chrono_metrics::top_filtered(conn, dim, since_epoch, &filter, limit)?;
+            let (rows, more) = cut(chrono_metrics::top_filtered(conn, dim, since_epoch, &filter, limit + 1)?, limit);
             let items: Vec<Value> = rows.iter().map(|v| json!({"value": v.value, "count": v.count})).collect();
-            let mut out = json!({"dim": dim, "top": items});
+            let mut out = json!({"dim": dim, "top": items, MORE: more});
             if let Some(k) = dim.strip_prefix("attr:").filter(|_| rows.is_empty()) {
                 if !chrono_metrics::attr_key_known(conn, k)? {
                     out["hints"] = json!([format!("ningún evento tiene la attr {k:?}; las que hay: {}", chrono_metrics::attr_keys(conn, 20)?.join(", "))]);
@@ -426,7 +444,7 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
                 levels: args.get("before_levels").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or("FATAL,CRITICAL,ERROR,WARNING"),
                 entity: args.get("before_entity").and_then(Value::as_str).filter(|s| !s.is_empty()),
                 max_episodes: arg_i64(args, "limit", 50).max(1) as usize,
-                by_origin: args.get("by_origin").and_then(Value::as_bool).unwrap_or(false),
+                by_origin: arg_bool(args, "by_origin"),
                 join: join_key(args),
                 ..Default::default()
             };
@@ -445,9 +463,19 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
                 })
                 .collect();
             let commons: Vec<Value> = r.common.iter().map(|c| common_json(c, n)).collect();
-            let mut out = json!({"episodes_total": n, "episodes_returned": r.episodes.len(), "precursors_total": r.precursors_total, "common_precursors": commons, "episodes": episodes});
+            let mut out = json!({"episodes_total": n, "episodes_returned": r.episodes.len(), "precursors_total": r.precursors_total, "common_precursors": commons, "episodes": episodes, MORE: n > r.episodes.len()});
             if r.anchors_without_time > 0 {
                 out["anchors_without_time"] = json!(r.anchors_without_time);
+            }
+            out["lift_base"] = json!(r.lift_base.as_str());
+            match &r.lift_base {
+                chrono_metrics::LiftBase::KeyWindows { units, events, templated } => {
+                    out["lift_base_units"] = json!(units);
+                    out["lift_base_events"] = json!(events);
+                    out["lift_base_templated"] = json!(templated);
+                }
+                chrono_metrics::LiftBase::None(m) => out["hints"] = json!([m.es]),
+                chrono_metrics::LiftBase::ActiveWindows => {}
             }
             if o.join.is_some() {
                 out["anchors_without_key"] = json!(r.anchors_without_key);
@@ -461,12 +489,12 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
             // Aquí `attr` es el atributo numérico, no el filtro `clave:valor`
             // de las demás consultas: el filtro va en `where_attr`.
             let filters = stats_filters(args);
-            let rows = chrono_metrics::stats(conn, attr, by, since_epoch, &scope_from(&filters), limit)?;
+            let (rows, more) = cut(chrono_metrics::stats(conn, attr, by, since_epoch, &scope_from(&filters), limit + 1)?, limit);
             let groups: Vec<Value> = rows
                 .iter()
                 .map(|r| json!({"group": r.group, "count": r.count, "min": r.min, "p50": r.p50, "p95": r.p95, "max": r.max, "sum": r.sum}))
                 .collect();
-            let mut out = json!({"attr": attr, "by": by, "groups": groups});
+            let mut out = json!({"attr": attr, "by": by, "groups": groups, MORE: more});
             if rows.is_empty() {
                 let hint = if chrono_metrics::attr_key_known(conn, attr)? {
                     format!("la attr {attr:?} no tiene valores numéricos en estos eventos (stats solo cuenta números)")
@@ -480,6 +508,9 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
         "correlate" if args.get("via").and_then(Value::as_str).is_some_and(|v| !v.trim().is_empty()) => {
             let id = arg_str(args, "id")?;
             let via = arg_str(args, "via")?;
+            if args.get("delta_secs").is_some_and(|d| !d.is_null()) {
+                return Err("correlate: 'delta_secs' no aplica con 'via' (via relaciona por clave, no por tiempo)".into());
+            }
             let limit = arg_i64(args, "limit", 25).max(1) as usize;
             let kinds: Vec<String> = args.get("kind").and_then(Value::as_str).unwrap_or("").split(',').map(str::to_string).collect();
             let v = chrono_metrics::correlate_via(conn, id, via, &kinds, limit)?;
@@ -493,7 +524,8 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
             let id = arg_str(args, "id")?;
             let delta_ms = arg_i64(args, "delta_secs", 3600).max(1) * 1000;
             let limit = arg_i64(args, "limit", 25).max(1) as usize;
-            let mut out = correlate(conn, id, delta_ms, limit)?;
+            let kinds: Vec<String> = args.get("kind").and_then(Value::as_str).unwrap_or("").split(',').map(str::to_string).collect();
+            let mut out = correlate(conn, id, delta_ms, &kinds, limit)?;
             if out["related"].as_array().is_some_and(Vec::is_empty) && chrono_metrics::other_timed_sources(conn, id)? == Some(0) {
                 let keys = chrono_metrics::event_relation_keys(conn, id)?;
                 let ej = keys.first().map_or("<clave>".to_string(), |k| k.clone());
@@ -513,7 +545,7 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
             let via = arg_str(args, "via")?;
             let by = args.get("by").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
             let limit = arg_i64(args, "limit", 25).max(1) as usize;
-            let any_order = args.get("any_order").and_then(Value::as_bool).unwrap_or(false);
+            let any_order = arg_bool(args, "any_order");
             let until_epoch = args.get("until").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).map_or(0, since_to_epoch);
             let o = chrono_metrics::GapsOpts { since_epoch, until_epoch, any_order, limit };
             let g = chrono_metrics::gaps(conn, &from, &to, via, by, &o)?;
@@ -528,12 +560,12 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
         }
         "patterns" => {
             let limit = arg_i64(args, "limit", 25).max(1) as usize;
-            let rows = chrono_metrics::patterns_scoped(conn, since_epoch, &scope_from(args), limit)?;
+            let (rows, more) = cut(chrono_metrics::patterns_scoped(conn, since_epoch, &scope_from(args), limit + 1)?, limit);
             let items: Vec<Value> = rows
                 .iter()
                 .map(|p| json!({"template": p.template, "count": p.count, "example_id": p.example_id}))
                 .collect();
-            json!({"patterns": items})
+            json!({"patterns": items, MORE: more})
         }
         "trace" => {
             let id = arg_str(args, "id")?;
@@ -583,13 +615,16 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
         let mut hints: Vec<String> =
             result.as_object_mut().and_then(|o| o.remove("hints")).and_then(|h| serde_json::from_value(h).ok()).unwrap_or_default();
         if let Some(l) = args.get("level").and_then(Value::as_str).filter(|l| !l.trim().is_empty()) {
-            let infer = args.get("infer_level").and_then(Value::as_bool).unwrap_or(false);
+            let infer = arg_bool(args, "infer_level");
             let (unknown, known) = chrono_metrics::unknown_levels(conn, l, infer)?;
             if !unknown.is_empty() {
                 hints.push(format!("ningún evento tiene el nivel {}; los que hay: {}", unknown.join(","), known.join(",")));
             }
         }
-        let (mut head, mut meta) = crate::contract::header(conn, name, args, &result);
+        // Si la lista principal se recortó (lo dice la herramienta: total conocido
+        // o una fila de más pedida con `cut`); no sale en la respuesta.
+        let more = result.as_object_mut().and_then(|o| o.remove(MORE)).and_then(|v| v.as_bool()).unwrap_or(false);
+        let (mut head, mut meta) = crate::contract::header(conn, name, args, more);
         for h in &hints {
             head.push_str(&format!("\n⚠ {h}"));
         }
@@ -630,6 +665,18 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
     result_content(&result)
 }
 
+/// Clave interna con la que una herramienta con cabecera dice si su lista
+/// principal se recortó; la cabecera la quita y la da como `truncated`.
+const MORE: &str = "_more";
+
+/// Para saber si hay más sin contarlo todo se piden `limit + 1` filas: recorta a
+/// `limit` y dice si sobró alguna.
+pub(crate) fn cut<T>(mut rows: Vec<T>, limit: usize) -> (Vec<T>, bool) {
+    let more = rows.len() > limit;
+    rows.truncate(limit);
+    (rows, more)
+}
+
 fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
@@ -641,11 +688,13 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
 /// número en una cadena (`"10"`, como lo mandan a menudo los modelos) o con
 /// decimales (`10.0`) también vale.
 pub(crate) fn arg_i64(args: &Value, key: &str, default: i64) -> i64 {
-    match args.get(key) {
-        Some(Value::Number(n)) => n.as_i64().or_else(|| n.as_f64().filter(|f| f.is_finite()).map(|f| f as i64)).unwrap_or(default),
-        Some(Value::String(s)) => s.trim().parse().unwrap_or(default),
-        _ => default,
-    }
+    args.get(key).and_then(crate::args::entero).unwrap_or(default)
+}
+
+/// Lee un booleano de `args[key]` (`true`, o `"true"` en una cadena); si falta,
+/// `false`. Ya validado por [`crate::args::validate`].
+pub(crate) fn arg_bool(args: &Value, key: &str) -> bool {
+    args.get(key).and_then(crate::args::booleano).unwrap_or(false)
 }
 
 /// Los filtros comunes de `args` (ver [`with_scope`]). `since` va aparte: cada
@@ -675,7 +724,7 @@ pub(crate) fn scope_from(args: &Value) -> chrono_metrics::EventScope<'_> {
         entity: s("entity"),
         attr: s("attr"),
         join: s("join"),
-        infer_level: args.get("infer_level").and_then(Value::as_bool).unwrap_or(false),
+        infer_level: arg_bool(args, "infer_level"),
         until_epoch: s("until").map_or(0, since_to_epoch),
     }
 }
@@ -997,7 +1046,7 @@ fn trace(conn: &Connection, id: &str, depth: i64, limit: usize) -> Result<Value>
 }
 
 fn events(conn: &Connection, filter: &chrono_metrics::EventFilter, limit: usize, newest_first: bool) -> Result<Value> {
-    let rows = chrono_metrics::events_ordered(conn, filter, limit, newest_first)?;
+    let (rows, more) = cut(chrono_metrics::events_ordered(conn, filter, limit + 1, newest_first)?, limit);
     let items: Vec<Value> = rows
         .iter()
         .map(|e| json!({
@@ -1005,11 +1054,11 @@ fn events(conn: &Connection, filter: &chrono_metrics::EventFilter, limit: usize,
             "at": e.at, "level": e.level, "title": e.title,
         }))
         .collect();
-    Ok(json!({"events": items}))
+    Ok(json!({"events": items, MORE: more}))
 }
 
-fn correlate(conn: &Connection, id: &str, delta_ms: i64, limit: usize) -> Result<Value> {
-    let corr = chrono_metrics::correlate(conn, id, delta_ms, limit)?;
+fn correlate(conn: &Connection, id: &str, delta_ms: i64, kinds: &[String], limit: usize) -> Result<Value> {
+    let corr = chrono_metrics::correlate_kinds(conn, id, delta_ms, kinds, limit)?;
     let event_json = |e: &chrono_metrics::EventRef| {
         json!({
             "id": e.id, "source_id": e.source_id, "kind": e.kind, "at": e.at,

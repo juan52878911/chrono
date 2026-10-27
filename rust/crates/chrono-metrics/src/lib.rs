@@ -45,7 +45,7 @@ pub use hotspots::{hotspots, hotspots_of_type, Hotspot};
 pub use owners::{owners, Owner};
 pub use patterns::{patterns, patterns_by_level, patterns_filtered, patterns_scoped, Pattern};
 pub use phases::{phases, Phase};
-pub use precede::{precede, Common, Episode, PrecedeOpts, Preceded, Precursor};
+pub use precede::{precede, Common, Episode, LiftBase, PrecedeOpts, Preceded, Precursor};
 pub use relate::{check_attr, check_join, correlate_via, gaps, parse_side, relation_keys, valid_key, GapUnit, Gaps, GapsOpts, SideError, Via};
 pub use search::{search, SearchHit};
 pub use session_patterns::{
@@ -57,7 +57,7 @@ pub use sources::{source_aliases, sources, SourceSummary};
 pub use ticket::{ticket, Ticket};
 pub use stats::{stats, StatRow};
 pub use timeline::{timeline, timeline_scoped, EventScope, TimelineBucket};
-pub use top::{top, TopValue, top_filtered, TopFilter};
+pub use top::{top, TopValue, top_filtered, top_filtered_levels, TopFilter};
 pub use trace::{trace, Trace, TraceNode};
 
 /// Error de `chrono-metrics`: no exige un tipo concreto a los llamadores

@@ -8,7 +8,7 @@
 //! determinista (a diferencia del RFC3164 de syslog, que no trae año).
 
 use crate::preset::split_ws;
-use crate::timeutil::days_from_civil;
+use chrono_core::time::{days_from_civil_checked, secs_of_day_checked};
 
 const MONTHS: [&str; 12] =
     ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -33,7 +33,7 @@ pub struct NginxFields {
 }
 
 /// "+ZZZZ"/"-ZZZZ" -> segundos. Misma fórmula/signo que
-/// `timeutil::parse_rfc3339`: la hora local del log es UTC ± ese offset, y
+/// `chrono_core::time::parse_rfc3339`: la hora local del log es UTC ± ese offset, y
 /// `UTC = local - offset`.
 fn parse_tz_offset(s: &str) -> Option<i64> {
     if s.len() != 5 {
@@ -49,8 +49,11 @@ fn parse_tz_offset(s: &str) -> Option<i64> {
     Some(sign * (hh * 3600 + mm * 60))
 }
 
-/// "10/Oct/2000:13:55:36 -0700" -> epoch UTC en segundos.
-fn parse_nginx_date(s: &str) -> Option<i64> {
+/// "10/Oct/2000:13:55:36 -0700" -> epoch UTC en ms. Fuera: no tiene la forma
+/// de una fecha nginx (la línea no casa). Dentro: `None` si la forma casa
+/// pero la fecha no existe (30/Feb, 25:00, desfase de 25 h): la línea entra
+/// sin tiempo, como en jsonl o csv.
+fn parse_nginx_date(s: &str) -> Option<Option<i64>> {
     let mut top = s.splitn(2, ' ');
     let dt = top.next()?;
     let tz = top.next().unwrap_or("+0000");
@@ -67,20 +70,15 @@ fn parse_nginx_date(s: &str) -> Option<i64> {
     let hh: i64 = t.next()?.parse().ok()?;
     let mm: i64 = t.next()?.parse().ok()?;
     let ss: i64 = t.next()?.parse().ok()?;
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || !(0..=23).contains(&hh)
-        || !(0..=59).contains(&mm)
-        || !(0..=60).contains(&ss)
-    {
-        return None;
-    }
-
     let offset = parse_tz_offset(tz)?;
-    let days = days_from_civil(year, month, day);
-    let local_secs = days * 86_400 + hh * 3600 + mm * 60 + ss;
-    // `at_epoch` es ms en todo el dominio; nginx tiene resolución de segundo.
-    Some((local_secs - offset) * 1000)
+    let valida = || {
+        let days = days_from_civil_checked(year, month, day)?;
+        let secs = secs_of_day_checked(hh, mm, ss)?;
+        (offset.abs() < 86_400).then_some(())?;
+        // `at_epoch` es ms en todo el dominio; nginx tiene resolución de segundo.
+        Some((days * 86_400 + secs - offset) * 1000)
+    };
+    Some(valida())
 }
 
 /// Contenido entre comillas dobles al inicio de `s` (sin soporte de escapes:
@@ -104,7 +102,8 @@ pub fn parse(line: &str) -> Option<NginxFields> {
 
     let r = r.trim_start().strip_prefix('[')?;
     let close = r.find(']')?;
-    let epoch = parse_nginx_date(&r[..close])?;
+    // Sin tiempo: `epoch = 0` (el `at` sale vacío, ver `record.rs`).
+    let epoch = parse_nginx_date(&r[..close])?.unwrap_or(0);
     let r = r[close + 1..].trim_start();
 
     let (request, r) = take_quoted(r)?;
@@ -183,6 +182,19 @@ mod tests {
         assert_eq!(f.referer, "");
         assert_eq!(f.user_agent, "");
         assert_eq!(f.epoch, 1_577_836_800_000);
+    }
+
+    /// Tabla: con la forma de nginx pero una fecha u hora imposible, la línea
+    /// entra sin tiempo (`epoch = 0`); antes el 30/Feb era el 1 o 2 de marzo.
+    #[test]
+    fn fechas_imposibles_quedan_sin_tiempo() {
+        for fecha in ["30/Feb/2024:10:00:00 +0000", "29/Feb/2023:10:00:00 +0000", "31/Apr/2024:10:00:00 +0000", "01/Jan/2024:25:00:00 +0000", "01/Jan/2024:10:60:00 +0000", "01/Jan/2024:10:00:00 +2500"] {
+            let line = format!(r#"10.0.0.1 - - [{fecha}] "GET / HTTP/1.1" 200 5"#);
+            let f = parse(&line).unwrap_or_else(|| panic!("{fecha}: la línea debía casar"));
+            assert_eq!(f.epoch, 0, "{fecha}");
+        }
+        let f = parse(r#"10.0.0.1 - - [29/Feb/2024:00:00:00 +0000] "GET / HTTP/1.1" 200 5"#).unwrap();
+        assert_eq!(f.epoch, 1_709_164_800_000);
     }
 
     #[test]

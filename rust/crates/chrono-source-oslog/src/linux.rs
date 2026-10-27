@@ -8,7 +8,7 @@
 //! `_HOSTNAME`, `_PID`.
 
 use crate::simhash::{simhash, tokenize};
-use crate::timeutil::epoch_to_iso8601;
+use chrono_core::time::epoch_to_iso8601;
 use crate::util::{as_string, compute_id, truncate_chars};
 use chrono_core::{Actor, Event, Touch};
 use serde_json::Value;

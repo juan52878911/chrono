@@ -8,7 +8,7 @@
 //! encargo: "o \"\" si no hay PRI").
 
 use crate::preset::split_ws;
-use crate::timeutil::{days_from_civil, parse_rfc3339};
+use chrono_core::time::{days_from_civil_checked, parse_rfc3339, secs_of_day_checked};
 
 const MONTHS: [&str; 12] =
     ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -147,9 +147,14 @@ fn try_rfc3164(rest: &str, fallback_year: i64) -> Option<(String, String, String
     let hh: i64 = t.next()?.parse().ok()?;
     let mm: i64 = t.next()?.parse().ok()?;
     let ss: i64 = t.next()?.parse().ok()?;
-    if !(1..=31).contains(&day) || !(0..=23).contains(&hh) || !(0..=59).contains(&mm) || !(0..=60).contains(&ss) {
-        return None;
-    }
+    // Fecha imposible para el año supuesto (30 de febrero) u hora fuera de
+    // rango: la línea casa, pero sin tiempo (`epoch = 0`), como RFC5424 con un
+    // TIMESTAMP inválido.
+    let epoch = match (days_from_civil_checked(fallback_year, month, day), secs_of_day_checked(hh, mm, ss)) {
+        // `at_epoch` es ms en todo el dominio; RFC3164 tiene resolución de segundo.
+        (Some(days), Some(secs)) => (days * 86_400 + secs) * 1000,
+        _ => 0,
+    };
 
     let (host, r) = split_ws(r)?;
     let r = r.trim_start();
@@ -167,9 +172,6 @@ fn try_rfc3164(rest: &str, fallback_year: i64) -> Option<(String, String, String
         return None;
     }
 
-    let days = days_from_civil(fallback_year, month, day);
-    // `at_epoch` es ms en todo el dominio; RFC3164 tiene resolución de segundo.
-    let epoch = (days * 86_400 + hh * 3600 + mm * 60 + ss) * 1000;
     Some((host.to_string(), tag, pid, msg, epoch))
 }
 
@@ -267,6 +269,21 @@ mod tests {
         let line = "Jan 1 00:00:00 host tag: msg";
         let f = parse(line, 1970).unwrap();
         assert_eq!(f.epoch, 0);
+    }
+
+    /// Tabla: RFC5424 con TIMESTAMP imposible y RFC3164 con día imposible
+    /// para el año o una hora fuera de rango casan, pero sin tiempo.
+    #[test]
+    fn fechas_imposibles_quedan_sin_tiempo() {
+        for ts in ["2024-01-01T25:00:00Z", "2024-02-30T10:00:00Z", "2024-04-31T10:00:00.003+02:00", "2024-01-01T10:60:00Z"] {
+            let f = parse(&format!("<34>1 {ts} host app - - - msg"), 2024).unwrap();
+            assert_eq!(f.epoch, 0, "{ts}");
+        }
+        for (linea, year) in [("Feb 30 10:00:00 host tag: msg", 2024), ("Feb 29 10:00:00 host tag: msg", 2023), ("Apr 31 10:00:00 host tag: msg", 2024), ("Jan 1 25:00:00 host tag: msg", 2024)] {
+            let f = parse(linea, year).unwrap_or_else(|| panic!("{linea}: debía casar"));
+            assert_eq!(f.epoch, 0, "{linea} ({year})");
+        }
+        assert_eq!(parse("Feb 29 00:00:00 host tag: msg", 2024).unwrap().epoch, 1_709_164_800_000);
     }
 
     #[test]

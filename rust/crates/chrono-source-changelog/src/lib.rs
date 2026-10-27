@@ -28,7 +28,6 @@ mod cursor;
 mod parser;
 mod record;
 mod simhash;
-mod timeutil;
 
 pub use cursor::ChangelogCursor;
 

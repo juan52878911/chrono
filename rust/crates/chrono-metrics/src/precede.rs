@@ -54,8 +54,8 @@ pub struct Common {
     /// Frecuencia base (P-MSR-3): de las ventanas del mismo tamaño en el periodo
     /// en que las fuentes de la plantilla tuvieron actividad, la fracción que
     /// contiene la plantilla (con cualquier nivel), desde los `rollups` de 60 s.
-    /// `None` si la plantilla no está en los rollups o con `join` (la base de
-    /// todo el índice no es la de dentro de una clave).
+    /// Con `join`, la de las ventanas de cada valor de la clave (ver
+    /// [`LiftBase::KeyWindows`]). `None` si no hay base (ver `lift_base`).
     pub base_rate: Option<f64>,
     /// `base_rate × active_episodes`: en cuántos estaría por azar.
     pub expected: Option<f64>,
@@ -79,7 +79,47 @@ pub struct Preceded {
     /// `common` trae los 10 primeros de los que preceden a 2 o más (o a todos si
     /// hay uno solo); el resto queda fuera.
     pub precursors_total: usize,
+    /// De dónde sale la frecuencia base de `expected` y `lift`.
+    pub lift_base: LiftBase,
 }
+
+/// Criterio de la frecuencia base del lift (P-MSR-3), que va en la salida.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LiftBase {
+    /// Sin `join`: ventanas activas de las fuentes de la plantilla en todo el
+    /// periodo, desde `rollups` (decisión 32).
+    ActiveWindows,
+    /// Con `join`: ventanas de cada valor de la clave con actividad de ese
+    /// valor (algún evento suyo dentro), solo de los valores con episodio;
+    /// sale de plantillar sus eventos (decisión 39).
+    KeyWindows {
+        /// Valores de la clave con algún episodio (la población de la base).
+        units: usize,
+        /// Eventos de esos valores leídos (para las ventanas activas).
+        events: usize,
+        /// De ellos, los plantillados (casan con los niveles y la entidad de
+        /// los precursores).
+        templated: usize,
+    },
+    /// Sin base: ni `expected` ni `lift`. El motivo, en los dos idiomas.
+    None(crate::Msg),
+}
+
+impl LiftBase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LiftBase::ActiveWindows => "active_windows",
+            LiftBase::KeyWindows { .. } => "key_windows",
+            LiftBase::None(_) => "none",
+        }
+    }
+}
+
+/// Tope de eventos que se plantillan para la base con `join`: por encima, sin
+/// lift (y se dice), antes que una consulta que tarde minutos.
+pub const KEY_BASE_MAX_TEMPLATED: usize = 200_000;
+/// Tope de eventos de las unidades que se leen para las ventanas activas.
+pub const KEY_BASE_MAX_EVENTS: usize = 3_000_000;
 
 #[derive(Debug, Clone)]
 pub struct PrecedeOpts<'a> {
@@ -167,9 +207,10 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
     };
     let sql = format!(
         "SELECT e.id, e.at, e.at_epoch, {entity}, {key_col} FROM events e
-         WHERE e.at_epoch > 0 AND (?1 = 0 OR e.at_epoch >= ?1) {filters}
+         WHERE e.at_epoch > 0 AND (?1 = 0 OR e.at_epoch >= ?1) {filters}{pre}
          ORDER BY e.at_epoch ASC, e.id ASC",
-        entity = entity_sql()
+        entity = entity_sql(),
+        pre = level_prefilter(conn, &o.anchor)?
     );
     let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&o.since_epoch];
     for p in &extra {
@@ -252,41 +293,62 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
     };
     let pre_sql = format!(
         "SELECT e.id, e.at_epoch, e.title, {level_sql}, {entity} FROM events e
-         WHERE e.at_epoch >= ?1 AND e.at_epoch < ?2 {pf} {same_key}
+         WHERE e.at_epoch >= ?1 AND e.at_epoch < ?2 {pf}{pre} {same_key}
          ORDER BY e.at_epoch ASC, e.id ASC",
-        entity = entity_sql()
+        entity = entity_sql(),
+        // Por nivel: solo las filas de esos niveles (y las sin nivel), no toda la ventana.
+        pre = level_prefilter(conn, &pre_scope)?
     );
     let mut pre = conn.prepare(&pre_sql)?;
+    // Con clave, los eventos de cada valor con episodio se leen UNA vez (para
+    // los precursores y para la base del lift) en vez de una consulta por
+    // episodio; por encima de los topes, una por episodio y sin lift.
+    let (units, units_over) = match join {
+        Some(k) => match load_units(conn, k, &mut pre, &pextra, &episodes, o.window_ms, o.since_epoch, o.anchor.until_epoch)? {
+            Ok(u) => (Some(u), None),
+            Err(lb) => (None, Some(lb)),
+        },
+        None => (None, None),
+    };
+    // Sin clave, un barrido: cada evento de la unión de ventanas se lee y se
+    // plantilla UNA vez, y cuenta en los episodios cuya ventana lo contiene.
+    let mut swept = if join.is_none() { Some(sweep(&mut pre, &pextra, &episodes, o.window_ms)?) } else { None };
     let mut common: BTreeMap<(String, String), i64> = BTreeMap::new();
-    for (ep, key) in &mut episodes {
-        let from = ep.start_epoch - o.window_ms;
+    for (i, (ep, key)) in episodes.iter_mut().enumerate() {
         let to = ep.start_epoch;
-        let mut b: Vec<&dyn rusqlite::ToSql> = vec![&from, &to];
-        for p in &pextra {
-            b.push(p);
-        }
-        if join.is_some() {
-            b.push(&*key);
-        }
-        let rows: Vec<(String, i64, String, String, String)> = pre
-            .query_map(rusqlite::params_from_iter(b), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
-            .collect::<std::result::Result<_, _>>()?;
         // (nivel, plantilla, entidad) -> (cuenta, último epoch, ejemplo)
-        let mut agg: HashMap<(String, String, String), (i64, i64, String)> = HashMap::new();
-        for (id, epoch, title, level, entity) in rows {
-            // Lo del MISMO origen en el último segundo es el propio arranque del
-            // episodio, no algo que lo preceda.
-            if entity == ep.entity && to - epoch < 1000 {
-                continue;
+        let agg: HashMap<(String, String, String), (i64, i64, String)> = match &mut swept {
+            Some(s) => s.take(i),
+            None => {
+                let from = ep.start_epoch - o.window_ms;
+                let rows: Vec<PreRow> = match &units {
+                    Some(u) => u.window(key, from, to),
+                    None => {
+                        let mut b: Vec<&dyn rusqlite::ToSql> = vec![&from, &to];
+                        for p in &pextra {
+                            b.push(p);
+                        }
+                        b.push(&*key);
+                        pre.query_map(rusqlite::params_from_iter(b), pre_row)?.collect::<std::result::Result<_, _>>()?
+                    }
+                };
+                let mut agg = HashMap::new();
+                for (id, epoch, level, template, entity) in rows {
+                    // Lo del MISMO origen en el último segundo es el propio arranque del
+                    // episodio, no algo que lo preceda.
+                    if entity == ep.entity && to - epoch < 1000 {
+                        continue;
+                    }
+                    let e = agg.entry((level, template, entity)).or_insert((0, 0, String::new()));
+                    e.0 += 1;
+                    if epoch >= e.1 {
+                        e.1 = epoch;
+                        e.2 = id;
+                    }
+                }
+                agg
             }
-            let key = (level.to_ascii_uppercase(), chrono_core::templatize(&title), entity);
-            let e = agg.entry(key).or_insert((0, 0, String::new()));
-            e.0 += 1;
-            if epoch >= e.1 {
-                e.1 = epoch;
-                e.2 = id;
-            }
-        }
+        };
         let mut seen_here: std::collections::BTreeSet<(String, String)> = Default::default();
         let mut list: Vec<Precursor> = agg
             .into_iter()
@@ -304,25 +366,57 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
                 .then(b.count.cmp(&a.count))
                 .then(a.last_before_secs.cmp(&b.last_before_secs))
                 .then(a.template.cmp(&b.template))
+                // Sin esto, dos precursores que solo difieren en la entidad salían en
+                // el orden del HashMap: distinto en cada ejecución.
+                .then(a.level.cmp(&b.level))
+                .then(a.entity.cmp(&b.entity))
         });
         list.truncate(o.per_episode);
         ep.preceding = list;
     }
     let precursors_total = common.len();
     let candidates: Vec<((String, String), i64)> = common.into_iter().filter(|(_, n)| *n >= 2 || episodes_total == 1).collect();
-    let templates: Vec<&str> = candidates.iter().map(|((_, t), _)| t.as_str()).collect();
-    // Con clave, la base temporal de todo el índice no es la de dentro de una
-    // sesión o traza: sin frecuencia base por clave, ni esperado ni lift.
-    let rates = if join.is_some() { HashMap::new() } else { base_rates(conn, &templates, o.window_ms, o.since_epoch, o.anchor.until_epoch)? };
+    // Frecuencia base y episodios activos de cada candidato.
+    let mut bases: HashMap<(String, String), (f64, i64)> = HashMap::new();
+    let lift_base = match join {
+        // Con clave, la base temporal de todo el índice no es la de dentro de
+        // una sesión o traza: sale de las ventanas de cada valor de la clave.
+        Some(_) => match (&units, units_over) {
+            (Some(u), _) => {
+                let wanted: std::collections::HashSet<(String, String)> = candidates.iter().map(|(c, _)| c.clone()).collect();
+                bases = key_base(u, &episodes, &wanted, o.window_ms);
+                LiftBase::KeyWindows { units: u.ends.len(), events: u.events, templated: u.templated }
+            }
+            (None, lb) => lb.unwrap_or_else(|| too_big(0, 0)),
+        },
+        None => {
+            let templates: Vec<&str> = candidates.iter().map(|((_, t), _)| t.as_str()).collect();
+            match base_rates(conn, &templates, o.window_ms, o.since_epoch, o.anchor.until_epoch)? {
+                Some(rates) => {
+                    for ((level, template), _) in &candidates {
+                        if let Some(b) = rates.get(template).filter(|b| b.rate > 0.0) {
+                            // Lo esperado se compara con los episodios cuya ventana previa fue
+                            // activa para la fuente de la plantilla (en los demás no podía estar).
+                            // Una ventana con la plantilla es activa por construcción: active >= n.
+                            let active = episodes.iter().filter(|(ep, _)| b.is_active(ep.start_epoch)).count() as i64;
+                            bases.insert((level.clone(), template.clone()), (b.rate, active));
+                        }
+                    }
+                    LiftBase::ActiveWindows
+                }
+                None => LiftBase::None(crate::Msg {
+                    en: "rollups are not up to date (run chrono sync): no base rate, no lift".into(),
+                    es: "los rollups no están al día (chrono sync): sin frecuencia base ni lift".into(),
+                }),
+            }
+        }
+    };
     let mut commons: Vec<Common> = candidates
         .into_iter()
         .map(|((level, template), n)| {
-            let base = rates.get(&template).filter(|b| b.rate > 0.0);
-            // Lo esperado se compara con los episodios cuya ventana previa fue
-            // activa para la fuente de la plantilla (en los demás no podía estar).
-            // Una ventana con la plantilla es activa por construcción: active >= n.
-            let active = base.map(|b| episodes.iter().filter(|(ep, _)| b.is_active(ep.start_epoch)).count() as i64);
-            let base_rate = base.map(|b| b.rate);
+            let base = bases.get(&(level.clone(), template.clone())).filter(|b| b.0 > 0.0);
+            let active = base.map(|b| b.1);
+            let base_rate = base.map(|b| b.0);
             let expected = base_rate.zip(active).map(|(r, a)| r * a as f64);
             let lift = base_rate.zip(active).map(|(r, a)| (n as f64 / a as f64) / r);
             Common { level, template, episodes: n, active_episodes: active, base_rate, expected, lift }
@@ -342,7 +436,291 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
     });
     commons.truncate(10);
     let episodes: Vec<Episode> = episodes.into_iter().take(o.max_episodes).map(|(e, _)| e).collect();
-    Ok(Preceded { episodes, episodes_total, common: commons, anchors_without_key, anchors_without_time: anchors_without_time as usize, precursors_total })
+    Ok(Preceded {
+        episodes,
+        episodes_total,
+        common: commons,
+        anchors_without_key,
+        anchors_without_time: anchors_without_time as usize,
+        precursors_total,
+        lift_base,
+    })
+}
+
+/// Un precursor posible: `(id, epoch, nivel en mayúsculas, plantilla, entidad)`.
+type PreRow = (String, i64, String, String, String);
+
+fn pre_row(r: &rusqlite::Row) -> rusqlite::Result<PreRow> {
+    let (title, level): (String, String) = (r.get(2)?, r.get(3)?);
+    Ok((r.get(0)?, r.get(1)?, level.to_ascii_uppercase(), chrono_core::templatize(&title), r.get(4)?))
+}
+
+/// Eventos de los valores de la clave con algún episodio, leídos una vez.
+struct Units {
+    /// Por valor: tiempos de TODOS sus eventos (ordenados), para las ventanas activas.
+    ends: HashMap<String, Vec<i64>>,
+    /// Por valor: los que casan con los precursores (niveles y entidad), plantillados.
+    pre: HashMap<String, Vec<PreRow>>,
+    /// Finales de ventana que cuentan para la base: `[lo, hi)`.
+    lo: i64,
+    hi: i64,
+    events: usize,
+    templated: usize,
+}
+
+impl Units {
+    /// Precursores posibles de un valor en `[from, to)`, en orden.
+    fn window(&self, unit: &str, from: i64, to: i64) -> Vec<PreRow> {
+        let Some(rows) = self.pre.get(unit) else { return Vec::new() };
+        let i = rows.partition_point(|r| r.1 < from);
+        rows[i..].iter().take_while(|r| r.1 < to).cloned().collect()
+    }
+}
+
+/// Lee los eventos de cada valor de la clave con episodio que pueden caer en
+/// alguna ventana: desde `since - window` (o todos) hasta el último evento del
+/// índice o `until`. `Err` con el motivo si pasan de los topes
+/// ([`KEY_BASE_MAX_EVENTS`], [`KEY_BASE_MAX_TEMPLATED`]).
+#[allow(clippy::too_many_arguments)]
+fn load_units(
+    conn: &Connection,
+    key: &str,
+    pre: &mut rusqlite::Statement,
+    pextra: &[String],
+    episodes: &[(Episode, String)],
+    window_ms: i64,
+    since: i64,
+    until: i64,
+) -> Result<std::result::Result<Units, LiftBase>> {
+    let max: i64 = conn.query_row("SELECT COALESCE(MAX(at_epoch), 0) FROM events WHERE at_epoch > 0", [], |r| r.get(0))?;
+    let lo = since.max(0);
+    let hi = if until > 0 { until.min(max + 1) } else { max + 1 };
+    let from = (since - window_ms).max(1);
+    let mut times = conn.prepare(&format!(
+        "SELECT e.at_epoch FROM events e WHERE e.rid IN ({}) AND e.at_epoch >= ?2 AND e.at_epoch < ?3 ORDER BY 1",
+        crate::relate::key_rids_sql(key, "?1", false)
+    ))?;
+    let units: std::collections::BTreeSet<&str> = episodes.iter().map(|(_, k)| k.as_str()).collect();
+    let mut u = Units { ends: HashMap::new(), pre: HashMap::new(), lo, hi, events: 0, templated: 0 };
+    for unit in units {
+        let ends: Vec<i64> = times.query_map(rusqlite::params![unit, from, hi], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
+        u.events += ends.len();
+        if u.events > KEY_BASE_MAX_EVENTS {
+            return Ok(Err(too_big(u.events, u.templated)));
+        }
+        let mut b: Vec<&dyn rusqlite::ToSql> = vec![&from, &hi];
+        for p in pextra {
+            b.push(p);
+        }
+        b.push(&unit);
+        let rows: Vec<PreRow> = pre.query_map(rusqlite::params_from_iter(b), pre_row)?.collect::<std::result::Result<_, _>>()?;
+        u.templated += rows.len();
+        if u.templated > KEY_BASE_MAX_TEMPLATED {
+            return Ok(Err(too_big(u.events, u.templated)));
+        }
+        u.ends.insert(unit.to_string(), ends);
+        u.pre.insert(unit.to_string(), rows);
+    }
+    Ok(Ok(u))
+}
+
+/// Frecuencia base con `join` (decisión 39): la misma idea que la de
+/// [`base_rates`] (fracción de las ventanas ACTIVAS que contienen el
+/// precursor), pero dentro de cada valor de la clave. Para cada valor `u` con
+/// algún episodio, una ventana de `window_ms` que acaba en `t` es activa si `u`
+/// tuvo algún evento en `[t-W, t)`, y contiene el precursor si alguno de ellos
+/// lo es (nivel + plantilla, con los filtros de nivel y entidad de los
+/// precursores). `base = Σ_u contiene / Σ_u activas` (en ms de finales de
+/// ventana) y un episodio es activo si su ventana previa lo es en su valor.
+/// `(nivel, plantilla) -> (base, episodios activos)`.
+fn key_base(
+    u: &Units,
+    episodes: &[(Episode, String)],
+    wanted: &std::collections::HashSet<(String, String)>,
+    window_ms: i64,
+) -> HashMap<(String, String), (f64, i64)> {
+    let mut out = HashMap::new();
+    if wanted.is_empty() {
+        return out;
+    }
+    // Un evento en `e` está en las ventanas que acaban en `(e, e+W]`, es
+    // decir, `[e+1, e+1+W)`: `cover` con bucket 0 sobre `e+1`.
+    let shifted = |v: &[i64]| {
+        let mut v: Vec<i64> = v.iter().map(|x| x + 1).collect();
+        v.dedup();
+        v
+    };
+    let mut active_total = 0i64;
+    let mut active_of: HashMap<&str, Vec<(i64, i64)>> = HashMap::new();
+    let mut covered: HashMap<(String, String), i64> = HashMap::new();
+    for (unit, ends) in &u.ends {
+        let active = cover(&shifted(ends), 0, window_ms, u.lo, u.hi);
+        active_total += span(&active);
+        active_of.insert(unit.as_str(), active);
+        let mut per: HashMap<(String, String), Vec<i64>> = HashMap::new();
+        for (_, at, level, template, _) in u.pre.get(unit).map_or(&[][..], Vec::as_slice) {
+            let k = (level.clone(), template.clone());
+            if wanted.contains(&k) {
+                per.entry(k).or_default().push(*at);
+            }
+        }
+        for (k, bs) in per {
+            *covered.entry(k).or_insert(0) += span(&cover(&shifted(&bs), 0, window_ms, u.lo, u.hi));
+        }
+    }
+    if active_total == 0 {
+        return out;
+    }
+    // Episodios cuya ventana previa fue activa en su valor (igual para todos
+    // los precursores: la actividad es la del valor, no la de una fuente).
+    let active_eps = episodes
+        .iter()
+        .filter(|(ep, k)| {
+            let iv = active_of.get(k.as_str()).map_or(&[][..], Vec::as_slice);
+            let i = iv.partition_point(|&(_, e)| e <= ep.start_epoch);
+            iv.get(i).is_some_and(|&(s, _)| s <= ep.start_epoch)
+        })
+        .count() as i64;
+    for (k, c) in covered {
+        out.insert(k, ((c as f64 / active_total as f64).min(1.0), active_eps));
+    }
+    out
+}
+
+fn too_big(events: usize, templated: usize) -> LiftBase {
+    LiftBase::None(crate::Msg {
+        en: format!(
+            "with join the base rate needs the events of the key values with an episode and they exceed the cap \
+             ({events} read, {templated} templated; caps {KEY_BASE_MAX_EVENTS} and {KEY_BASE_MAX_TEMPLATED}): no lift; narrow with since/until or the anchor"
+        ),
+        es: format!(
+            "con join la frecuencia base necesita los eventos de los valores de la clave con episodio y pasan del tope \
+             ({events} leídos, {templated} plantillados; topes {KEY_BASE_MAX_EVENTS} y {KEY_BASE_MAX_TEMPLATED}): sin lift; acota con since/until o el ancla"
+        ),
+    })
+}
+
+/// Condición de más para las anclas y los precursores con nivel: el filtro de
+/// nivel (`UPPER` del nivel, o del deducido) no puede usar `idx_events_level` y
+/// se leía `events` entero o toda la ventana (el FATAL de `informe`). Esto dice
+/// lo mismo en forma de índice: los niveles de la fuente que en mayúsculas están
+/// en la lista y, con `infer_level`, los sin nivel. Es un superconjunto (el
+/// filtro de siempre sigue ahí): mismas filas. `UPPER` de SQLite solo pasa ASCII.
+fn level_prefilter(conn: &Connection, scope: &EventScope) -> Result<String> {
+    let Some(l) = scope.level.filter(|l| !l.trim().is_empty()) else { return Ok(String::new()) };
+    let want = crate::timeline::comma_list(l, true);
+    // Una lista sin ningún nivel (`,`) casa los eventos sin nivel: sin atajo.
+    if want == ",," {
+        return Ok(String::new());
+    }
+    let mut st = conn.prepare("SELECT DISTINCT level FROM events")?;
+    let raw = st.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let list: Vec<String> = raw
+        .iter()
+        .filter(|v| !v.is_empty() && want.contains(&format!(",{},", v.to_ascii_uppercase())))
+        .map(|v| format!("'{}'", v.replace('\'', "''")))
+        .collect();
+    let unlabeled = if scope.infer_level { " OR e.level = ''" } else { "" };
+    Ok(format!(" AND (e.level IN ({}){unlabeled})", list.join(", ")))
+}
+
+/// Precursor interno del barrido: (nivel, plantilla, entidad).
+type PreKey = (String, String, String);
+/// (cuenta, último epoch, fila del ejemplo) de un precursor en un episodio.
+type PreAgg = (i64, i64, Option<usize>);
+
+/// Lo que precede a cada episodio, sacado de un solo barrido ([`sweep`]).
+struct Swept {
+    /// Cada (nivel, plantilla, entidad) una vez; los episodios guardan su índice.
+    keys: Vec<PreKey>,
+    /// Id de cada fila leída (el ejemplo de un precursor es su índice aquí).
+    ids: Vec<String>,
+    /// Por episodio: precursor → (cuenta, último epoch, fila del ejemplo).
+    per_ep: Vec<HashMap<u32, PreAgg>>,
+}
+
+impl Swept {
+    /// Lo del episodio `i`, con la misma forma que el recuento por episodio.
+    fn take(&mut self, i: usize) -> HashMap<PreKey, (i64, i64, String)> {
+        std::mem::take(&mut self.per_ep[i])
+            .into_iter()
+            .map(|(k, (n, last, row))| (self.keys[k as usize].clone(), (n, last, row.map(|r| self.ids[r].clone()).unwrap_or_default())))
+            .collect()
+    }
+}
+
+/// Paso 3 de [`precede`] sin clave: en vez de una consulta por episodio (las
+/// ventanas se solapan y cada evento se leía y se plantillaba varias veces),
+/// una por tramo de la unión de ventanas, en orden. Los episodios van por
+/// inicio y las ventanas miden lo mismo, así que las que contienen un instante
+/// son un tramo contiguo de episodios que avanza con él. Cada episodio ve las
+/// mismas filas en el mismo orden que con su propia consulta: mismas cifras.
+fn sweep(pre: &mut rusqlite::Statement, pextra: &[String], episodes: &[(Episode, String)], window_ms: i64) -> Result<Swept> {
+    let n = episodes.len();
+    let mut s = Swept { keys: Vec::new(), ids: Vec::new(), per_ep: vec![HashMap::new(); n] };
+    if window_ms <= 0 {
+        return Ok(s);
+    }
+    let starts: Vec<i64> = episodes.iter().map(|(e, _)| e.start_epoch).collect();
+    // Unión de las ventanas [inicio - window, inicio).
+    let mut spans: Vec<(i64, i64)> = Vec::new();
+    for &st in &starts {
+        let (a, b) = (st - window_ms, st);
+        match spans.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => spans.push((a, b)),
+        }
+    }
+    let mut interned: HashMap<PreKey, u32> = HashMap::new();
+    // Episodios activos: [lo, hi) = los de inicio en (t, t + window].
+    let (mut lo, mut hi) = (0usize, 0usize);
+    for (a, b) in spans {
+        let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&a, &b];
+        for p in pextra {
+            bound.push(p);
+        }
+        let mut rows = pre.query(rusqlite::params_from_iter(bound))?;
+        while let Some(r) = rows.next()? {
+            let epoch: i64 = r.get(1)?;
+            while lo < n && starts[lo] <= epoch {
+                lo += 1;
+            }
+            while hi < n && starts[hi] - window_ms <= epoch {
+                hi += 1;
+            }
+            if lo >= hi {
+                continue;
+            }
+            let key = (r.get::<_, String>(3)?.to_ascii_uppercase(), chrono_core::templatize(&r.get::<_, String>(2)?), r.get::<_, String>(4)?);
+            let k = match interned.get(&key) {
+                Some(&k) => k,
+                None => {
+                    let k = s.keys.len() as u32;
+                    s.keys.push(key.clone());
+                    interned.insert(key, k);
+                    k
+                }
+            };
+            let row = s.ids.len();
+            s.ids.push(r.get(0)?);
+            let entity = &s.keys[k as usize].2;
+            for (i, agg) in s.per_ep.iter_mut().enumerate().take(hi).skip(lo) {
+                let ep = &episodes[i].0;
+                // Lo del MISMO origen en el último segundo es el propio arranque del
+                // episodio, no algo que lo preceda.
+                if *entity == ep.entity && ep.start_epoch - epoch < 1000 {
+                    continue;
+                }
+                let e = agg.entry(k).or_insert((0, 0, None));
+                e.0 += 1;
+                if epoch >= e.1 {
+                    e.1 = epoch;
+                    e.2 = Some(row);
+                }
+            }
+        }
+    }
+    Ok(s)
 }
 
 /// Frecuencia base de una plantilla (P-MSR-3) y dónde vale.
@@ -391,10 +769,11 @@ fn span(iv: &[(i64, i64)]) -> i64 {
 /// daba una base baja y casi todo salía con lift > 1. Un bucket ocupado
 /// `[b, b+bucket)` cubre los finales de ventana en `[b, b+bucket+window)`; se
 /// unen los intervalos. O(buckets de esas fuentes), sin tocar `events`.
-fn base_rates(conn: &Connection, templates: &[&str], window_ms: i64, since: i64, until: i64) -> Result<HashMap<String, Base>> {
+/// `None` si los rollups no están al día.
+fn base_rates(conn: &Connection, templates: &[&str], window_ms: i64, since: i64, until: i64) -> Result<Option<HashMap<String, Base>>> {
     let mut out = HashMap::new();
     if templates.is_empty() {
-        return Ok(out);
+        return Ok(Some(out));
     }
     // Rollups atrasados (un `tail`, eventos borrados) darían una base baja y un
     // lift inflado: sin ellos al día, no hay frecuencia base.
@@ -404,16 +783,21 @@ fn base_rates(conn: &Connection, templates: &[&str], window_ms: i64, since: i64,
         |r| r.get(0),
     )?;
     if !fresh {
-        return Ok(out);
+        return Ok(None);
     }
     let bucket: i64 = conn
         .query_row("SELECT value FROM meta WHERE key = 'rollup_bucket_ms'", [], |r| r.get::<_, String>(0))
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(60_000);
-    let (lo, hi): (Option<i64>, Option<i64>) =
-        conn.query_row("SELECT MIN(at_epoch), MAX(at_epoch) FROM events WHERE at_epoch > 0", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    let (Some(mut lo), Some(hi)) = (lo, hi) else { return Ok(out) };
+    // Dos subconsultas: con MIN y MAX en la misma, SQLite no usa el atajo del
+    // índice y recorre `idx_events_at` entero (2,5 s a 5M).
+    let (lo, hi): (Option<i64>, Option<i64>) = conn.query_row(
+        "SELECT (SELECT MIN(at_epoch) FROM events WHERE at_epoch > 0), (SELECT MAX(at_epoch) FROM events WHERE at_epoch > 0)",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let (Some(mut lo), Some(hi)) = (lo, hi) else { return Ok(Some(out)) };
     // `hi` es exclusivo y un episodio puede empezar en el último evento del
     // índice: sin el +1, su ventana no salía activa (active < episodios con la
     // plantilla, que antes tapaba un `.max`).
@@ -425,7 +809,7 @@ fn base_rates(conn: &Connection, templates: &[&str], window_ms: i64, since: i64,
         hi = hi.min(until);
     }
     if hi <= lo {
-        return Ok(out);
+        return Ok(Some(out));
     }
     let wanted: std::collections::HashSet<&str> = templates.iter().copied().collect();
     let mut ids: HashMap<i64, String> = HashMap::new();
@@ -437,7 +821,7 @@ fn base_rates(conn: &Connection, templates: &[&str], window_ms: i64, since: i64,
         }
     }
     if ids.is_empty() {
-        return Ok(out);
+        return Ok(Some(out));
     }
     // Buckets de cada plantilla y las fuentes en que aparece.
     let mut buckets: HashMap<&str, (Vec<i64>, std::collections::BTreeSet<i64>)> = HashMap::new();
@@ -479,7 +863,7 @@ fn base_rates(conn: &Connection, templates: &[&str], window_ms: i64, since: i64,
             out.insert(t.to_string(), Base { rate: (covered as f64 / total as f64).min(1.0), active });
         }
     }
-    Ok(out)
+    Ok(Some(out))
 }
 
 #[cfg(test)]
@@ -534,6 +918,101 @@ mod tests {
         assert_eq!(eps[1].preceding.len(), 2);
         assert_eq!(common.len(), 1, "solo el mismatch está en los dos: {common:?}");
         assert_eq!(common[0].episodes, 2);
+        // Sin rollups no hay base, y se dice por qué.
+        assert!(matches!(r.lift_base, LiftBase::None(_)), "{:?}", r.lift_base);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn el_atajo_de_nivel_no_cambia_las_anclas() {
+        let (path, mut store) = temp_store("prenivel");
+        {
+            let mut w = store.writer().unwrap();
+            for (i, lv) in ["FATAL", "Fatal", "fatal", "critical", "ERROR", "", "", "INFO", "it's"].iter().enumerate() {
+                let mut e = ev(&format!("n{i}"), 100 + i as i64, lv, "db", "x");
+                if lv.is_empty() {
+                    e.attrs.insert("level_inferred".into(), if i % 2 == 0 { "FATAL".into() } else { "info".into() });
+                }
+                w.add_event(&e).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        let c = store.conn();
+        for level in ["FATAL", "fatal,CRITICAL", "info", "IT'S", "nada", " , ", "ERROR,"] {
+            for infer_level in [false, true] {
+                let scope = EventScope { level: Some(level), infer_level, ..Default::default() };
+                let (f, x) = scope.sql(1);
+                let n = |extra: &str| -> i64 { c.query_row(&format!("SELECT COUNT(*) FROM events e WHERE 1 {f}{extra}"), rusqlite::params_from_iter(&x), |r| r.get(0)).unwrap() };
+                assert_eq!(n(&level_prefilter(c, &scope).unwrap()), n(""), "{level:?} infer={infer_level}");
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn el_barrido_da_lo_mismo_que_contar_cada_ventana() {
+        // Ventanas solapadas, inicios iguales en dos orígenes y el mismo origen en el
+        // último segundo: lo de cada episodio, contado a mano sobre la lista.
+        let (path, mut store) = temp_store("barrido");
+        let levels = ["FATAL", "ERROR", "WARNING", "INFO"];
+        let mut evs: Vec<Event> = Vec::new();
+        let mut x: u64 = 7;
+        for i in 0..400i64 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let (lv, svc) = (levels[(x >> 33) as usize % 4], format!("s{}", (x >> 40) % 3));
+            let secs = 1000 + i * 5 + (x >> 50) as i64 % 3;
+            evs.push(ev(&format!("e{i}"), secs, lv, &svc, &format!("{lv}: paso {} de {}", (x >> 45) % 4, i % 7)));
+        }
+        // Dos anclas a la vez en orígenes distintos.
+        let t = evs[200].at_epoch / 1000;
+        evs.push(ev("dup", t, "FATAL", "s9", "FATAL: otro"));
+        // Del mismo origen: medio segundo antes no cuenta; tres segundos antes, sí.
+        for (id, ms) in [("m1", 500), ("m2", 3000)] {
+            let mut e = ev(id, t, "ERROR", "s9", "ERROR: previo");
+            e.at_epoch -= ms;
+            evs.push(e);
+        }
+        {
+            let mut w = store.writer().unwrap();
+            for e in &evs {
+                w.add_event(e).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        let o = PrecedeOpts {
+            anchor: EventScope { level: Some("FATAL"), ..Default::default() },
+            gap_ms: 20_000,
+            by_origin: true,
+            max_episodes: 10_000,
+            per_episode: 10_000,
+            ..Default::default()
+        };
+        let r = precede(store.conn(), &o).unwrap();
+        assert!(r.episodes.len() > 20, "{}", r.episodes.len());
+        for ep in &r.episodes {
+            let mut want: HashMap<(String, String, String), (i64, i64)> = HashMap::new();
+            for e in &evs {
+                let svc = &e.touches[0].entity;
+                let inside = e.at_epoch >= ep.start_epoch - o.window_ms && e.at_epoch < ep.start_epoch;
+                if !inside || e.level == "INFO" || (*svc == ep.entity && ep.start_epoch - e.at_epoch < 1000) {
+                    continue;
+                }
+                let w = want.entry((e.level.clone(), chrono_core::templatize(&e.title), svc.clone())).or_insert((0, 0));
+                w.0 += 1;
+                w.1 = w.1.max(e.at_epoch);
+            }
+            let got: HashMap<(String, String, String), (i64, i64)> = ep
+                .preceding
+                .iter()
+                .map(|p| ((p.level.clone(), p.template.clone(), p.entity.clone()), (p.count, ep.start_epoch - p.last_before_secs * 1000)))
+                .collect();
+            assert_eq!(got.len(), want.len(), "{ep:?}");
+            for (k, (n, last)) in &want {
+                let (gn, glast) = got[k];
+                assert_eq!(gn, *n, "{k:?} en {}", ep.start_at);
+                assert_eq!(glast, ep.start_epoch - (ep.start_epoch - last) / 1000 * 1000, "{k:?}");
+            }
+        }
         let _ = std::fs::remove_file(&path);
     }
 
@@ -574,6 +1053,7 @@ mod tests {
         let r = precede(store.conn(), &o).unwrap();
         assert_eq!(r.episodes.len(), 5);
         assert_eq!(r.episodes_total, 30, "el total no se recorta con max_episodes");
+        assert_eq!(r.lift_base, LiftBase::ActiveWindows);
         let by = |t: &str| r.common.iter().find(|c| c.template.contains(t)).unwrap_or_else(|| panic!("{t}: {:?}", r.common));
         let (disk, hb) = (by("disk full"), by("heartbeat"));
         assert_eq!(disk.episodes, 30);
@@ -615,6 +1095,90 @@ mod tests {
         assert!(ruido.lift.unwrap() < 1.5, "el ruido de la ráfaga no precede más que por azar: {ruido:?}");
         assert!(disco.lift.unwrap() > 3.0, "{disco:?}");
         assert_eq!(r.common[0].template, disco.template, "{:?}", r.common);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn join_lift_sobre_las_ventanas_de_cada_valor_calculado_a_mano() {
+        let (path, mut store) = temp_store("join-lift");
+        {
+            let mut w = store.writer().unwrap();
+            w.set_dims(vec!["sesion".into()]);
+            let mut e = |id: &str, secs, level: &str, title: &str, ses: &str| {
+                let mut x = ev(id, secs, level, "tool", title);
+                x.attrs.insert("sesion".into(), ses.into());
+                w.add_event(&x).unwrap();
+            };
+            // Ventana de 100 s. Un evento en `e` está en las ventanas que acaban en
+            // `[e+1, e+1+W)` (ms).
+            // A: cola(1000) fallo(1050) tick(2000). Activas: [1000001, 1150001) ∪
+            //    [2000001, 2100001) = 250 000 ms; con cola: [1000001, 1100001) = 100 000.
+            e("a-cola", 1000, "WARNING", "WARNING: cola llena", "A");
+            e("a-fallo", 1050, "ERROR", "Exit code 1", "A");
+            e("a-tick", 2000, "INFO", "tick", "A");
+            // B: tick(5000) cola(5100) fallo(5150) cola(6000). Activas: [5000001, 5250001)
+            //    ∪ [6000001, 6100001) = 350 000; con cola: 100 000 + 100 000 = 200 000.
+            e("b-tick", 5000, "INFO", "tick", "B");
+            e("b-cola", 5100, "WARNING", "WARNING: cola llena", "B");
+            e("b-fallo", 5150, "ERROR", "Exit code 1", "B");
+            e("b-cola2", 6000, "WARNING", "WARNING: cola llena", "B");
+            // C no tiene episodio: no entra en la población aunque la cola sea continua.
+            for i in 0..20 {
+                e(&format!("c{i}"), 8000 + 50 * i, "WARNING", "WARNING: cola llena", "C");
+            }
+            w.commit().unwrap();
+        }
+        let o = PrecedeOpts {
+            anchor: EventScope { grep: Some("Exit code"), ..Default::default() },
+            join: Some("sesion"),
+            window_ms: 100_000,
+            ..Default::default()
+        };
+        let r = precede(store.conn(), &o).unwrap();
+        assert_eq!(r.episodes_total, 2);
+        // Base = (100 000 + 200 000) / (250 000 + 350 000) = 0,5; los dos episodios
+        // tienen actividad antes y la cola: esperado 1, lift (2/2)/0,5 = 2.
+        assert_eq!(r.lift_base, LiftBase::KeyWindows { units: 2, events: 7, templated: 5 });
+        let cola = r.common.iter().find(|c| c.template == "WARNING: cola llena").unwrap_or_else(|| panic!("{:?}", r.common));
+        assert_eq!((cola.episodes, cola.active_episodes), (2, Some(2)));
+        assert_eq!(cola.base_rate, Some(0.5));
+        assert_eq!(cola.expected, Some(1.0));
+        assert_eq!(cola.lift, Some(2.0));
+        // Lo mismo que sin la tabla de unidades: los precursores de cada episodio.
+        let pre: Vec<(&str, i64)> = r.episodes.iter().map(|e| (e.preceding[0].template.as_str(), e.preceding[0].last_before_secs)).collect();
+        assert_eq!(pre, [("WARNING: cola llena", 50), ("WARNING: cola llena", 50)]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn join_lift_de_un_precursor_que_sale_en_toda_la_sesion_es_uno() {
+        let (path, mut store) = temp_store("join-lift-ubicuo");
+        {
+            let mut w = store.writer().unwrap();
+            w.set_dims(vec!["sesion".into()]);
+            let mut e = |id: &str, secs, level: &str, title: &str, ses: &str| {
+                let mut x = ev(id, secs, level, "tool", title);
+                x.attrs.insert("sesion".into(), ses.into());
+                w.add_event(&x).unwrap();
+            };
+            // Dos sesiones con un aviso cada 30 s durante 20 min y un fallo en
+            // medio: el aviso está en TODAS sus ventanas (base 1, lift 1), aunque
+            // en el índice entero (horas sin nada entre sesiones) pareciera raro.
+            for (s, t0) in [("A", 1000i64), ("B", 40_000)] {
+                for i in 0..40 {
+                    e(&format!("{s}{i}"), t0 + 30 * i, "WARNING", "WARNING: ruido", s);
+                }
+                e(&format!("{s}-fallo"), t0 + 600 + 15, "ERROR", "Exit code 1", s);
+            }
+            w.commit().unwrap();
+        }
+        let o = PrecedeOpts { anchor: EventScope { grep: Some("Exit code"), ..Default::default() }, join: Some("sesion"), ..Default::default() };
+        let r = precede(store.conn(), &o).unwrap();
+        let ruido = r.common.iter().find(|c| c.template == "WARNING: ruido").unwrap();
+        // Activas por sesión: [t0+1, t0+1170+120) en ms; con ruido, las mismas
+        // salvo que el fallo (t0+615) no amplía nada: base 1.
+        assert_eq!(ruido.base_rate, Some(1.0), "{ruido:?}");
+        assert_eq!(ruido.lift, Some(1.0));
         let _ = std::fs::remove_file(&path);
     }
 

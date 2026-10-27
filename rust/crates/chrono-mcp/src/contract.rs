@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use crate::since::since_to_epoch;
 
 /// Herramientas que consultan eventos y llevan cabecera, con su lista principal
-/// y su tope por defecto (para `truncated`).
+/// y su tope por defecto.
 pub fn main_list(tool: &str) -> Option<(&'static str, i64)> {
     Some(match tool {
         "top" => ("top", 25),
@@ -72,8 +72,11 @@ pub fn coverage(conn: &Connection, args: &Value, since_epoch: i64) -> (i64, Opti
     // Cobertura: solo por fuente (lo que hay), sin los demás filtros (lo que se busca).
     let src = chrono_metrics::EventScope { source: scope.source, ..Default::default() };
     let (sf, sx) = src.sql_public(1);
+    // Dos subconsultas: con MIN y MAX en la misma, SQLite no usa el atajo del
+    // índice y recorre `idx_events_at` entero en cada respuesta (2,5 s a 5M).
     let cov_sql = format!(
-        "SELECT MIN(e.at_epoch), MAX(e.at_epoch) FROM events e WHERE e.at_epoch > 0 {sf}"
+        "SELECT (SELECT MIN(e.at_epoch) FROM events e WHERE e.at_epoch > 0 {sf}),
+                (SELECT MAX(e.at_epoch) FROM events e WHERE e.at_epoch > 0 {sf})"
     );
     let bound2: Vec<&dyn rusqlite::ToSql> = sx.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
     let cov = conn
@@ -90,21 +93,8 @@ pub fn iso(ms: i64) -> String {
     let millis = ms.rem_euclid(1000);
     let days = secs.div_euclid(86_400);
     let sod = secs.rem_euclid(86_400);
-    let (y, m, d) = civil_from_days(days);
+    let (y, m, d) = chrono_core::time::civil_from_days(days);
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{millis:03}Z", sod / 3600, (sod % 3600) / 60, sod % 60)
-}
-
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 /// Argumentos con los que se cuenta el `total`. En `stats`, `attr` es el
@@ -126,8 +116,10 @@ fn count_args(tool: &str, args: &Value) -> Value {
     a
 }
 
-/// Cabecera (texto y objeto `meta`) de una respuesta.
-pub fn header(conn: &Connection, tool: &str, args: &Value, result: &Value) -> (String, Value) {
+/// Cabecera (texto y objeto `meta`) de una respuesta. `truncated` lo da la
+/// herramienta: hay más de lo devuelto en su lista principal (antes era
+/// «devolvió el tope», que con exactamente `limit` elementos mentía).
+pub fn header(conn: &Connection, tool: &str, args: &Value, truncated: bool) -> (String, Value) {
     let since = args.get("since").and_then(Value::as_str).unwrap_or("");
     let until = args.get("until").and_then(Value::as_str).unwrap_or("");
     let since_epoch = since_to_epoch(since);
@@ -135,10 +127,6 @@ pub fn header(conn: &Connection, tool: &str, args: &Value, result: &Value) -> (S
     let args_q = args;
     let args = &count_args;
     let (total, cov) = coverage(conn, args, since_epoch);
-    let (list, default_limit) = main_list(tool).unwrap_or(("", 0));
-    let limit = crate::tools::arg_i64(args, "limit", default_limit);
-    let returned = result.get(list).and_then(Value::as_array).map(|a| a.len() as i64);
-    let truncated = matches!(returned, Some(n) if limit > 0 && n >= limit);
     let mut warn = Vec::new();
     if let Some((first, _, last, _)) = &cov {
         let tol = 60 * 60 * 1000; // una hora de holgura: los datos no empiezan en punto
@@ -161,7 +149,7 @@ pub fn header(conn: &Connection, tool: &str, args: &Value, result: &Value) -> (S
     // Con infer_level, la cifra mezcla dos cosas: se dicen por separado para que
     // nadie dé como «total por nivel» lo que incluye líneas sin nivel de la fuente.
     let mut total_s = total.to_string();
-    if args.get("infer_level").and_then(Value::as_bool) == Some(true) && args.get("level").is_some() {
+    if crate::tools::arg_bool(args, "infer_level") && args.get("level").is_some() {
         let mut plain = args.clone();
         if let Some(o) = plain.as_object_mut() {
             o.remove("infer_level");

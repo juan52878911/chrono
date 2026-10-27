@@ -21,7 +21,7 @@ REPO="juan52878911/chrono"
 VERSION="${VERSION:-}"
 # Version used when the latest release can't be resolved. From a checkout it
 # comes from rust/Cargo.toml; the constant is only for the curl | sh one-liner.
-DEFAULT_VERSION="v0.7.0"
+DEFAULT_VERSION="v0.7.1"
 if [ -f rust/Cargo.toml ]; then
   v=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -n1)
   if [ -n "$v" ]; then DEFAULT_VERSION="v$v"; fi
