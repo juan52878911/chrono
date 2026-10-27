@@ -292,6 +292,54 @@ pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilte
     collect(rows)
 }
 
+/// [`top_filtered`] de `dim` con `level` = cada uno de `levels` (y el resto de
+/// `f`), de una sola pasada por el cubo agrupando por nivel: `informe` lo pedía
+/// nivel a nivel y cada consulta recorría `dim_rollups` entero (2,6 s a 10M).
+/// Mismas cifras: de cada celda cuenta lo que el filtro de nivel habría dejado
+/// pasar (`UPPER` ASCII del nivel en la lista). Si el cubo no puede con todos
+/// los niveles a la vez (o `dim` no es `entity`), nivel a nivel como siempre.
+pub fn top_filtered_levels(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilter, levels: &[&str], limit: usize) -> Result<Vec<Vec<TopValue>>> {
+    let one = |lv: &str| {
+        let g = TopFilter { level: Some(lv), ..*f };
+        top_filtered(conn, dim, since_epoch, &g, limit)
+    };
+    let wants: Vec<String> = levels.iter().map(|lv| crate::timeline::comma_list(lv, true)).collect();
+    // Una lista vacía (`,`) casa los sin nivel: que lo cuente `top_filtered`.
+    if dim != "entity" || wants.iter().any(|w| w == ",,") {
+        return levels.iter().map(|lv| one(lv)).collect();
+    }
+    let scope = crate::EventScope {
+        source: f.source,
+        grep: f.grep,
+        level: None,
+        kind: f.kind,
+        entity: f.entity,
+        attr: f.attr,
+        join: f.join,
+        infer_level: f.infer_level,
+        until_epoch: f.until_epoch,
+    };
+    let level_dim = if f.infer_level { crate::cube::Dim::LevelInf } else { crate::cube::Dim::Level };
+    let Some(cells) = crate::cube::cube(conn, since_epoch, &scope, &[level_dim, crate::cube::Dim::Entity], None)? else {
+        return levels.iter().map(|lv| one(lv)).collect();
+    };
+    Ok(wants
+        .iter()
+        .map(|want| {
+            let mut by: std::collections::BTreeMap<&str, i64> = std::collections::BTreeMap::new();
+            for ((k, _), (n, _)) in &cells {
+                if !k[1].is_empty() && want.contains(&format!(",{},", k[0].to_ascii_uppercase())) {
+                    *by.entry(k[1].as_str()).or_insert(0) += n;
+                }
+            }
+            let mut v: Vec<TopValue> = by.into_iter().map(|(value, count)| TopValue { value: value.to_string(), count }).collect();
+            v.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
+            v.truncate(limit);
+            v
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -761,6 +809,20 @@ mod tests_p3 {
         let con_cubo = q(&store);
         for (a, b) in sin_cubo.iter().zip(&con_cubo) {
             assert_eq!(a, b);
+        }
+        // `top entity` de varios niveles de una pasada: lo mismo que nivel a nivel.
+        let levels = ["ERROR", "info,WARN", "FATAL", "error"];
+        let scope_a = crate::EventScope { source: Some("jsonl:/a"), ..Default::default() };
+        assert!(crate::cube::cube(store.conn(), 0, &scope_a, &[crate::cube::Dim::Level, crate::cube::Dim::Entity], None).unwrap().is_some());
+        for (since, until) in [(0, 0), (1_234_567, 7_654_321)] {
+            for (source, infer_level, kind) in [(Some("jsonl:/a"), false, None), (Some("jsonl:/a"), true, Some("log")), (None, false, None)] {
+                let f = TopFilter { source, infer_level, kind, until_epoch: until, ..Default::default() };
+                let juntos = top_filtered_levels(store.conn(), "entity", since, &f, &levels, 2).unwrap();
+                for (lv, got) in levels.iter().zip(&juntos) {
+                    let g = TopFilter { level: Some(lv), ..f };
+                    assert_eq!(got, &top_filtered(store.conn(), "entity", since, &g, 2).unwrap(), "{lv} {since} {until} {source:?} {infer_level}");
+                }
+            }
         }
         // Un evento nuevo sin rollups: el cubo deja de responder hasta el sync.
         let mut w = store.writer().unwrap();
