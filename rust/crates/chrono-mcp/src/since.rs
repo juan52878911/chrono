@@ -84,9 +84,9 @@ fn split_zone(t: &str) -> Option<(&str, i64)> {
     Some((&t[..p], if t.as_bytes()[p] == b'+' { secs } else { -secs }))
 }
 
-/// `since` textual (posiblemente vacío o inválido) -> epoch para las
-/// consultas de `chrono-metrics`. A diferencia del CLI, el MCP no aborta la
-/// llamada por un `since` mal formado: simplemente ignora la ventana (0).
+/// `since` textual (vacío = sin ventana, 0) -> epoch para las consultas de
+/// `chrono-metrics`. Un `since` mal formado ya lo rechazó
+/// `crate::args::validate` con un error, como el CLI.
 pub fn since_to_epoch(s: &str) -> i64 {
     if s.is_empty() {
         return 0;

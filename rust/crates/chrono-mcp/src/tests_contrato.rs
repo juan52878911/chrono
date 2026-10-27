@@ -126,7 +126,7 @@ fn el_mcp_reabre_el_indice_si_lo_cambian_y_dice_un_reindex_a_medias() {
     drop(store);
     let state = crate::State { store: Default::default(), open_error: Default::default(), db: Some(db.0.clone()), discover: true };
     let sources = |state: &crate::State| -> String {
-        let r = crate::tools::call_tool(state, &json!({"name": "sources", "arguments": {"format": "json"}})).unwrap();
+        let r = crate::tools::call_tool(state, &json!({"name": "sources", "arguments": {}})).unwrap();
         r["content"][0]["text"].as_str().unwrap().to_string()
     };
     assert!(sources(&state).contains("jsonl:/app"), "{}", sources(&state));

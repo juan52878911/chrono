@@ -41,6 +41,10 @@ pub fn redact(s: &str) -> (String, usize) {
     // Una clave sensible sin valor (`password:`, `"token":`): el valor es el
     // trozo siguiente (`password: x`, JSON con formato, YAML).
     let mut after_key = false;
+    // `Basic` dentro de una cabecera `Authorization` (o `Proxy-Authorization`):
+    // el trozo siguiente es la credencial aunque sea corta (`dTpw` = `u:p`).
+    let mut after_basic_auth = false;
+    let mut prev_auth = false;
     // Se recorre por trozos separados por espacio, conservando los separadores.
     for (i, piece) in s.split(' ').enumerate() {
         if i > 0 {
@@ -56,6 +60,16 @@ pub fn redact(s: &str) -> (String, usize) {
                 continue;
             }
         }
+        if std::mem::take(&mut after_basic_auth) {
+            let t = trim_edges(piece);
+            if basic_credential(t) || (t.len() >= 16 && is_token_chars(t)) {
+                out.push_str(&piece.replacen(t, MARK, 1));
+                n += 1;
+                after_bearer = false;
+                prev_auth = false;
+                continue;
+            }
+        }
         if after_bearer && piece.len() >= 16 && is_token_chars(trim_edges(piece)) {
             let t = trim_edges(piece);
             out.push_str(&piece.replacen(t, MARK, 1));
@@ -65,6 +79,13 @@ pub fn redact(s: &str) -> (String, usize) {
         }
         let t = trim_edges(piece);
         after_bearer = t.eq_ignore_ascii_case("bearer") || t.eq_ignore_ascii_case("basic");
+        let auth = contains_ci(t.as_bytes(), b"authoriz");
+        let tb = t.as_bytes();
+        after_basic_auth = (auth || prev_auth)
+            && tb.len() >= 5
+            && tb[tb.len() - 5..].eq_ignore_ascii_case(b"basic")
+            && (tb.len() == 5 || !tb[tb.len() - 6].is_ascii_alphanumeric());
+        prev_auth = auth;
         after_key = key_without_value(piece);
         out.push_str(&redact_piece(piece, &mut n));
     }
@@ -302,6 +323,37 @@ fn redact_pem(s: &str, n: &mut usize) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// ¿Es `s` una credencial `Basic`: base64 estándar de `usuario:clave`? Se
+/// decodifica y se exige el `:`; así `Basic auth` o `Basic realm` no casan.
+fn basic_credential(s: &str) -> bool {
+    let body = s.trim_end_matches('=');
+    if body.len() < 3 || s.len() - body.len() > 2 || body.len() % 4 == 1 {
+        return false;
+    }
+    let mut acc = 0u32;
+    let mut bits = 0;
+    for b in body.bytes() {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return false,
+        };
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            if (acc >> bits) as u8 == b':' {
+                return true;
+            }
+            acc &= (1 << bits) - 1;
+        }
+    }
+    false
 }
 
 fn trim_edges(s: &str) -> &str {

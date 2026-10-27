@@ -161,7 +161,7 @@ pub fn header(conn: &Connection, tool: &str, args: &Value, result: &Value) -> (S
     // Con infer_level, la cifra mezcla dos cosas: se dicen por separado para que
     // nadie dé como «total por nivel» lo que incluye líneas sin nivel de la fuente.
     let mut total_s = total.to_string();
-    if args.get("infer_level").and_then(Value::as_bool) == Some(true) && args.get("level").is_some() {
+    if crate::tools::arg_bool(args, "infer_level") && args.get("level").is_some() {
         let mut plain = args.clone();
         if let Some(o) = plain.as_object_mut() {
             o.remove("infer_level");
