@@ -236,7 +236,7 @@ fn tools_call_sin_indice_pide_chrono_init() {
 }
 
 #[test]
-fn tools_call_sin_argumento_requerido_devuelve_error_jsonrpc() {
+fn tools_call_sin_argumento_requerido_devuelve_is_error() {
     let (_db, state) = state_with_fixture();
     let resp = call(
         &state,
@@ -244,8 +244,13 @@ fn tools_call_sin_argumento_requerido_devuelve_error_jsonrpc() {
         "tools/call",
         json!({"name": "coupling", "arguments": {}}),
     );
-    assert_eq!(resp["error"]["code"], -32000);
-    assert!(resp["result"].is_null());
+    // Error de la herramienta: resultado con `isError`, no error JSON-RPC.
+    assert!(resp["error"].is_null(), "{resp}");
+    assert_eq!(resp["result"]["isError"], true, "{resp}");
+    assert!(resp["result"]["content"][0]["text"].as_str().unwrap_or("").contains("'file'"), "{resp}");
+    // Sin `name` sí es un error de protocolo.
+    let resp = call(&state, 9, "tools/call", json!({"arguments": {}}));
+    assert_eq!(resp["error"]["code"], -32000, "{resp}");
 }
 
 #[test]
@@ -363,7 +368,8 @@ fn tools_call_gaps_correlate_via_y_precede_con_cifras_de_todo() {
     assert_eq!(ids, ["p2", "p1"], "{e}");
     // Una clave de join que no existe: error, no vacío.
     let resp = call(&state, 8, "tools/call", json!({"name": "events", "arguments": {"join": "pruebaa=P1"}}));
-    assert!(resp["error"]["message"].as_str().unwrap_or("").contains("clave de relación desconocida"), "{resp}");
+    assert_eq!(resp["result"]["isError"], true, "{resp}");
+    assert!(resp["result"]["content"][0]["text"].as_str().unwrap_or("").contains("clave de relación desconocida"), "{resp}");
 }
 
 /// Un log con tres líneas con tiempo (una ERROR) y una ERROR sin tiempo, con

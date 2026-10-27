@@ -27,6 +27,12 @@ This is **the product contract**: which questions chrono answers and their exact
   - `sources`: `stale_dims_events` (only when > 0: events kept with the dims or options from before, because the source could not be re-read whole) and `sync_error` (the last `sync` could not read that source; time and error).
 - `events` lists in time order; `--order desc` (MCP `order=desc`) returns the newest first.
 
+## Errors
+
+- **CLI**: a wrong argument (unknown or misspelled command, a `--since`/`--until` that is not a date, `--until` not after `--since`, a `--limit` that is not an integer > 0, an extra positional argument) exits non-zero with the reason on stderr; a flag that does not apply to the command is warned on stderr.
+- **MCP**: every tool checks its `arguments` against its `inputSchema` before running, with the same rules as the CLI. An argument the tool does not have, a value of the wrong type (`level: 5`, `entity: {}`), an integer that is not > 0, a value outside the listed `enum` (`format`, `depth`, `order`, `tipo`), a `since`/`until` that is not a date (`YYYY-MM-DD` or `YYYY-MM-DDThh:mm:ssZ`), or `until` not after `since` is an error that names the argument and the expected format; nothing is dropped silently. Numbers and booleans inside a string (`"10"`, `"true"`) and an integer with a zero fraction (`10.0`) are accepted; `null` means "not given". `informe` rejects the filters it does not use (`tipo=codigo` with `level`, `entity`…; `tipo=logs` with `target`).
+- A tool error (bad argument, unknown id or `join` key) comes back as a normal `tools/call` result with `isError: true` and the reason in `content[0].text`, so the model can read it and fix the call. Only protocol errors (no `name`, unknown method) are JSON-RPC errors (`-32000`, `-32601`).
+
 ## Question catalog
 
 | Command | Question | `result` |

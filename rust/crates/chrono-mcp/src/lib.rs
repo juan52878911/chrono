@@ -13,6 +13,7 @@
 //! fallar. Si `db` es `None`, se autodescubre `.chrono/index.db` subiendo
 //! desde el cwd (igual que el CLI).
 
+mod args;
 mod since;
 mod tools;
 

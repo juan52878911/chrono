@@ -13,9 +13,27 @@ use crate::Result;
 const LEVELS: &[&str] = &["FATAL", "CRITICAL", "ERROR", "WARNING"];
 
 pub fn informe(store: &chrono_store::Store, args: &Value, since_epoch: i64) -> Result<Value> {
-    match args.get("tipo").and_then(Value::as_str).unwrap_or("logs") {
-        "codigo" | "código" | "code" => codigo(store, args, since_epoch),
-        _ => logs(store.conn(), args, since_epoch),
+    let dado = |k: &str| match args.get(k) {
+        None | Some(Value::Null) => false,
+        Some(Value::String(s)) => !s.trim().is_empty(),
+        Some(_) => k != "infer_level" || crate::tools::arg_bool(args, k),
+    };
+    // Lo que el informe no usa se decía con un panorama que no lo respetaba.
+    let no_aplica = |tipo: &str, ks: &[&str]| -> Result<()> {
+        match ks.iter().find(|k| dado(k)) {
+            Some(k) => Err(format!("informe: '{k}' no aplica a tipo={tipo}").into()),
+            None => Ok(()),
+        }
+    };
+    match args.get("tipo").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty()).unwrap_or("logs") {
+        "codigo" | "código" | "code" => {
+            no_aplica("codigo", &["until", "level", "entity", "source", "kind", "grep", "attr", "join", "infer_level"])?;
+            codigo(store, args, since_epoch)
+        }
+        _ => {
+            no_aplica("logs", &["target"])?;
+            logs(store.conn(), args, since_epoch)
+        }
     }
 }
 
