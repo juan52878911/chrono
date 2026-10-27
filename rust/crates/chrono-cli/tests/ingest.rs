@@ -334,6 +334,21 @@ fn un_fichero_de_mas_de_64_mb_no_se_relee_por_un_chmod_o_un_touch() {
     assert!(out.contains("sync: 0 new events, 71 reread"), "{out}");
     assert_eq!(env.sql("SELECT COUNT(*) FROM events WHERE title = 'linea zzz'"), ["1"]);
     assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["71"]);
+
+    // Entre los bloques de la muestra de antes (~36 MB y ~42 MB): con la
+    // huella completa también se ve, con el mismo tamaño y con un append.
+    let s = std::fs::read_to_string(&big).unwrap();
+    std::fs::write(&big, s.replacen("linea 035", "linea yyy", 1)).unwrap();
+    let out = env.ok(&["sync"]);
+    assert!(out.contains("sync: 0 new events, 71 reread"), "{out}");
+    let s = std::fs::read_to_string(&big).unwrap();
+    std::fs::write(&big, s.replacen("linea 040", "linea xxx", 1) + &line(71)).unwrap();
+    let out = env.ok(&["sync"]);
+    assert!(out.contains("71 reread"), "{out}");
+    for (t, n) in [("linea yyy", "1"), ("linea xxx", "1"), ("linea 035", "0"), ("linea 040", "0"), ("linea 071", "1")] {
+        assert_eq!(env.sql(&format!("SELECT COUNT(*) FROM events WHERE title = '{t}'")), [n], "{t}");
+    }
+    assert_eq!(env.sql("SELECT COUNT(*) FROM events"), ["72"]);
 }
 
 #[test]

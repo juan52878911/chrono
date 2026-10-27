@@ -17,22 +17,21 @@
 //! Tamaño y mtime no bastan: un fichero reescrito con el mismo tamaño y el mismo
 //! mtime (`touch -r`, `rsync -t`, una copia que conserva fechas) no se releía,
 //! ni uno editado en medio y crecido (solo entraba lo añadido). Cada fichero
-//! guarda además su ctime, que el usuario no puede fijar, y una huella de lo ya
-//! leído (`[0, tamaño)`): el contenido entero hasta `FULL_HASH_MAX` (64 MB); por
-//! encima, una muestra: los primeros y últimos 64 KB y 16 bloques de 64 KB
-//! repartidos por el medio (1,1 MB leídos, sea cual sea el tamaño). Si tamaño,
-//! mtime y ctime siguen igual, no se lee nada (un `sync` sin cambios no abre
-//! ningún fichero). Si algo cambió, se recalcula la huella de lo ya leído:
-//! distinta, el fichero se relee entero (se borran sus eventos y se reingiere);
-//! igual, con más tamaño es un append (se lee desde el watermark) y con el
-//! mismo, nada (un `chmod` o un `touch` no releen nada, tampoco un fichero de
-//! GB). El coste es releer los ficheros que de verdad cambiaron.
+//! guarda además su ctime, que el usuario no puede fijar, y una huella COMPLETA
+//! de lo ya leído (`[0, tamaño)`), sea cual sea el tamaño. Si tamaño, mtime y
+//! ctime siguen igual, no se lee nada (un `sync` sin cambios no abre ningún
+//! fichero). Si algo cambió, se lee el fichero una vez de principio a fin: la
+//! huella de lo ya leído sale por el camino y la de lo que queda leído, al
+//! final (el hash va en streaming: la segunda continúa la primera). Distinta,
+//! el fichero se relee entero (se borran sus eventos y se reingiere); igual, con
+//! más tamaño es un append (se ingiere desde el watermark) y con el mismo, nada
+//! (un `chmod` o un `touch` no releen eventos). El coste es leer de disco los
+//! ficheros tocados, no reingerirlos: unos 0,1 s por un jsonl de 200 MB.
 //!
-//! Límite: por encima de `FULL_HASH_MAX` la huella no ve lo que cae entre los
-//! bloques de la muestra. Una edición ahí, con el mismo tamaño o seguida de un
-//! append, no se ve (solo entra lo añadido). Para logs, que solo crecen, no
-//! pasa; un fichero de más de 64 MB que se edita en medio hay que volver a
-//! añadirlo (`chrono add`) para releerlo.
+//! Hasta 0.7.0, por encima de 64 MB la huella era una muestra (primeros y
+//! últimos 64 KB y 16 bloques por el medio) y una edición entre bloques no se
+//! veía. Un estado con esa huella (`v3:`) se compara una última vez con la
+//! muestra y pasa a la completa.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -50,30 +49,17 @@ use crate::i18n::t;
 /// ya leído no se relee: los ids son deterministas, pero cuesta tiempo).
 const SAVE_EVERY: usize = 200;
 
-/// Tamaño de cada bloque de la muestra de un fichero mayor que `FULL_HASH_MAX`.
-const FINGERPRINT_SPAN: u64 = 64 * 1024;
-
-/// Bloques de la muestra repartidos entre el primero y el último.
-const FINGERPRINT_SAMPLES: u64 = 16;
-
-/// Hasta este tamaño la huella cubre el fichero entero (una sesión de Claude
-/// rara vez pasa de 50 MB; un log de GB no se relee entero en cada `tail`).
-const FULL_HASH_MAX: u64 = 64 * 1024 * 1024;
-
-/// Prefijo de las huellas de este formato: una sin él es de antes (solo
-/// primeros/últimos 64 KB) y no se puede comparar. `v2:` es la del contenido
-/// entero (hasta `FULL_HASH_MAX`); `v3:`, la de la muestra (por encima).
+/// Prefijo de la huella completa (el contenido entero de `[0, tamaño)`). Una
+/// sin prefijo es de antes (solo primeros/últimos 64 KB) y no se puede
+/// comparar.
 const FP_VERSION: &str = "v2:";
-const FP_SAMPLED: &str = "v3:";
 
-/// Prefijo de la huella que da [`fingerprints`] para un prefijo de `size` bytes.
-fn fp_prefix(size: u64) -> &'static str {
-    if size <= FULL_HASH_MAX {
-        FP_VERSION
-    } else {
-        FP_SAMPLED
-    }
-}
+/// Huella de muestra de los estados de hasta 0.7.0 para ficheros de más de
+/// `LEGACY_FULL_MAX`: solo sirve para comparar una vez y migrar.
+const FP_SAMPLED: &str = "v3:";
+const LEGACY_FULL_MAX: u64 = 64 * 1024 * 1024;
+const LEGACY_SPAN: u64 = 64 * 1024;
+const LEGACY_SAMPLES: u64 = 16;
 
 /// Lo que se sabe de un fichero tras leerlo.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,7 +69,7 @@ struct FileState {
     watermark: String,
     /// ctime (0 = desconocido: estado anterior a la huella o sin ctime en el SO).
     ctime_ns: i128,
-    /// Huella de los primeros y últimos `FINGERPRINT_SPAN` bytes ("" = sin calcular).
+    /// Huella completa de `[0, size)` ("" = sin calcular).
     fingerprint: String,
     /// Sus ids de hash llevan la sal de la fuente y el fichero; `false` = se
     /// empezó a leer antes (solo el fichero) y sigue así hasta releerse entero.
@@ -144,49 +130,47 @@ impl Hasher {
         for b in &self.carry {
             h = (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3);
         }
-        format!("{}{h:016x}", fp_prefix(size))
+        format!("{FP_VERSION}{h:016x}")
     }
 }
 
-/// Huellas de los `sizes` primeros bytes de `path` (crecientes), en una sola
-/// lectura: el contenido entero hasta `FULL_HASH_MAX`; por encima, la muestra
-/// de ese prefijo (primer y último bloque y `FINGERPRINT_SAMPLES` entre medias).
+/// Huellas completas de los `sizes` primeros bytes de `path` (crecientes), en
+/// una sola lectura: cada prefijo continúa el hash del anterior.
 fn fingerprints(path: &Path, sizes: &[u64]) -> std::io::Result<Vec<String>> {
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::Read;
     let mut f = std::fs::File::open(path)?;
     let mut out = Vec::with_capacity(sizes.len());
     let mut full = Hasher::new();
     let mut pos = 0u64;
     let mut buf = vec![0u8; 1 << 20];
     for &size in sizes {
-        if size <= FULL_HASH_MAX {
-            // Se sigue por donde iba: cada prefijo extiende al anterior.
-            while pos < size {
-                let want = (size - pos).min(buf.len() as u64) as usize;
-                f.read_exact(&mut buf[..want])?;
-                full.update(&buf[..want]);
-                pos += want as u64;
-            }
-            out.push(full.finish(size));
-            continue;
+        while pos < size {
+            let want = (size - pos).min(buf.len() as u64) as usize;
+            f.read_exact(&mut buf[..want])?;
+            full.update(&buf[..want]);
+            pos += want as u64;
         }
-        let mut h = Hasher::new();
-        let mut part = Vec::new();
-        let last = size - FINGERPRINT_SPAN;
-        let offsets = std::iter::once(0)
-            .chain((1..=FINGERPRINT_SAMPLES).map(|k| last / (FINGERPRINT_SAMPLES + 1) * k))
-            .chain(std::iter::once(last));
-        for off in offsets {
-            part.clear();
-            f.seek(SeekFrom::Start(off))?;
-            (&mut f).take(FINGERPRINT_SPAN).read_to_end(&mut part)?;
-            h.update(&part);
-        }
-        out.push(h.finish(size));
-        // El hash completo ya no sirve para los tamaños siguientes (mayores).
-        pos = u64::MAX;
+        out.push(full.finish(size));
     }
     Ok(out)
+}
+
+/// Huella de muestra de los estados de hasta 0.7.0 (`v3:`, solo para ficheros
+/// de más de 64 MB): primer y último bloque de 64 KB y 16 entre medias.
+fn legacy_sampled_fingerprint(path: &Path, size: u64) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let mut h = Hasher::new();
+    let mut part = Vec::new();
+    let last = size.saturating_sub(LEGACY_SPAN);
+    let offsets = std::iter::once(0).chain((1..=LEGACY_SAMPLES).map(|k| last / (LEGACY_SAMPLES + 1) * k)).chain(std::iter::once(last));
+    for off in offsets {
+        part.clear();
+        f.seek(SeekFrom::Start(off))?;
+        (&mut f).take(LEGACY_SPAN).read_to_end(&mut part)?;
+        h.update(&part);
+    }
+    Ok(h.finish(size).replacen(FP_VERSION, FP_SAMPLED, 1))
 }
 
 /// Datos fijos de una fuente glob (en su `manifest_json`).
@@ -349,9 +333,13 @@ impl GlobSource {
                         }
                     };
                     let (fp_old, fp_len) = (&fps[0], &fps[1]);
-                    if p.fingerprint.starts_with(fp_prefix(p.size)) {
+                    if p.fingerprint.starts_with(FP_VERSION) {
                         // Lo ya leído cambió: no es un append, se relee entero.
                         rewritten = fp_old != &p.fingerprint;
+                    } else if p.fingerprint.starts_with(FP_SAMPLED) && p.size > LEGACY_FULL_MAX {
+                        // Estado de antes con muestra: se compara con ella esta
+                        // vez; desde aquí queda la huella completa.
+                        rewritten = legacy_sampled_fingerprint(path, p.size).map_or(true, |fp| fp != p.fingerprint);
                     } else if p.size == len && p.mtime_ns != mtime_ns {
                         // Huella de antes (o ninguna), mismo tamaño y otro mtime:
                         // no hay con qué comparar y un append no es; se relee.
@@ -460,12 +448,12 @@ mod tests {
     }
 
     #[test]
-    fn la_huella_de_un_fichero_grande_mira_la_muestra_y_nada_mas() {
+    fn la_huella_de_un_fichero_grande_lo_cubre_entero() {
         use std::io::{Seek, SeekFrom, Write};
         let dir = std::env::temp_dir().join(format!("chrono-huella-grande-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("f");
-        let size = FULL_HASH_MAX + 3 * FINGERPRINT_SPAN;
+        let size = LEGACY_FULL_MAX + 3 * LEGACY_SPAN;
         std::fs::File::create(&p).unwrap().set_len(size).unwrap();
         let fp = || fingerprints(&p, &[size]).unwrap().remove(0);
         let poke = |off: u64| {
@@ -474,15 +462,15 @@ mod tests {
             f.write_all(b"z").unwrap();
         };
         let a = fp();
-        assert!(a.starts_with(FP_SAMPLED), "{a}");
-        // Un bloque del medio de la muestra: cambia.
-        let block = (size - FINGERPRINT_SPAN) / (FINGERPRINT_SAMPLES + 1) * 8;
-        poke(block + 100);
-        let b = fp();
-        assert_ne!(a, b);
-        // Entre dos bloques: no se ve (el límite documentado).
-        poke(block + FINGERPRINT_SPAN + 100);
-        assert_eq!(fp(), b);
+        assert!(a.starts_with(FP_VERSION), "{a}");
+        let legacy = legacy_sampled_fingerprint(&p, size).unwrap();
+        assert!(legacy.starts_with(FP_SAMPLED), "{legacy}");
+        // Entre dos bloques de la muestra de antes: la muestra no lo ve, la
+        // huella completa sí.
+        let block = (size - LEGACY_SPAN) / (LEGACY_SAMPLES + 1) * 8;
+        poke(block + LEGACY_SPAN + 100);
+        assert_eq!(legacy_sampled_fingerprint(&p, size).unwrap(), legacy);
+        assert_ne!(fp(), a);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
