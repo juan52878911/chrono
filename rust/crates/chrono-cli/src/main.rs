@@ -674,6 +674,11 @@ fn query_flags(cmd: &str) -> Option<(&'static [&'static str], bool)> {
         "trace" => (&["--depth", "--limit"], false),
         "session_patterns" => (&["--since", "--task", "--session", "--hotspots", "--limit"], false),
         "show" => (&["--entity"], false),
+        // Los que escriben el índice: antes no se comprobaban (`tail --since`
+        // seguía todo sin decirlo).
+        "tail" => (&["--interval", "--source", "--kind", "--level", "--grep"], false),
+        "add" => (&["--symbols", "--as", "--preset", "--name"], false),
+        "sync" | "remove" | "reindex" => (&[], false),
         _ => return None,
     })
 }
@@ -694,6 +699,52 @@ fn warn_inapplicable(cmd: &str, f: &Flags) {
             );
         }
     }
+}
+
+/// Cuántos argumentos posicionales admite cada comando, sin contar el propio
+/// comando (`None`: sin comprobar; `hook` lo llama Claude Code y nunca falla).
+fn max_positionals(cmd: &str) -> Option<usize> {
+    Some(match cmd {
+        "version" | "reindex" | "tail" | "mcp" | "hotspots" | "bugs" | "churn" | "prs" | "phases" | "sources" | "timeline"
+        | "patterns" | "events" | "precede" | "gaps" | "session_patterns" => 0,
+        "help" | "config" | "init" | "sync" | "add" | "remove" | "coupling" | "owners" | "tickets" | "branches" | "search"
+        | "similar" | "stats" | "top" | "explain" | "correlate" | "trace" | "show" => 1,
+        "informe" => 2,
+        _ => return None,
+    })
+}
+
+/// Un argumento posicional de más (`tail x`, `search dos palabras` sin
+/// comillas) se ignoraba en silencio: error con lo que sobra.
+fn check_positionals(cmd: &str, f: &Flags) {
+    let Some(max) = max_positionals(cmd) else { return };
+    let extra = f.pos.get(1 + max..).unwrap_or(&[]);
+    if extra.is_empty() {
+        return;
+    }
+    let list = extra.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>().join(" ");
+    // Tras una flag desconocida (ya avisada), lo que sobra suele ser su valor
+    // (`--levl ERROR`): se avisa igual que ella, sin abortar.
+    if !f.unknown.is_empty() {
+        eprintln!(
+            "{}",
+            t(
+                format!("chrono: warning: unexpected argument {list} for {cmd} (ignored; the value of {}?)", f.unknown.join(", ")),
+                format!("chrono: aviso: argumento de más {list} en {cmd} (se ignora; ¿el valor de {}?)", f.unknown.join(", ")),
+            )
+        );
+        return;
+    }
+    fatal(match max {
+        0 => t(
+            format!("{cmd} takes no arguments; unexpected: {list} (see chrono {cmd} --help)"),
+            format!("{cmd} no admite argumentos; sobra: {list} (ver chrono {cmd} --help)"),
+        ),
+        n => t(
+            format!("{cmd} takes at most {n} argument(s); unexpected: {list} (quote a value with spaces; see chrono {cmd} --help)"),
+            format!("{cmd} admite como mucho {n} argumento(s); sobra: {list} (entrecomilla un valor con espacios; ver chrono {cmd} --help)"),
+        ),
+    })
 }
 
 /// Distancia de edición (Levenshtein) entre dos palabras cortas.
@@ -765,6 +816,7 @@ fn main() {
         std::process::exit(2);
     };
 
+    check_positionals(cmd, &f);
     match cmd {
         "version" | "--version" | "-v" => {
             println!("chrono {VERSION}");
@@ -1078,7 +1130,18 @@ fn main() {
         "correlate" => {
             let id = require_pos(&f, "correlate needs an <id>", "correlate necesita un <id>");
             match f.via.as_deref() {
-                Some(via) => query::correlate_via(&store, &id, via, f.kind.as_deref(), f.limit.as_deref()),
+                Some(via) => {
+                if f.delta.is_some() {
+                    eprintln!(
+                        "{}",
+                        t(
+                            "chrono: warning: --delta does not apply with --via (ignored: --via relates by key, not by time)",
+                            "chrono: aviso: --delta no aplica con --via (se ignora: --via relaciona por clave, no por tiempo)",
+                        )
+                    );
+                }
+                query::correlate_via(&store, &id, via, f.kind.as_deref(), f.limit.as_deref())
+            }
                 None => query::correlate(&store, &id, f.delta.as_deref(), f.kind.as_deref(), f.limit.as_deref()),
             }
         }

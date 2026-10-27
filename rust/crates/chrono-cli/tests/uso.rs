@@ -74,11 +74,43 @@ fn flags_que_no_aplican_al_comando_avisan() {
     assert!(ok && err.contains("--by does not apply to top"), "{err}");
     let (ok, _, err) = run(&d.0, &["search", "evento", "--since", "2026-01-01"]);
     assert!(ok && err.contains("--since does not apply to search"), "{err}");
+    // `tail` y `add` tampoco las ignoran sin decirlo; ni `correlate --via` el `--delta`.
+    let (_, _, err) = run(&std::env::temp_dir(), &["tail", "--since", "2026-01-01", "--db", "/no/existe.db"]);
+    assert!(err.contains("--since does not apply to tail"), "{err}");
+    let (_, _, err) = run(&d.0, &["correlate", "x", "--via", "sessionId", "--delta", "1h"]);
+    assert!(err.contains("--delta does not apply with --via"), "{err}");
     // Las que sí aplican no avisan.
     let (ok, _, err) = run(&d.0, &["top", "level", "--since", "2026-01-01", "--level", "ERROR", "--limit", "3", "--compact"]);
     assert!(ok && err.is_empty(), "{err}");
     let (ok, _, err) = run(&d.0, &["timeline", "--by", "level", "--bucket", "1h", "--grep", "evento"]);
     assert!(ok && err.is_empty(), "{err}");
+}
+
+/// Un posicional de más se ignoraba: `tail x` seguía como `tail`, `search dos
+/// palabras` buscaba solo la primera. Error con lo que sobra, antes de buscar
+/// el índice (un `tail` no llega a arrancar).
+#[test]
+fn posicionales_de_mas_son_error() {
+    let d = indice("posicionales");
+    for (args, sobra) in [
+        (&["search", "evento", "3"][..], "\"3\""),
+        (&["hotspots", "src"][..], "\"src\""),
+        (&["top", "level", "kind"][..], "\"kind\""),
+        (&["informe", "logs", "x", "y"][..], "\"y\""),
+        (&["reindex", "ya"][..], "\"ya\""),
+    ] {
+        let (ok, _, err) = run(&d.0, args);
+        assert!(!ok && err.contains("unexpected: ") && err.contains(sobra), "{args:?}: {err}");
+    }
+    // `tail` con lo que sobra no busca el índice (ni se queda siguiendo): falla antes.
+    let (ok, _, err) = run(&std::env::temp_dir(), &["tail", "x", "--db", "/no/existe.db"]);
+    assert!(!ok && err.contains("tail takes no arguments") && !err.contains("no index"), "{err}");
+    // Los que admite siguen valiendo.
+    assert!(run(&d.0, &["search", "evento", "--limit", "1"]).0);
+    assert!(run(&d.0, &["top", "level", "--limit", "1"]).0);
+    // `informe` con un tipo que no existe ya no da el de logs sin decirlo.
+    let (ok, _, err) = run(&d.0, &["informe", "metricas"]);
+    assert!(!ok && err.contains("'tipo'"), "{err}");
 }
 
 #[test]
