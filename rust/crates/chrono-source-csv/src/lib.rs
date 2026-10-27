@@ -31,7 +31,6 @@ mod cursor;
 mod parse;
 mod record;
 mod simhash;
-mod timeutil;
 
 pub use config::{CsvOverrides, ResolvedColumns};
 pub use cursor::CsvCursor;

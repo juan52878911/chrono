@@ -4,7 +4,7 @@
 
 use crate::parser::Release;
 use crate::simhash::{simhash, tokenize};
-use crate::timeutil::{epoch_to_iso8601, parse_time_str};
+use chrono_core::time::{epoch_to_iso8601, parse_time_str};
 use chrono_core::{Actor, Event, Touch};
 use std::collections::BTreeMap;
 
@@ -128,6 +128,17 @@ mod tests {
         assert_eq!(touches[0].weight, 2);
         assert_eq!(touches[1].entity, "Fixed");
         assert_eq!(touches[1].weight, 1);
+    }
+
+    /// Tabla: una fecha de release imposible deja la release sin tiempo.
+    #[test]
+    fn fechas_imposibles_quedan_sin_tiempo() {
+        for (fecha, at) in [("2024-02-30", ""), ("2023-02-29", ""), ("2024-04-31", ""), ("2024-13-01", ""), ("2024-02-29", "2024-02-29T00:00:00Z")] {
+            let md = format!("## [1.0.0] - {fecha}\n\n### Added\n- x\n");
+            let evs = releases_to_events(&parser::parse(&md), "changelog:/tmp/CHANGELOG.md");
+            assert_eq!(evs[0].at, at, "{fecha}");
+            assert_eq!(evs[0].at_epoch == 0, at.is_empty(), "{fecha}");
+        }
     }
 
     #[test]

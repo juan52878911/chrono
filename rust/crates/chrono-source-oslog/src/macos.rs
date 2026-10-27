@@ -5,12 +5,12 @@
 //!
 //! Formato de entrada: UN ARRAY JSON `[{...}, {...}, ...]` (no JSONL). Cada
 //! registro trae, entre otros: `timestamp` ("2026-09-22 23:12:11.497633-0500",
-//! parseable por `timeutil::parse_time_str`), `eventMessage`, `messageType`
+//! parseable por `chrono_core::time::parse_time_str`), `eventMessage`, `messageType`
 //! ("Default"/"Info"/"Debug"/"Error"/"Fault"), `subsystem`,
 //! `processImagePath`, `processID`, `category`.
 
 use crate::simhash::{simhash, tokenize};
-use crate::timeutil::{epoch_to_iso8601, parse_time_str};
+use chrono_core::time::{epoch_to_iso8601, parse_time_str};
 use crate::util::{as_string, basename, compute_id, truncate_chars};
 use chrono_core::{Actor, CoreError, Event, Result as CoreResult, Touch};
 use serde_json::Value;
@@ -146,7 +146,7 @@ mod tests {
         let events = parse_macos(SAMPLE, "oslog:macos").unwrap();
         // "2026-09-22 23:12:11.497633-0500" en UTC es "2026-09-23T04:12:11.497Z":
         // el offset -0500 se aplica y la fracción de micros se conserva hasta ms.
-        let expected = crate::timeutil::parse_rfc3339("2026-09-23T04:12:11.497Z").unwrap();
+        let expected = chrono_core::time::parse_rfc3339("2026-09-23T04:12:11.497Z").unwrap();
         assert_eq!(events[0].at_epoch, expected);
         assert_eq!(events[0].at, "2026-09-23T04:12:11.497Z");
     }
@@ -179,6 +179,17 @@ mod tests {
         assert_eq!(e2.at_epoch, 0);
         assert_eq!(e2.at, "");
         assert_eq!(e2.title, "Evento sin tiempo valido");
+    }
+
+    /// Tabla: una fecha u hora imposible en `timestamp` deja el registro sin
+    /// tiempo.
+    #[test]
+    fn fechas_imposibles_quedan_sin_tiempo() {
+        for ts in ["2026-09-22 25:12:11.497633-0500", "2026-02-30 10:00:00.000000+0000", "2026-04-31 10:00:00.000000+0000", "2026-09-22 10:60:00.000000+0000"] {
+            let json = format!(r#"[{{"timestamp": "{ts}", "eventMessage": "x", "messageType": "Info", "processImagePath": "/bin/x"}}]"#);
+            let ev = &parse_macos(&json, "oslog:macos").unwrap()[0];
+            assert_eq!((ev.at_epoch, ev.at.as_str()), (0, ""), "{ts:?}");
+        }
     }
 
     #[test]

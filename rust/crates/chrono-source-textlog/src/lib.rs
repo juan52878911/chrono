@@ -35,13 +35,9 @@ mod preset;
 mod record;
 mod simhash;
 mod syslog;
-// `parse_time_str` (parseo genérico epoch/RFC3339) queda sin usar: los dos
-// presets v1 tienen gramáticas de tiempo propias más específicas (nginx trae
-// fecha+zona en formato fijo; syslog usa `parse_rfc3339` directamente para
-// RFC5424 y construye el epoch a mano para RFC3164). Se mantiene en el
-// módulo (compartido con otros adaptadores de texto) para no reescribirlo.
-#[allow(dead_code)]
-mod timeutil;
+// Fechas: `chrono_core::time` (nginx y syslog RFC3164 traen gramáticas propias
+// y validan sus componentes con `days_from_civil_checked`/`secs_of_day_checked`;
+// syslog RFC5424 usa `parse_rfc3339`).
 
 pub use cursor::TextlogCursor;
 pub use preset::Preset;

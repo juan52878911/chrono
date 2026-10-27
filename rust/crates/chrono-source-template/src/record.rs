@@ -3,7 +3,7 @@
 
 use crate::matcher::Plantilla;
 use crate::simhash::{fnv1a64_line, simhash, tokenize};
-use crate::timeutil::{epoch_to_iso8601, parse_time_str};
+use chrono_core::time::{epoch_to_iso8601, parse_time_str};
 use chrono_core::{Actor, Event, Touch};
 use std::collections::BTreeMap;
 
@@ -135,5 +135,23 @@ pub fn line_to_event(caps: &[(&str, &str)], roles: &Roles, raw_line: &str, offse
         links: Vec::new(),
         simhash,
         is_bulk: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tabla: una fecha u hora imposible en el marcador de tiempo deja la
+    /// línea sin tiempo.
+    #[test]
+    fn fechas_imposibles_quedan_sin_tiempo() {
+        let roles = Roles { tiempo: Some("ts".into()), mensaje: Some("msg".into()), ..Roles::default() };
+        for ts in ["2024-01-01T25:00:00Z", "2024-01-01T10:60:00Z", "2024-02-30T10:00:00Z", "2023-02-29T00:00:00Z", "2024-04-31T10:00:00+02:00", "2024-13-01T00:00:00Z"] {
+            let ev = line_to_event(&[("ts", ts), ("msg", "x")], &roles, ts, 0, "template:/tmp/a.log");
+            assert_eq!((ev.at_epoch, ev.at.as_str()), (0, ""), "{ts:?}");
+        }
+        let ev = line_to_event(&[("ts", "2024-02-29T10:00:00Z"), ("msg", "x")], &roles, "ok", 0, "template:/tmp/a.log");
+        assert_eq!(ev.at, "2024-02-29T10:00:00Z");
     }
 }

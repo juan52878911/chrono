@@ -6,7 +6,7 @@
 
 use crate::config::ResolvedColumns;
 use crate::simhash::{fnv1a64_line, simhash, tokenize};
-use crate::timeutil::{epoch_to_iso8601, parse_time_str};
+use chrono_core::time::{epoch_to_iso8601, parse_time_str};
 use chrono_core::{Actor, Event, Touch};
 use std::collections::BTreeMap;
 
@@ -170,6 +170,20 @@ mod tests {
         let ev = row_to_event(&f, &h, &cols, "sin tiempo", 0, "csv:/tmp/a.csv");
         assert_eq!(ev.at_epoch, 0);
         assert_eq!(ev.at, "");
+    }
+
+    /// Tabla: una fecha u hora imposible en la columna de tiempo deja la fila
+    /// sin tiempo (antes `25:00` o el 30 de febrero pasaban a otro instante).
+    #[test]
+    fn fechas_imposibles_quedan_sin_tiempo() {
+        let h = header(&["ts", "msg"]);
+        let cols = config::resolve_columns(&h, &CsvOverrides::default());
+        for ts in ["2024-01-01T25:00:00Z", "2024-01-01T10:60:00Z", "2024-02-30T10:00:00Z", "2023-02-29T00:00:00Z", "2024-04-31T10:00:00+02:00", "2024-13-01T00:00:00Z"] {
+            let ev = row_to_event(&fields(&[ts, "x"]), &h, &cols, ts, 0, "csv:/tmp/a.csv");
+            assert_eq!((ev.at_epoch, ev.at.as_str()), (0, ""), "{ts:?}");
+        }
+        let ev = row_to_event(&fields(&["2024-02-29T10:00:00Z", "x"]), &h, &cols, "ok", 0, "csv:/tmp/a.csv");
+        assert_eq!(ev.at, "2024-02-29T10:00:00Z");
     }
 
     #[test]
