@@ -38,7 +38,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "chrono-classify-rules"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono-core",
  "serde",
@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "chrono-cli"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono-classify-rules",
  "chrono-core",
@@ -71,11 +71,11 @@ dependencies = [
 
 [[package]]
 name = "chrono-core"
-version = "0.7.0"
+version = "0.7.1"
 
 [[package]]
 name = "chrono-mcp"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono-core",
  "chrono-metrics",
@@ -88,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "chrono-metrics"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono-core",
  "chrono-store",
@@ -97,21 +97,21 @@ dependencies = [
 
 [[package]]
 name = "chrono-source-changelog"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono-core",
 ]
 
 [[package]]
 name = "chrono-source-csv"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono-core",
 ]
 
 [[package]]
 name = "chrono-source-delega"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono-core",
  "serde_json",
@@ -119,21 +119,21 @@ dependencies = [
 
 [[package]]
 name = "chrono-source-dir"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono-core",
 ]
 
 [[package]]
 name = "chrono-source-git"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono-core",
 ]
 
 [[package]]
 name = "chrono-source-jsonl"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono-core",
  "serde",
@@ -142,7 +142,7 @@ dependencies = [
 
 [[package]]
 name = "chrono-source-nod"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono-core",
  "serde_json",
@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "chrono-source-oslog"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono-core",
  "serde",
@@ -159,21 +159,21 @@ dependencies = [
 
 [[package]]
 name = "chrono-source-template"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono-core",
 ]
 
 [[package]]
 name = "chrono-source-textlog"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono-core",
 ]
 
 [[package]]
 name = "chrono-store"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono-core",
  "rusqlite",
@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "chrono-tracker-github"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono-core",
  "chrono-store",

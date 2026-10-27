@@ -17,6 +17,13 @@ Las cifras marcadas como *objetivo* son estimaciones que valida la fase correspo
 
 ## Estado (2026-10-26, tras F4 y sus pendientes)
 
+**0.7.1: arreglos sobre 0.7.0 (esquema v7, sin reindex).** Tests 647 → **649**. Lift de `precede --join` sobre
+las ventanas de cada valor de la clave (`lift_base`, decisión 39); `truncated` exacto en CLI y MCP; las tools MCP
+validan sus argumentos contra el esquema y sus errores llegan como `isError: true`; un solo parser de fechas en
+`chrono-core` para todas las fuentes (delega incluida); huella de glob completa a cualquier tamaño (decisión 34);
+`unknown` en rollups corregido con `entity_via` tardío; `Basic` corto en redact; posicionales de más en el CLI. Sigue
+abierto: los esquemas MCP (F5) y la escala de `informe` y `top attr:` (otra rama, se completará al fusionarla).
+
 **Pendientes de F2–F4 resueltos → 0.7.0 (esquema v7, sin reindex).** Sin dependencias nuevas (solo la feature
 `backup` de rusqlite). Tests 523 → **641**, en verde en macOS y en Linux (contenedor `rust:1.90` en trycorepc).
 Detalle en las decisiones 31 a 37 de `DECISIONS.md`.
@@ -97,17 +104,19 @@ Segunda vuelta (tras una segunda auditoría, tests adversarios y estrés en remo
   hubiera ninguno (`informe` a 1M).
 
 Sin verificar o pendiente:
-- Con `--join` sigue sin lift: falta una frecuencia base por clave.
-- Glob por encima de 64 MB: una edición entre los bloques de la muestra no se ve.
-- `informe` a 10M tarda 27 s y `top attr:k` 8 s (F7). Redact no tapa `Basic` con base64 corto; por MCP un
-  `since` inválido o un filtro de tipo erróneo se ignoran sin aviso.
+- Con `--join` sigue sin lift: falta una frecuencia base por clave. (resuelto en 0.7.1)
+- Glob por encima de 64 MB: una edición entre los bloques de la muestra no se ve. (resuelto en 0.7.1)
+- `informe` a 10M tarda 27 s y `top attr:k` 8 s (F7).
+- Redact no tapa `Basic` con base64 corto; por MCP un `since` inválido o un filtro de tipo erróneo se ignoran sin
+  aviso. (resuelto en 0.7.1)
 - Los agentes Claude no corren en los nodos remotos con la cuenta personal (sin token ni Rust allí); los nodos se
   usaron solo para cómputo en contenedores.
 - Lo ya indexado de una fuente irrecuperable conserva las dims u opciones de antes (se cuenta, no se arregla).
 - `informe` sigue contando cada episodio con una consulta (1,72 s a 1M): falta el barrido ordenado.
-- `token_budget.truncated` sigue siendo `returned >= max` en las listas con `limit`.
+- `token_budget.truncated` sigue siendo `returned >= max` en las listas con `limit`. (resuelto en 0.7.1)
 - `top attr:k` con filtros sigue uniendo `event_dims` con `events` por rid (venía de F3).
 - Un resultado ya agregado en rollups cuyo uso llega en un `sync` posterior sigue en `unknown` (venía de F4).
+  (resuelto en 0.7.1)
 - Esquemas MCP en ~24,6 KB hasta F5.
 
 **F4 hecha → 0.6.0 (esquema v7, se migra al abrir).** Binario 2 361 120 → 2 427 712 B (+3 %), sin dependencias
@@ -159,17 +168,18 @@ nuevas. Detalle en la decisión 30 de `DECISIONS.md`.
 
 Sin verificar o pendiente:
 - La frecuencia base es temporal sobre todo el periodo: en fuentes a ráfagas (sesiones) casi todo sale con lift > 1.
-  Con `--join` no hay lift (falta una base por clave). (La base, resuelta en 0.7.0 con ventanas activas; con `--join` sigue)
+  Con `--join` no hay lift (falta una base por clave). (La base, resuelta en 0.7.0 con ventanas activas; con `--join`, en 0.7.1)
 - `gaps` no mira el orden (un commit anterior a la edición también cubre), ni admite espacios en `grep=` de un lado,
   ni `--until`; un evento de `from` sin valor de `--by` no es unidad (sin aviso). (resuelto en 0.7.0)
 - `precede --join` agrupa un ancla con varios valores por el menor y descarta sin contar las anclas sin clave. (resuelto en 0.7.0)
 - `--join` con una clave que no existe devuelve vacío sin avisar (`gaps`, `--via` y `precede` sí dan error). (resuelto en 0.7.0)
 - Activar `entity_via` a mano en una fuente ya indexada no reindexa; un resultado ya agregado en rollups cuyo uso llega
   en un `sync` posterior sigue en `unknown`. La migración v6→v7 de dos procesos a la vez: el segundo falla (con error).
-  (Resueltos en 0.7.0 el reindexado por `entity_via` y la migración a la vez; lo de `unknown` sigue)
+  (Resueltos en 0.7.0 el reindexado por `entity_via` y la migración a la vez; lo de `unknown`, en 0.7.1)
 - `Pattern` hace vuelta atrás sin memo: un patrón como `.*.*.*x` sobre un título largo es polinómico.
 - `informe` paga +1,1 s por contar todos los episodios: un solo barrido ordenado en vez de una consulta por episodio.
 - `token_budget.truncated` es `returned >= max`: con exactamente `limit` unidades dice truncado sin estarlo (venía de antes).
+  (resuelto en 0.7.1)
 
 **F3 hecha → 0.5.0 (esquema v6, reindex avisado).** Binario 2 311 152 → 2 361 120 B (+2 %), sin dependencias
 nuevas. Detalle en la decisión 29 de `DECISIONS.md`.
