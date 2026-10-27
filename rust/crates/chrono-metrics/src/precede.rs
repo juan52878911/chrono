@@ -257,36 +257,43 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
         entity = entity_sql()
     );
     let mut pre = conn.prepare(&pre_sql)?;
+    // Sin clave, un barrido: cada evento de la unión de ventanas se lee y se
+    // plantilla UNA vez, y cuenta en los episodios cuya ventana lo contiene.
+    let mut swept = if join.is_none() { Some(sweep(&mut pre, &pextra, &episodes, o.window_ms)?) } else { None };
     let mut common: BTreeMap<(String, String), i64> = BTreeMap::new();
-    for (ep, key) in &mut episodes {
-        let from = ep.start_epoch - o.window_ms;
+    for (i, (ep, key)) in episodes.iter_mut().enumerate() {
         let to = ep.start_epoch;
-        let mut b: Vec<&dyn rusqlite::ToSql> = vec![&from, &to];
-        for p in &pextra {
-            b.push(p);
-        }
-        if join.is_some() {
-            b.push(&*key);
-        }
-        let rows: Vec<(String, i64, String, String, String)> = pre
-            .query_map(rusqlite::params_from_iter(b), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
-            .collect::<std::result::Result<_, _>>()?;
         // (nivel, plantilla, entidad) -> (cuenta, último epoch, ejemplo)
-        let mut agg: HashMap<(String, String, String), (i64, i64, String)> = HashMap::new();
-        for (id, epoch, title, level, entity) in rows {
-            // Lo del MISMO origen en el último segundo es el propio arranque del
-            // episodio, no algo que lo preceda.
-            if entity == ep.entity && to - epoch < 1000 {
-                continue;
+        let agg: HashMap<(String, String, String), (i64, i64, String)> = match &mut swept {
+            Some(s) => s.take(i),
+            None => {
+                let from = ep.start_epoch - o.window_ms;
+                let mut b: Vec<&dyn rusqlite::ToSql> = vec![&from, &to];
+                for p in &pextra {
+                    b.push(p);
+                }
+                b.push(&*key);
+                let rows: Vec<(String, i64, String, String, String)> = pre
+                    .query_map(rusqlite::params_from_iter(b), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+                    .collect::<std::result::Result<_, _>>()?;
+                let mut agg = HashMap::new();
+                for (id, epoch, title, level, entity) in rows {
+                    // Lo del MISMO origen en el último segundo es el propio arranque del
+                    // episodio, no algo que lo preceda.
+                    if entity == ep.entity && to - epoch < 1000 {
+                        continue;
+                    }
+                    let key = (level.to_ascii_uppercase(), chrono_core::templatize(&title), entity);
+                    let e = agg.entry(key).or_insert((0, 0, String::new()));
+                    e.0 += 1;
+                    if epoch >= e.1 {
+                        e.1 = epoch;
+                        e.2 = id;
+                    }
+                }
+                agg
             }
-            let key = (level.to_ascii_uppercase(), chrono_core::templatize(&title), entity);
-            let e = agg.entry(key).or_insert((0, 0, String::new()));
-            e.0 += 1;
-            if epoch >= e.1 {
-                e.1 = epoch;
-                e.2 = id;
-            }
-        }
+        };
         let mut seen_here: std::collections::BTreeSet<(String, String)> = Default::default();
         let mut list: Vec<Precursor> = agg
             .into_iter()
@@ -343,6 +350,103 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
     commons.truncate(10);
     let episodes: Vec<Episode> = episodes.into_iter().take(o.max_episodes).map(|(e, _)| e).collect();
     Ok(Preceded { episodes, episodes_total, common: commons, anchors_without_key, anchors_without_time: anchors_without_time as usize, precursors_total })
+}
+
+/// Precursor interno del barrido: (nivel, plantilla, entidad).
+type PreKey = (String, String, String);
+
+/// Lo que precede a cada episodio, sacado de un solo barrido ([`sweep`]).
+struct Swept {
+    /// Cada (nivel, plantilla, entidad) una vez; los episodios guardan su índice.
+    keys: Vec<PreKey>,
+    /// Id de cada fila leída (el ejemplo de un precursor es su índice aquí).
+    ids: Vec<String>,
+    /// Por episodio: precursor → (cuenta, último epoch, fila del ejemplo).
+    per_ep: Vec<HashMap<u32, (i64, i64, Option<usize>)>>,
+}
+
+impl Swept {
+    /// Lo del episodio `i`, con la misma forma que el recuento por episodio.
+    fn take(&mut self, i: usize) -> HashMap<PreKey, (i64, i64, String)> {
+        std::mem::take(&mut self.per_ep[i])
+            .into_iter()
+            .map(|(k, (n, last, row))| (self.keys[k as usize].clone(), (n, last, row.map(|r| self.ids[r].clone()).unwrap_or_default())))
+            .collect()
+    }
+}
+
+/// Paso 3 de [`precede`] sin clave: en vez de una consulta por episodio (las
+/// ventanas se solapan y cada evento se leía y se plantillaba varias veces),
+/// una por tramo de la unión de ventanas, en orden. Los episodios van por
+/// inicio y las ventanas miden lo mismo, así que las que contienen un instante
+/// son un tramo contiguo de episodios que avanza con él. Cada episodio ve las
+/// mismas filas en el mismo orden que con su propia consulta: mismas cifras.
+fn sweep(pre: &mut rusqlite::Statement, pextra: &[String], episodes: &[(Episode, String)], window_ms: i64) -> Result<Swept> {
+    let n = episodes.len();
+    let mut s = Swept { keys: Vec::new(), ids: Vec::new(), per_ep: vec![HashMap::new(); n] };
+    if window_ms <= 0 {
+        return Ok(s);
+    }
+    let starts: Vec<i64> = episodes.iter().map(|(e, _)| e.start_epoch).collect();
+    // Unión de las ventanas [inicio - window, inicio).
+    let mut spans: Vec<(i64, i64)> = Vec::new();
+    for &st in &starts {
+        let (a, b) = (st - window_ms, st);
+        match spans.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => spans.push((a, b)),
+        }
+    }
+    let mut interned: HashMap<PreKey, u32> = HashMap::new();
+    // Episodios activos: [lo, hi) = los de inicio en (t, t + window].
+    let (mut lo, mut hi) = (0usize, 0usize);
+    for (a, b) in spans {
+        let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&a, &b];
+        for p in pextra {
+            bound.push(p);
+        }
+        let mut rows = pre.query(rusqlite::params_from_iter(bound))?;
+        while let Some(r) = rows.next()? {
+            let epoch: i64 = r.get(1)?;
+            while lo < n && starts[lo] <= epoch {
+                lo += 1;
+            }
+            while hi < n && starts[hi] - window_ms <= epoch {
+                hi += 1;
+            }
+            if lo >= hi {
+                continue;
+            }
+            let key = (r.get::<_, String>(3)?.to_ascii_uppercase(), chrono_core::templatize(&r.get::<_, String>(2)?), r.get::<_, String>(4)?);
+            let k = match interned.get(&key) {
+                Some(&k) => k,
+                None => {
+                    let k = s.keys.len() as u32;
+                    s.keys.push(key.clone());
+                    interned.insert(key, k);
+                    k
+                }
+            };
+            let row = s.ids.len();
+            s.ids.push(r.get(0)?);
+            let entity = &s.keys[k as usize].2;
+            for (i, agg) in s.per_ep.iter_mut().enumerate().take(hi).skip(lo) {
+                let ep = &episodes[i].0;
+                // Lo del MISMO origen en el último segundo es el propio arranque del
+                // episodio, no algo que lo preceda.
+                if *entity == ep.entity && ep.start_epoch - epoch < 1000 {
+                    continue;
+                }
+                let e = agg.entry(k).or_insert((0, 0, None));
+                e.0 += 1;
+                if epoch >= e.1 {
+                    e.1 = epoch;
+                    e.2 = Some(row);
+                }
+            }
+        }
+    }
+    Ok(s)
 }
 
 /// Frecuencia base de una plantilla (P-MSR-3) y dónde vale.
@@ -534,6 +638,73 @@ mod tests {
         assert_eq!(eps[1].preceding.len(), 2);
         assert_eq!(common.len(), 1, "solo el mismatch está en los dos: {common:?}");
         assert_eq!(common[0].episodes, 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn el_barrido_da_lo_mismo_que_contar_cada_ventana() {
+        // Ventanas solapadas, inicios iguales en dos orígenes y el mismo origen en el
+        // último segundo: lo de cada episodio, contado a mano sobre la lista.
+        let (path, mut store) = temp_store("barrido");
+        let levels = ["FATAL", "ERROR", "WARNING", "INFO"];
+        let mut evs: Vec<Event> = Vec::new();
+        let mut x: u64 = 7;
+        for i in 0..400i64 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let (lv, svc) = (levels[(x >> 33) as usize % 4], format!("s{}", (x >> 40) % 3));
+            let secs = 1000 + i * 5 + (x >> 50) as i64 % 3;
+            evs.push(ev(&format!("e{i}"), secs, lv, &svc, &format!("{lv}: paso {} de {}", (x >> 45) % 4, i % 7)));
+        }
+        // Dos anclas a la vez en orígenes distintos.
+        let t = evs[200].at_epoch / 1000;
+        evs.push(ev("dup", t, "FATAL", "s9", "FATAL: otro"));
+        // Del mismo origen: medio segundo antes no cuenta; tres segundos antes, sí.
+        for (id, ms) in [("m1", 500), ("m2", 3000)] {
+            let mut e = ev(id, t, "ERROR", "s9", "ERROR: previo");
+            e.at_epoch -= ms;
+            evs.push(e);
+        }
+        {
+            let mut w = store.writer().unwrap();
+            for e in &evs {
+                w.add_event(e).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        let o = PrecedeOpts {
+            anchor: EventScope { level: Some("FATAL"), ..Default::default() },
+            gap_ms: 20_000,
+            by_origin: true,
+            max_episodes: 10_000,
+            per_episode: 10_000,
+            ..Default::default()
+        };
+        let r = precede(store.conn(), &o).unwrap();
+        assert!(r.episodes.len() > 20, "{}", r.episodes.len());
+        for ep in &r.episodes {
+            let mut want: HashMap<(String, String, String), (i64, i64)> = HashMap::new();
+            for e in &evs {
+                let svc = &e.touches[0].entity;
+                let inside = e.at_epoch >= ep.start_epoch - o.window_ms && e.at_epoch < ep.start_epoch;
+                if !inside || e.level == "INFO" || (*svc == ep.entity && ep.start_epoch - e.at_epoch < 1000) {
+                    continue;
+                }
+                let w = want.entry((e.level.clone(), chrono_core::templatize(&e.title), svc.clone())).or_insert((0, 0));
+                w.0 += 1;
+                w.1 = w.1.max(e.at_epoch);
+            }
+            let got: HashMap<(String, String, String), (i64, i64)> = ep
+                .preceding
+                .iter()
+                .map(|p| ((p.level.clone(), p.template.clone(), p.entity.clone()), (p.count, ep.start_epoch - p.last_before_secs * 1000)))
+                .collect();
+            assert_eq!(got.len(), want.len(), "{ep:?}");
+            for (k, (n, last)) in &want {
+                let (gn, glast) = got[k];
+                assert_eq!(gn, *n, "{k:?} en {}", ep.start_at);
+                assert_eq!(glast, ep.start_epoch - (ep.start_epoch - last) / 1000 * 1000, "{k:?}");
+            }
+        }
         let _ = std::fs::remove_file(&path);
     }
 
