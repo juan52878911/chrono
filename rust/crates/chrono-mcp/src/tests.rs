@@ -172,13 +172,13 @@ fn tools_list_incluye_todos_los_tools() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools debe ser array");
-    assert_eq!(tools.len(), 24);
+    assert_eq!(tools.len(), 25);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     for expected in [
         "hotspots", "coupling", "owners", "churn", "search", "similar", "bugs", "tickets",
         "phases", "branches", "explain", "prs", "timeline", "top", "correlate", "patterns", "events", "trace",
-        "session_patterns", "sources", "stats", "precede", "gaps", "informe",
+        "session_patterns", "sources", "stats", "precede", "gaps", "informe", "delega",
     ] {
         assert!(
             names.contains(&expected),
@@ -232,7 +232,7 @@ fn tools_call_sin_indice_pide_chrono_init() {
 
     // tools/list debe seguir funcionando igual sin índice.
     let list = call(&state, 6, "tools/list", json!({}));
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 24);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 25);
 }
 
 #[test]

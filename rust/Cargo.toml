@@ -15,6 +15,7 @@ members = [
     "crates/chrono-source-template",
     "crates/chrono-source-nod",
     "crates/chrono-source-dir",
+    "crates/chrono-source-delega",
     "crates/chrono-mcp",
     "crates/chrono-cli",
 ]

@@ -145,6 +145,11 @@ orientativo.
    (`ts`, `instance`, `run`, `seq`), que dentro de un proceso es el orden de emisión, pero entre procesos el
    contrato no fija un orden total.
 
+## Sobres de delega
+
+Los eventos que emite delega en el mismo fichero (`source.host == "delega"`: `job.*`, `decision.*`) también se
+ingieren; cómo se mapean y qué mide con ellos `chrono delega`, en [`DELEGA.md`](DELEGA.md).
+
 ## Comandos en el título (`include_command`, opcional)
 
 Por defecto el título de un evento no lleva texto libre: un `tool.call` sale como `tool.call Bash`. Con

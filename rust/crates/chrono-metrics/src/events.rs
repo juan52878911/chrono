@@ -105,7 +105,7 @@ pub fn events_ordered(conn: &Connection, f: &EventFilter, limit: usize, newest_f
 }
 
 /// Los eventos con `rid` mayor que `after_rid`, en orden de inserción, de
-/// `limit` en `limit` (con o sin tiempo; `since`/`until` de `f` no cuentan). Lo
+/// `limit` en `limit` (con `since` de `f`, sin `until`). Lo
 /// usa `tail`: paginar por tiempo perdía los que comparten instante con el
 /// último mostrado cuando entraban más de `limit` de golpe.
 pub fn events_after_rid(conn: &Connection, f: &EventFilter, after_rid: i64, limit: usize) -> Result<Vec<(i64, EventRow)>> {
@@ -120,7 +120,12 @@ pub fn events_after_rid(conn: &Connection, f: &EventFilter, after_rid: i64, limi
         infer_level: f.infer_level,
         until_epoch: 0,
     };
-    let (filters, extra) = scope.sql(3);
+    let (mut filters, mut extra) = scope.sql(3);
+    // `tail --since`: lo ya indexado desde esa hora, y después solo lo nuevo de ahí en adelante.
+    if f.since_epoch > 0 {
+        filters.push_str(&format!(" AND e.at_epoch >= CAST(?{} AS INTEGER)", 3 + extra.len()));
+        extra.push(f.since_epoch.to_string());
+    }
     let sql = format!(
         "SELECT e.rid, e.id, s.id, e.kind, e.at, e.at_epoch, e.level, e.title
          FROM events e JOIN sources s ON s.ref = e.source_ref
@@ -253,5 +258,22 @@ mod tests {
         let rows = events_ordered(store.conn(), &EventFilter::default(), 2, true).unwrap();
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["c2", "e1"]);
+    }
+
+    #[test]
+    fn listas_de_fuentes_y_de_kinds() {
+        let (_db, store) = fixture();
+        let conn = store.conn();
+        let ids = |f: &EventFilter| events(conn, f, 100).unwrap().iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+        // `--source git,jsonl`: cualquiera de los dos kinds de fuente.
+        let f = EventFilter { source: Some("git, jsonl"), ..Default::default() };
+        assert_eq!(ids(&f), vec!["c1", "d1", "e1", "c2"]);
+        let f = EventFilter { source: Some("git,csv"), ..Default::default() };
+        assert_eq!(ids(&f), vec!["c1", "c2"]);
+        // `--kind commit,lo*`: exacto o prefijo.
+        let f = EventFilter { kind: Some("comm*,log"), ..Default::default() };
+        assert_eq!(ids(&f).len(), 4);
+        let f = EventFilter { kind: Some("lo*,deploy"), level: Some("ERROR,WARN"), ..Default::default() };
+        assert_eq!(ids(&f), vec!["e1"]);
     }
 }

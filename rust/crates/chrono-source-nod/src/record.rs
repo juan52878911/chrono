@@ -49,10 +49,27 @@ pub const KNOWN_TYPES: &[&str] = &[
     "vcs.commit",
 ];
 
+/// Tipos que emite delega (`source.host == "delega"`) en el mismo bus: sus
+/// trabajos y las decisiones que piden al humano. Solo se aceptan de ese host.
+pub const DELEGA_TYPES: &[&str] = &[
+    "job.launch",
+    "job.notice",
+    "job.alert",
+    "job.result",
+    "job.end",
+    "job.say",
+    "job.message",
+    "decision.request",
+    "decision.answer",
+];
+
 /// Campos de `data` que son texto libre (o estructuras grandes): no van a
 /// `attrs`. `input` se usa solo para sacar la ruta del fichero editado.
 /// `links` (lo que produjo un `tool.result`) va a `Event.links`, no a `attrs`.
 const SKIP_DATA_KEYS: &[&str] = &["text", "answer", "input", "reason", "description", "title", "limits", "links"];
+
+/// Texto libre que además puede traer un evento de delega (el resumen entra recortado en el título).
+const SKIP_DELEGA_KEYS: &[&str] = &["summary", "question", "message", "brief", "result"];
 
 /// Tools que escriben un fichero: las de Claude Code (Write, Edit…) y las de
 /// OpenCode (`write`, `edit`, en minúsculas).
@@ -182,6 +199,25 @@ fn title_for(ty: &str, data: &Map<String, Value>) -> String {
     }
 }
 
+/// Título de un evento de delega: `<tipo> <trabajo>` y, si lo trae, el resumen corto
+/// que delega pone a propósito en `data.summary` (primera línea, 160 caracteres).
+fn delega_title(ty: &str, job: Option<&str>, data: &Map<String, Value>) -> String {
+    let mut t = format!("{ty} {}", job.unwrap_or("")).trim_end().to_string();
+    for k in ["kind", "alert", "notice"] {
+        if let Some(v) = data.get(k).and_then(Value::as_str).filter(|v| !v.is_empty()) {
+            t = format!("{t} {v}");
+            break;
+        }
+    }
+    if let Some(s) = data.get("summary").and_then(Value::as_str) {
+        let line: String = s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().take(160).collect();
+        if !line.is_empty() {
+            t = format!("{t}: {line}");
+        }
+    }
+    t
+}
+
 /// Con la opción `include_command` de la fuente (`.chrono/config.json`, `source_options` del fichero de
 /// Nod), el título de un `tool.call` lleva el comando que ejecutó: `tool.call Bash: git log …`. Así
 /// `correlate` o `events --grep` distinguen un `slice-ops.sh gate` de un `wiring update` alrededor de un
@@ -216,6 +252,14 @@ fn level_for(ty: &str, data: &Map<String, Value>) -> &'static str {
         "tool.result" if b("ok") == Some(false) => "ERROR",
         "permission.decision" if data.get("decision").and_then(Value::as_str) == Some("deny") => "WARN",
         "turn.end" if data.get("outcome").and_then(Value::as_str) == Some("aborted") => "WARN",
+        _ if DELEGA_TYPES.contains(&ty) => match data.get("level").and_then(Value::as_str).map(str::to_uppercase).as_deref() {
+            Some("ERROR") => "ERROR",
+            Some("WARN" | "WARNING") => "WARN",
+            Some("INFO") => "INFO",
+            _ if matches!(ty, "job.alert" | "decision.request") => "WARN",
+            _ if ty == "job.end" && data.get("rc").and_then(Value::as_i64).is_some_and(|r| r != 0) => "WARN",
+            _ => "INFO",
+        },
         _ => "INFO",
     }
 }
@@ -227,12 +271,21 @@ pub fn to_event(src: &EnvelopeSource, ev: &Map<String, Value>, source_id: &str) 
     let seq = ev.get("seq").and_then(Value::as_u64).filter(|s| *s >= 1)?;
     let ts_ms = ev.get("ts").and_then(Value::as_i64).filter(|t| *t >= 0)?;
     let ty = ev.get("type").and_then(Value::as_str)?;
-    if !KNOWN_TYPES.contains(&ty) {
+    let delega = src.host == "delega" && DELEGA_TYPES.contains(&ty);
+    if !KNOWN_TYPES.contains(&ty) && !delega {
         return None;
     }
-    let session = ev.get("session").and_then(Value::as_str).filter(|s| !s.is_empty())?;
     let empty = Map::new();
     let data = ev.get("data").and_then(Value::as_object).unwrap_or(&empty);
+    // delega: el trabajo va en la raíz o en `data`; sin sesión, la sesión es el trabajo.
+    let job = delega
+        .then(|| ev.get("job").or_else(|| data.get("job")).and_then(Value::as_str).filter(|j| !j.is_empty()))
+        .flatten();
+    let session = match ev.get("session").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        Some(s) => s,
+        None if delega => job.unwrap_or("delega"),
+        None => return None,
+    };
 
     let mut attrs: BTreeMap<String, String> = BTreeMap::new();
     attrs.insert("nod.type".into(), ty.into());
@@ -254,9 +307,20 @@ pub fn to_event(src: &EnvelopeSource, ev: &Map<String, Value>, source_id: &str) 
             attrs.insert(k.into(), v.into());
         }
     }
-    flatten_data(data, &mut attrs);
+    if let Some(j) = job {
+        attrs.insert("job".into(), j.into());
+    }
+    if delega {
+        let kept: Map<String, Value> = data.iter().filter(|(k, _)| !SKIP_DELEGA_KEYS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+        flatten_data(&kept, &mut attrs);
+    } else {
+        flatten_data(data, &mut attrs);
+    }
 
     let mut touches = Vec::new();
+    if let Some(j) = job {
+        touches.push(Touch { entity: j.to_string(), entity_type: "job".into(), weight: 1, attrs: BTreeMap::new() });
+    }
     if ty == "tool.call" {
         if let Some(tool) = data.get("tool").and_then(Value::as_str).filter(|t| !t.is_empty()) {
             touches.push(Touch { entity: format!("tool/{tool}"), entity_type: "tool".into(), weight: 1, attrs: BTreeMap::new() });
@@ -316,7 +380,7 @@ pub fn to_event(src: &EnvelopeSource, ev: &Map<String, Value>, source_id: &str) 
         _ => {}
     }
 
-    let title = title_for(ty, data);
+    let title = if delega { delega_title(ty, job, data) } else { title_for(ty, data) };
     // `ts` de Nod ya es ms Unix: es `at_epoch` tal cual (ms en todo el dominio).
     Some(Event {
         id: format!("nod:{}:{}:{seq}", src.instance, src.run),

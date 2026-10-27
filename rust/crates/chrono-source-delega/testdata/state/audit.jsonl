@@ -1,0 +1,7 @@
+{"ts": "2026-10-26T00:15:09", "event": "refused", "job": "20261026-001509-83575", "reason": "kindling no disponible para Acme: sin capacidad", "rc": 5}
+{"ts": "2026-10-26T12:22:51", "event": "launch", "job": "20261026-122251-88099", "profile": "work", "account": "dev@example.com", "node": "pc1", "branch": "delega/20261026-122251-88099", "owner": "orq-alfa"}
+{"ts": "2026-10-26T12:27:01", "event": "end", "job": "20261026-122251-88099", "profile": "work", "node": "pc1", "owner": "orq-alfa", "cost_usd": 0.75, "rc": 0}
+roto
+{"ts": "2026-10-26T13:00:00", "event": "integrate", "job": null, "profile": "work", "branch": "feature/x", "sha": "aaa1111", "result": "verify_failed", "verified": false}
+{"ts": "2026-10-26T13:30:00", "event": "integrate", "job": null, "profile": "work", "branch": "feature/x", "sha": "bbb2222", "result": "verified", "verified": true}
+{"ts": "2026-10-26T13:40:00", "event": "golden_build", "node": "kvm", "golden": "g1", "dbs": ["a"]}

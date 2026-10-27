@@ -118,9 +118,17 @@ Process × outcome (Nod sessions + git):
                        commit. Needs a nod source (chrono add events.jsonl --as nod).
                        --task ID, --session ID, --hotspots N (top N, default 25).
                        A commit's Nod session: chrono trace <sha>.
+  delega               Orchestration metrics from the delega state dir (chrono add
+                       <state_dir> --as delega) and Nod: spend by day/profile/node/
+                       owner checked against audit.jsonl, infra failure rate,
+                       question → answer latency, empty orchestrator turns, shas
+                       per branch. --since, --until, --orchestrators S1,S2,
+                       --format json.
 
 Diagnostics:
-  tail                 Follow new events live across sources (tail -f; --interval 2s).
+  tail                 Follow new events live, one line each, flushed at once
+                       (tail -f; --interval 2s; --source delega,nod --level WARN,ERROR;
+                       --since replays what is already indexed).
   bench                Measure query latencies + index stats on this index.
 
 Integration:
@@ -230,9 +238,17 @@ Proceso × resultado (sesiones de Nod + git):
                        una fuente nod (chrono add events.jsonl --as nod).
                        --task ID, --session ID, --hotspots N (top N, por defecto 25).
                        La sesión de Nod de un commit: chrono trace <sha>.
+  delega               Métricas de la orquestación desde el estado de delega
+                       (chrono add <state_dir> --as delega) y Nod: gasto por día,
+                       perfil, nodo y dueño cuadrado con audit.jsonl, tasa de fallos
+                       de infraestructura, latencia pregunta → respuesta, turnos
+                       vacíos del orquestador, shas por rama. --since, --until,
+                       --orchestrators S1,S2, --format json.
 
 Diagnóstico:
-  tail                 Sigue eventos nuevos en vivo (tail -f; --interval 2s).
+  tail                 Sigue eventos nuevos en vivo, una línea por evento y al
+                       momento (tail -f; --interval 2s; --source delega,nod
+                       --level WARN,ERROR; --since repite lo ya indexado).
   bench                Mide latencias de consulta + estadísticas del índice.
 
 Integración:
@@ -284,6 +300,8 @@ struct Flags {
     task: Option<String>,
     session: Option<String>,
     hotspots: Option<String>,
+    format: Option<String>,
+    orchestrators: Option<String>,
     compact: bool,
     /// `events --order asc|desc`.
     order: Option<String>,
@@ -376,6 +394,14 @@ fn parse_args(args: &[String]) -> Flags {
             "--entity" if i + 1 < args.len() => {
                 i += 1;
                 f.entity = Some(args[i].clone());
+            }
+            "--orchestrators" if i + 1 < args.len() => {
+                i += 1;
+                f.orchestrators = Some(args[i].clone());
+            }
+            "--format" if i + 1 < args.len() => {
+                i += 1;
+                f.format = Some(args[i].clone());
             }
             "--symbols" => f.symbols = true,
             "--compact" => f.compact = true,
@@ -608,6 +634,7 @@ const COMMANDS: &[&str] = &[
     "version", "help", "config", "init", "hook", "mcp", "sync", "reindex", "add", "remove", "tail", "hotspots", "coupling", "owners",
     "bugs", "churn", "tickets", "prs", "branches", "phases", "sources", "search", "similar", "timeline", "stats", "top",
     "patterns", "events", "bench", "explain", "informe", "precede", "correlate", "gaps", "trace", "session_patterns", "show",
+    "delega",
 ];
 
 /// Flags de consulta que se pasaron (las de `Flags` con valor), por su nombre.
@@ -668,6 +695,7 @@ fn query_flags(cmd: &str) -> Option<(&'static [&'static str], bool)> {
         "top" | "patterns" => (&["--since", "--until", "--limit"], true),
         "events" => (&["--since", "--until", "--limit", "--order"], true),
         "informe" => (&["--since", "--until"], true),
+        "delega" => (&["--since", "--until", "--limit"], false),
         "precede" => (&["--since", "--until", "--gap", "--window", "--before-levels", "--limit"], true),
         "correlate" => (&["--delta", "--kind", "--via", "--limit"], false),
         "gaps" => (&["--since", "--until", "--from", "--to", "--via", "--by", "--any-order", "--limit"], false),
@@ -904,9 +932,11 @@ fn main() {
             Some(s) => timeutil::parse_duration(s)
                 .unwrap_or_else(|| fatal(t(format!("invalid --interval: {s:?}"), format!("--interval no válido: {s:?}")))),
         };
+        let since = query::Window::from_flag(f.since.as_deref()).unwrap_or_else(|e| fatal(e)).since_epoch;
         if let Err(e) = index::tail(
             &db,
             interval_ms,
+            since,
             f.source.as_deref(),
             f.kind.as_deref(),
             f.level.as_deref(),
@@ -1058,6 +1088,28 @@ fn main() {
                 a.insert("infer_level".into(), serde_json::Value::Bool(true));
             }
             match chrono_mcp::run_tool_text(&store, "informe", &serde_json::Value::Object(a)) {
+                Ok(t) => {
+                    println!("{t}");
+                    return;
+                }
+                Err(e) => fatal(e),
+            }
+        }
+        "delega" => {
+            // La misma implementación que la tool MCP (texto, o JSON con --format json).
+            let mut a = serde_json::Map::new();
+            for (k, v) in [
+                ("since", &f.since),
+                ("until", &f.until),
+                ("limit", &f.limit),
+                ("orchestrators", &f.orchestrators),
+                ("format", &f.format),
+            ] {
+                if let Some(v) = v {
+                    a.insert(k.into(), serde_json::Value::String(v.clone()));
+                }
+            }
+            match chrono_mcp::run_tool_text(&store, "delega", &serde_json::Value::Object(a)) {
                 Ok(t) => {
                     println!("{t}");
                     return;

@@ -1,0 +1,11 @@
+[package]
+name = "chrono-source-delega"
+description = "Adaptador Source del directorio de estado de delega (carpetas de trabajo y audit.jsonl) para chrono."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono-core = { path = "../chrono-core" }
+serde_json = "1"

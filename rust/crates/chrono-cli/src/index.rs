@@ -94,6 +94,7 @@ pub(crate) fn build_registry() -> Registry {
     r.register(Box::new(chrono_source_template::TemplateSource::new()));
     r.register(Box::new(chrono_source_nod::NodSource::new()));
     r.register(Box::new(chrono_source_dir::DirSource::new()));
+    r.register(Box::new(chrono_source_delega::DelegaSource::new()));
     r
 }
 
@@ -426,14 +427,17 @@ pub fn sync(db: &Path, source_arg: Option<&Path>) -> Result<()> {
     }
     let _lock = lock_ingest(db)?;
     let mut store = Store::open(db)?;
-    sync_store(&mut store, &index_root_of(db), source_arg, false)
+    sync_store(&mut store, &index_root_of(db), source_arg, None, false)
 }
 
 /// El cuerpo de `sync`, con el cerrojo ya tomado. `light` (`tail`, cada pocos
 /// segundos): sin mensajes de progreso y sin `optimize` (FTS `optimize` y
 /// estadísticas cuestan segundos a escala y no cambian ninguna cifra); todo lo
 /// demás igual, así que tras un `tail` el índice queda como tras un `sync`.
-fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, light: bool) -> Result<()> {
+///
+/// `only` (`tail --source`): solo las fuentes que casan con ese filtro (lista de
+/// kinds, kind o prefijo de id; ver [`source_selected`]).
+fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, only: Option<&str>, light: bool) -> Result<()> {
     let index_root = index_root.to_path_buf();
     let registry = build_registry();
     let say = |msg: String| {
@@ -497,6 +501,9 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
         Ok(())
     };
     for s in &sources {
+        if !source_selected(only, s) {
+            continue;
+        }
         if let Some(ref want) = filter_id {
             // También casa por ruta: una fuente añadida con `--as` puede no
             // ser la que `detect` elegiría hoy (p.ej. un fichero de Nod aún
@@ -671,17 +678,22 @@ fn sync_store(store: &mut Store, index_root: &Path, source_arg: Option<&Path>, l
     result()
 }
 
-/// `chrono tail [--interval 2s] [--source/--kind/--level/--grep]`: sigue el
-/// índice como `tail -f`. Cada intervalo hace un `sync` (delta de cada fuente,
-/// FTS, rollups y plantillas al día, reindexado si cambiaron dims u opciones;
-/// solo se salta `optimize`) e imprime los eventos NUEVOS en orden cronológico.
-/// Antes ingería sin `finalize`: `patterns`/`timeline` y `search` no veían lo
-/// que entraba por `tail` hasta el siguiente `sync`. Bucle infinito; Ctrl-C para
-/// parar. Pensado para fuentes que crecen (logs, oslog); para git el atajo de
-/// HEAD evita trabajo si no hay commits nuevos.
+/// `chrono tail [--interval 2s] [--source delega,nod] [--kind/--level/--grep] [--since]`:
+/// sigue el índice como `tail -f`. Cada intervalo hace un `sync` (delta de las
+/// fuentes —solo las de `--source`, si se pasa—, FTS, rollups y plantillas al
+/// día, reindexado si cambiaron dims u opciones; solo se salta `optimize`) e
+/// imprime los eventos NUEVOS en orden cronológico, una línea por evento y al
+/// momento (se vacía la salida tras cada línea): sirve de monitor único para un
+/// orquestador (`chrono tail --source delega,nod --level WARN,ERROR`). Bucle
+/// infinito; Ctrl-C para parar (o cerrar la tubería).
+///
+/// «Nuevo» es por `rid` (fila insertada), no por hora: un aviso de delega con
+/// hora anterior al último evento de Nod se imprime igual. Con `since_epoch > 0`,
+/// antes de seguir imprime lo ya indexado desde esa hora.
 pub fn tail(
     db: &Path,
     interval_ms: i64,
+    since_epoch: i64,
     source: Option<&str>,
     kind: Option<&str>,
     level: Option<&str>,
@@ -696,7 +708,7 @@ pub fn tail(
     // `rid` y no por tiempo: con más de una página de golpe, los eventos del
     // mismo instante que el último mostrado se perdían (el índice sí los tenía).
     let max_rid = |st: &Store| st.conn().query_row("SELECT COALESCE(MAX(rid), 0) FROM events", [], |r| r.get::<_, i64>(0)).unwrap_or(0);
-    let mut last_rid = max_rid(&store);
+    let mut last_rid = if since_epoch > 0 { 0 } else { max_rid(&store) };
     let mut last_err: Option<String> = None;
 
     eprintln!("{}", t(
@@ -704,7 +716,7 @@ pub fn tail(
         format!("chrono tail: siguiendo cada {interval_ms} ms — Ctrl-C para parar"),
     ));
 
-    let filter = chrono_metrics::EventFilter { source, kind, level, grep, ..Default::default() };
+    let filter = chrono_metrics::EventFilter { since_epoch: since_epoch.max(0), source, kind, level, grep, ..Default::default() };
     let mut stdout = std::io::stdout();
     loop {
         {
@@ -733,7 +745,7 @@ pub fn tail(
             }
             // Una fuente que falla (un fichero borrado) no para el `tail`: el
             // aviso sale una vez y las demás siguen al día.
-            match sync_store(&mut store, &index_root, None, true) {
+            match sync_store(&mut store, &index_root, None, source, true) {
                 Ok(()) => last_err = None,
                 Err(e) => {
                     let msg = e.to_string();
@@ -762,11 +774,24 @@ pub fn tail(
         for r in &rows {
             let lvl: &str = if r.level.is_empty() { "-" } else { r.level.as_str() };
             let src = r.source_id.split(':').next().unwrap_or(&r.source_id);
-            let _ = writeln!(stdout, "{}  {:5}  [{src}]  {}", r.at, lvl, r.title);
+            // Una línea por evento y vaciado inmediato: un monitor la ve al instante.
+            if writeln!(stdout, "{}  {:5}  [{src}]  {}", r.at, lvl, r.title).and_then(|_| stdout.flush()).is_err() {
+                return Ok(()); // la tubería se cerró (el monitor terminó)
+            }
         }
-        let _ = stdout.flush();
         std::thread::sleep(interval);
     }
+}
+
+/// ¿Entra la fuente en el filtro `--source` de `tail`? Lista de kinds
+/// (`delega,nod`), un kind, un prefijo de id (`jsonl:/var/log`) o el alias de
+/// una fuente glob: lo mismo que casa el filtro de las consultas.
+fn source_selected(filter: Option<&str>, s: &chrono_store::SourceRow) -> bool {
+    let Some(f) = filter.map(str::trim).filter(|f| !f.is_empty()) else { return true };
+    if f.contains(':') {
+        return s.id.starts_with(f);
+    }
+    f.split(',').map(str::trim).any(|k| k == s.kind || GlobSource::from_row(&s.id, &s.manifest_json).and_then(|g| g.alias).as_deref() == Some(k))
 }
 
 /// Dispositivo e inodo del índice (`None` si no está): cambia si alguien lo
@@ -1122,10 +1147,10 @@ fn ingest_source(
     let redact = source_cfg.options.get("redact").map(String::as_str) != Some("off");
     let mut redacted = 0usize;
     let classifier = RulesClassifier::new(cfg);
-    // Nod es telemetría del PROCESO (sesiones con agentes) y dir un inventario
-    // de ficheros, no cambios del repo: no se clasifican (un tool `fix_*` o un
-    // fichero `fix.pdf` no son un fix).
-    let classify = !matches!(source.kind(), "nod" | "dir");
+    // Nod y delega son telemetría del PROCESO (sesiones y trabajos con agentes)
+    // y dir un inventario de ficheros, no cambios del repo: no se clasifican
+    // (un tool `fix_*` o un fichero `fix.pdf` no son un fix).
+    let classify = !matches!(source.kind(), "nod" | "dir" | "delega");
 
     let mut cur: Box<dyn Cursor> = match source.open(path, watermark, &source_cfg) {
         Ok(c) => c,

@@ -222,6 +222,22 @@ pub(crate) fn split_attr(cond: &str) -> (&str, &str) {
     }
 }
 
+/// Un literal de cadena JSON (para `json_each`): comillas, barras y controles escapados.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// `,A,B,` en mayúsculas y sin espacios: el parámetro de una lista separada por
 /// comas, para casar con `instr(?, ',' || x || ',')`.
 pub(crate) fn comma_list(raw: &str, upper: bool) -> String {
@@ -254,7 +270,18 @@ impl EventScope<'_> {
     pub(crate) fn sql_on(&self, t: &str, first: usize) -> (String, Vec<String>) {
         let mut sql = String::new();
         let mut params: Vec<String> = Vec::new();
-        if let Some(s) = self.source.filter(|s| !s.is_empty()) {
+        let source_list: Option<&str> = self.source.filter(|s| {
+            let items: Vec<&str> = s.split(',').map(str::trim).filter(|x| !x.is_empty()).collect();
+            items.len() > 1 && items.iter().all(|x| !x.contains(':'))
+        });
+        if let Some(s) = source_list {
+            // Lista de kinds o alias (`delega,nod`): cualquiera de ellos.
+            sql.push_str(&format!(
+                " AND {t}.source_ref IN (SELECT ref FROM sources WHERE instr(?{first}, ',' || kind || ',') > 0
+                    OR instr(?{first}, ',' || json_extract(manifest_json, '$.alias') || ',') > 0)"
+            ));
+            params.push(comma_list(s, false));
+        } else if let Some(s) = self.source.filter(|s| !s.trim().is_empty()) {
             // Kind (`jsonl`), prefijo de id (`jsonl:/var/log`) o alias de una fuente glob.
             let like = if s.contains(':') { format!("{s}%") } else { format!("{s}:%") };
             sql.push_str(&format!(
@@ -289,7 +316,18 @@ impl EventScope<'_> {
             let expr = level_expr("$t", self.infer_level);
             push(&format!("instr(?N, ',' || UPPER({expr}) || ',') > 0"), comma_list(l, true));
         }
-        if let Some(k) = self.kind.filter(|k| !k.is_empty()) {
+        if let Some(k) = self.kind.filter(|k| k.contains(',')) {
+            // Lista (`delega.*,nod.job.*`): exactos o prefijos con `*`, cualquiera
+            // de ellos. El prefijo se compara con `substr` y no con LIKE: un `_` o
+            // un `%` del kind son literales, como en el caso de un solo kind.
+            let items: Vec<&str> = k.split(',').map(str::trim).filter(|x| !x.is_empty()).collect();
+            push(
+                "EXISTS (SELECT 1 FROM json_each(?N) j WHERE CASE WHEN substr(j.value, -1) = '*'
+                    THEN substr($t.kind, 1, length(j.value) - 1) = substr(j.value, 1, length(j.value) - 1)
+                    ELSE $t.kind = j.value END)",
+                format!("[{}]", items.iter().map(|x| json_str(x)).collect::<Vec<_>>().join(",")),
+            );
+        } else if let Some(k) = self.kind.filter(|k| !k.is_empty()) {
             match k.strip_suffix('*') {
                 Some(prefix) => {
                     let (prefix, esc) = like_lit(prefix);

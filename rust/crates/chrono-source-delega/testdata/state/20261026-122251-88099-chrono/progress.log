@@ -1,0 +1,6 @@
+2026-10-26T12:22:55	START	claude -p
+2026-10-26T12:22:58	TOOL	Bash: ls
+2026-10-26T12:23:10	NOTICE:question	¿Acme o Beta?
+2026-10-26T12:41:10	MESSAGE	usa Beta
+2026-10-26T12:42:00	ALERT:stall	3 min sin eventos; última acción: Bash: sleep
+2026-10-26T12:26:54	END	rc=0

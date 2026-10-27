@@ -258,6 +258,19 @@ pub fn tool_defs() -> Vec<Value> {
             &["from", "to", "via"],
         ),
         tool(
+            "delega",
+            "Métricas de la orquestación con delega, exactas (fuente `delega`: carpetas de trabajo y audit.jsonl; y Nod si está indexado): gasto por día, perfil, nodo, dueño y modelo cuadrado contra audit.jsonl; tasa de fallos de infraestructura (rechazados, rc de arranque, sin salida, caídos); latencia pregunta → respuesta (aviso question → siguiente mensaje del orquestador, y decision.request de Nod); turnos del orquestador sin herramientas («sin novedades»); shas medidos por rama. Para retrospectivas sin leer transcripciones.",
+            json!({
+                "since": since_prop(),
+                "until": str_prop("Fin de la ventana, ISO, exclusivo (opcional)"),
+                "orchestrators": str_prop("Sesiones de Nod (o trozos de su cwd) del orquestador, separadas por comas, además de las deducidas (opcional)"),
+                "stale_hours": json!({"type": "integer", "description": "Horas sin actividad para dar por caído un trabajo sin cierre (por defecto 6)"}),
+                "limit": json!({"type": "integer", "description": "Elementos por lista (por defecto 10)"}),
+                "format": str_prop("text (por defecto) | json")
+            }),
+            &[],
+        ),
+        tool(
             "informe",
             "EMPIEZA AQUÍ. Informe completo y exacto en UNA llamada. tipo=logs (por defecto): cobertura, líneas por nivel, en qué servicios/contenedores cae cada nivel, mensajes más repetidos por nivel, picos, episodios de FATAL/CRITICAL con lo que los precede, y las consultas siguientes sugeridas. tipo=codigo con target=fichero[:A-B]: por qué está así (explain), dueños, qué cambia con él y si es hotspot.",
             with_scope(json!({
@@ -399,6 +412,7 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
         }
         "sources" => sources(conn)?,
         "informe" => crate::informe::informe(store, args, since_epoch)?,
+        "delega" => return Ok(text_content(crate::delega::run(conn, args)?)),
         "precede" => {
             let anchor = scope_from(args);
             if anchor.is_empty() {
