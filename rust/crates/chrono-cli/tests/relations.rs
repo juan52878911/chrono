@@ -267,6 +267,15 @@ fn entity_via_con_el_uso_en_un_sync_posterior_corrige_los_rollups() {
     }
     let rollups = "SELECT en.key, SUM(r.count) FROM dim_rollups r JOIN entities en ON en.id = r.entity_id GROUP BY 1 ORDER BY 1";
     assert_eq!(partido.sql(rollups), entero.sql(rollups));
+    // `attr_rollups` también lleva la entidad: el arreglo lo recalcula igual.
+    let attrs = "SELECT v.key, v.value, en.key, SUM(r.count) FROM attr_rollups r JOIN entities en ON en.id = r.entity_id
+                 JOIN dim_values v ON v.id = r.dim_id GROUP BY 1, 2, 3 ORDER BY 1, 2, 3";
+    // `cwd` llegó después del build completo del primero: sus claves son las
+    // de entonces, así que solo se comparan las que tiene.
+    let got = partido.sql(attrs);
+    assert!(!got.is_empty() && !got.iter().any(|l| l.contains("unknown")), "{got:?}");
+    let want: Vec<String> = entero.sql(attrs).into_iter().filter(|l| !l.starts_with("cwd|")).collect();
+    assert_eq!(got, want);
 }
 
 #[test]

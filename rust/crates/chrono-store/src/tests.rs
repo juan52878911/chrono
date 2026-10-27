@@ -419,6 +419,40 @@ fn borrar_eventos_invalida_los_rollups_y_el_incremental_no_suma_dos_veces() {
 }
 
 #[test]
+fn attr_rollups_solo_desde_un_build_completo_y_al_dia_con_event_dims() {
+    let db = TempDb::new("attr-rollups");
+    let mut store = Store::open(db.path()).unwrap();
+    let add = |store: &mut Store, ids: &[&str], src: &str| {
+        let mut w = store.writer().unwrap();
+        w.set_dims(vec!["host".into()]);
+        for id in ids {
+            let e = Event { source_id: src.to_string(), kind: "log".to_string(), attrs: attrs(&[("host", id)]), ..sample_event(id, &["svc"], "") };
+            w.add_event(&e).unwrap();
+        }
+        w.commit().unwrap();
+    };
+    let suma = |s: &Store| -> i64 { s.conn().query_row("SELECT COALESCE(SUM(count), 0) FROM attr_rollups", [], |r| r.get(0)).unwrap() };
+    let dims = |s: &Store| -> i64 { s.conn().query_row("SELECT COUNT(*) FROM event_dims", [], |r| r.get(0)).unwrap() };
+    add(&mut store, &["a1", "a2"], "jsonl:/a");
+    // Un incremental sin las claves elegidas (un índice de antes) no las construye.
+    store.set_meta("rollup_max_rowid", "0").unwrap();
+    store.build_rollups_sync(60_000).unwrap();
+    assert_eq!(store.meta("attr_rollup_keys").unwrap(), None);
+    // El completo elige las claves y cuenta cada evento con la dim.
+    store.build_rollups(60_000).unwrap();
+    assert_eq!(store.meta("attr_rollup_keys").unwrap().as_deref(), Some("host"));
+    assert_eq!((suma(&store), dims(&store)), (2, 2));
+    // Desde ahí, el incremental suma lo nuevo y quitar una fuente quita lo suyo.
+    add(&mut store, &["b1"], "jsonl:/b");
+    store.build_rollups_sync(60_000).unwrap();
+    assert_eq!((suma(&store), dims(&store)), (3, 3));
+    store.remove_source("jsonl:/a").unwrap();
+    assert_eq!((suma(&store), dims(&store)), (1, 1));
+    store.reset().unwrap();
+    assert_eq!(suma(&store), 0);
+}
+
+#[test]
 fn un_indice_v6_migra_sus_links_a_targets_internados() {
     let db = TempDb::new("v6-links");
     {

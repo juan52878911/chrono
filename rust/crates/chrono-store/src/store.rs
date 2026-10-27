@@ -2,7 +2,7 @@
 //! o de mantenimiento que no forman parte de la ingesta transaccional (esa vive
 //! en `writer.rs`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -317,7 +317,8 @@ impl Store {
         let n = self.count_source_events(source_id, None)?;
         self.delete_source_events(source_id)?;
         let tx = self.conn.unchecked_transaction()?;
-        for table in ["rollups", "dim_rollups", "attr_keys", "source_dims"] {
+        tx.execute_batch(crate::ATTR_ROLLUPS_SQL)?;
+        for table in ["rollups", "dim_rollups", "attr_rollups", "attr_keys", "source_dims"] {
             tx.execute(&format!("DELETE FROM {table} WHERE source_ref = (SELECT ref FROM sources WHERE id = ?1)"), params![source_id])?;
         }
         for table in ["templates", "markers"] {
@@ -379,7 +380,8 @@ impl Store {
     /// agregados (su uso llegó en este `sync`: se buscan desde los links
     /// nuevos, no recorriendo todo `unknown`) descuadrarían `dim_rollups`: sus
     /// buckets (fuente × 10 min) se recalculan con los eventos hasta el
-    /// watermark. `rollups` no lleva entidad y no cambia.
+    /// watermark, y con ellos los de `attr_rollups` (también lleva entidad).
+    /// `rollups` no lleva entidad y no cambia.
     pub fn repair_entity_via(&self, rel: &str) -> Result<usize> {
         let wm: Option<i64> = self.meta("rollup_max_rowid")?.and_then(|v| v.parse().ok());
         let after = wm.unwrap_or(0);
@@ -430,18 +432,28 @@ impl Store {
                 }
             }
             let drb = crate::DIM_ROLLUP_BUCKET_MS;
+            // `attr_rollups` también lleva la entidad: mismos buckets, mismas claves.
+            let attr_keys = self.attr_rollup_keys()?;
+            let attr_dims = self.attr_dims(attr_keys.as_deref())?;
             let mut dagg = DimRollupAgg::new();
+            let mut aagg = AttrRollupAgg::new();
             for &(source_ref, bucket) in &buckets {
                 tx.execute("DELETE FROM dim_rollups WHERE source_ref = ?1 AND bucket_epoch = ?2", params![source_ref, bucket])?;
+                if attr_keys.is_some() {
+                    tx.execute("DELETE FROM attr_rollups WHERE source_ref = ?1 AND bucket_epoch = ?2", params![source_ref, bucket])?;
+                }
                 let (lo, hi) = if bucket < 0 { (i64::MIN, 1) } else { (bucket, bucket + drb) };
-                let (_, d) = self.scan_rollups(
+                let (_, d, a) = self.scan_rollups(
                     "e.source_ref = ?1 AND e.at_epoch >= ?2 AND e.at_epoch < ?3 AND e.rid <= ?4",
                     params![source_ref, lo, hi, wm],
                     drb,
+                    &attr_dims,
+                    None,
                 )?;
                 dagg.extend(d);
+                aagg.extend(a);
             }
-            write_rollups(&tx, &RollupAgg::new(), &dagg)?;
+            write_rollups(&tx, &RollupAgg::new(), &dagg, attr_keys.is_some().then_some(&aagg))?;
             fixed += old;
         }
         tx.commit()?;
@@ -513,7 +525,9 @@ impl Store {
     pub fn reset(&mut self) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(BUMP_RID_HWM, [])?;
+        tx.execute_batch(crate::ATTR_ROLLUPS_SQL)?;
         for table in [
+            "attr_rollups",
             "touches",
             "event_links",
             "link_targets",
@@ -639,10 +653,30 @@ impl Store {
     /// Agrega en memoria los eventos que cumplen `filter` (sobre `events e`):
     /// `rollups` (fuente, plantilla, bucket) -> (count, last_rid), solo eventos
     /// con tiempo; `dim_rollups`, además kind, nivel, nivel efectivo y entidad,
-    /// TODOS los eventos (los sin tiempo en el bucket -1).
-    fn scan_rollups(&self, filter: &str, args: impl rusqlite::Params, bucket_ms: i64) -> Result<(RollupAgg, DimRollupAgg)> {
+    /// TODOS los eventos (los sin tiempo en el bucket -1); `attr_rollups`, lo
+    /// de `dim_rollups` sin plantilla por cada dim de `attr_dims` del evento.
+    /// Las dims se leen con un cursor en orden de rid desde `dims_from_rid`
+    /// (un recorrido por rid) o, sin él, evento a evento (pocos eventos).
+    fn scan_rollups(
+        &self,
+        filter: &str,
+        args: impl rusqlite::Params,
+        bucket_ms: i64,
+        attr_dims: &HashSet<i64>,
+        dims_from_rid: Option<i64>,
+    ) -> Result<(RollupAgg, DimRollupAgg, AttrRollupAgg)> {
         let mut agg = RollupAgg::new();
         let mut dagg = DimRollupAgg::new();
+        let mut aagg = AttrRollupAgg::new();
+        // Las dims de cada evento, en el mismo orden de rid que el recorrido.
+        let mut dims_stmt = self.conn.prepare("SELECT event_rid, dim_id FROM event_dims WHERE event_rid > ?1 ORDER BY event_rid")?;
+        let mut one_stmt = self.conn.prepare("SELECT event_rid, dim_id FROM event_dims WHERE event_rid = ?1")?;
+        let mut dims_rows = match dims_from_rid {
+            Some(from) if !attr_dims.is_empty() => Some(dims_stmt.query(params![from])?),
+            _ => None,
+        };
+        let mut next_dim: Option<(i64, i64)> = None;
+        let mut ev_dims: Vec<i64> = Vec::new();
         // ORDER BY e.rid conserva el determinismo del last_rid. El LEFT JOIN
         // cuenta los touches del evento.
         let mut stmt = self.conn.prepare(&format!(
@@ -672,7 +706,41 @@ impl Store {
                 1 => one_entity,
                 _ => -1,
             };
-            let d = dagg.entry((source_ref, template.clone(), kind, level, level_inf, entity, dim_bucket(at_epoch))).or_insert((0, 0));
+            let dbucket = dim_bucket(at_epoch);
+            if !attr_dims.is_empty() {
+                ev_dims.clear();
+                if let Some(rows) = dims_rows.as_mut() {
+                    loop {
+                        if next_dim.is_none() {
+                            next_dim = match rows.next()? {
+                                Some(r) => Some((r.get(0)?, r.get(1)?)),
+                                None => break,
+                            };
+                        }
+                        match next_dim {
+                            Some((er, d)) if er <= rid => {
+                                if er == rid && attr_dims.contains(&d) {
+                                    ev_dims.push(d);
+                                }
+                                next_dim = None;
+                            }
+                            _ => break,
+                        }
+                    }
+                } else {
+                    let ds = one_stmt.query_map(params![rid], |r| r.get::<_, i64>(1))?;
+                    for d in ds {
+                        let d = d?;
+                        if attr_dims.contains(&d) {
+                            ev_dims.push(d);
+                        }
+                    }
+                }
+                for &d in &ev_dims {
+                    *aagg.entry((d, source_ref, kind.clone(), level.clone(), level_inf.clone(), entity, dbucket)).or_insert(0) += 1;
+                }
+            }
+            let d = dagg.entry((source_ref, template.clone(), kind, level, level_inf, entity, dbucket)).or_insert((0, 0));
             d.0 += 1;
             d.1 = rid;
             if at_epoch > 0 {
@@ -682,7 +750,20 @@ impl Store {
                 entry.1 = rid; // último (iteración en orden de rid → determinista)
             }
         }
-        Ok((agg, dagg))
+        Ok((agg, dagg, aagg))
+    }
+
+    /// Claves de `attr_rollups` del último build completo (`None`: no hay tabla).
+    fn attr_rollup_keys(&self) -> Result<Option<Vec<String>>> {
+        Ok(self.meta("attr_rollup_keys")?.map(|v| v.split(',').filter(|k| !k.is_empty()).map(str::to_string).collect()))
+    }
+
+    /// Ids de `dim_values` de esas claves.
+    fn attr_dims(&self, keys: Option<&[String]>) -> Result<HashSet<i64>> {
+        let Some(keys) = keys.filter(|k| !k.is_empty()) else { return Ok(HashSet::new()) };
+        let mut st = self.conn.prepare("SELECT id FROM dim_values WHERE instr(?1, ',' || key || ',') > 0")?;
+        let ids = st.query_map(params![format!(",{},", keys.join(","))], |r| r.get::<_, i64>(0))?;
+        Ok(ids.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Núcleo común de rollups. `reset=true` vacía las tablas y barre todo;
@@ -702,8 +783,17 @@ impl Store {
         let drb = crate::DIM_ROLLUP_BUCKET_MS;
 
         // Fase 1: escanear eventos (solo el delta si no es reset) y agregar en
-        // memoria.
-        let (agg, dagg) = self.scan_rollups("e.rid > ?1", params![since_rowid], bucket_ms)?;
+        // memoria. `attr_rollups`: en un build completo se eligen las claves; en
+        // uno incremental, las de entonces (sin ellas, el índice no las tiene).
+        let attr_keys: Option<Vec<String>> = if reset {
+            let mut st = self.conn.prepare("SELECT key FROM dim_values GROUP BY key HAVING COUNT(*) <= ?1 ORDER BY key")?;
+            let keys = st.query_map(params![crate::ATTR_ROLLUP_MAX_VALUES], |r| r.get::<_, String>(0))?;
+            Some(keys.collect::<rusqlite::Result<_>>()?)
+        } else {
+            self.attr_rollup_keys()?
+        };
+        let attr_dims = self.attr_dims(attr_keys.as_deref())?;
+        let (agg, dagg, aagg) = self.scan_rollups("e.rid > ?1", params![since_rowid], bucket_ms, &attr_dims, Some(since_rowid))?;
 
         // Fase 2: UPSERT de templates + rollups. En reset se vacían primero (no
         // habrá conflictos); en incremental el ON CONFLICT suma sobre lo previo.
@@ -713,7 +803,20 @@ impl Store {
             tx.execute("DELETE FROM dim_rollups", [])?;
             tx.execute("DELETE FROM templates", [])?;
         }
-        let (n_templates, n_rollups) = write_rollups(&tx, &agg, &dagg)?;
+        if attr_keys.is_some() {
+            tx.execute_batch(crate::ATTR_ROLLUPS_SQL)?;
+            if reset {
+                tx.execute("DELETE FROM attr_rollups", [])?;
+            }
+        }
+        let (n_templates, n_rollups) = write_rollups(&tx, &agg, &dagg, attr_keys.is_some().then_some(&aagg))?;
+        if let Some(keys) = &attr_keys {
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES ('attr_rollup_keys', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![keys.join(",")],
+            )?;
+        }
         // Watermark al tope actual: el próximo sync parte de aquí.
         let max_rowid: i64 =
             tx.query_row("SELECT COALESCE(MAX(rid), 0) FROM events", [], |r| r.get(0))?;
@@ -895,6 +998,8 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
 type RollupAgg = std::collections::BTreeMap<(i64, String, i64), (i64, i64)>;
 /// (fuente, plantilla, kind, nivel, nivel efectivo, entidad, bucket) -> (count, last_rid).
 type DimRollupAgg = std::collections::BTreeMap<(i64, String, String, String, String, i64, i64), (i64, i64)>;
+/// (dim, fuente, kind, nivel, nivel efectivo, entidad, bucket) -> count.
+type AttrRollupAgg = std::collections::BTreeMap<(i64, i64, String, String, String, i64, i64), i64>;
 
 /// Bucket de `dim_rollups` de un instante (-1 sin tiempo).
 fn dim_bucket(at_epoch: i64) -> i64 {
@@ -906,8 +1011,9 @@ fn dim_bucket(at_epoch: i64) -> i64 {
 }
 
 /// UPSERT de plantillas y de lo agregado: el ON CONFLICT suma sobre lo que
-/// haya. Devuelve (plantillas nuevas, filas de `rollups`).
-fn write_rollups(tx: &rusqlite::Transaction<'_>, agg: &RollupAgg, dagg: &DimRollupAgg) -> Result<(usize, usize)> {
+/// haya; `aagg` solo si hay `attr_rollups`. Devuelve (plantillas nuevas,
+/// filas de `rollups`).
+fn write_rollups(tx: &rusqlite::Transaction<'_>, agg: &RollupAgg, dagg: &DimRollupAgg, aagg: Option<&AttrRollupAgg>) -> Result<(usize, usize)> {
     use std::collections::BTreeMap;
     let mut n_templates = 0usize;
     let mut n_rollups = 0usize;
@@ -962,6 +1068,17 @@ fn write_rollups(tx: &rusqlite::Transaction<'_>, agg: &RollupAgg, dagg: &DimRoll
             let source_id = source_ids.get(source_ref).map(String::as_str).unwrap_or("");
             let id = tpl(source_id, template, &mut n_templates)?;
             ins_dim.execute(params![source_ref, id, kind, level, level_inf, entity, bucket, count, last_rid])?;
+        }
+    }
+    if let Some(aagg) = aagg {
+        let mut ins_attr = tx.prepare(
+            "INSERT INTO attr_rollups(dim_id, source_ref, kind, level, level_inf, entity_id, bucket_epoch, count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(dim_id, source_ref, kind, level, level_inf, entity_id, bucket_epoch) DO UPDATE SET
+                count = count + excluded.count",
+        )?;
+        for ((dim, source_ref, kind, level, level_inf, entity, bucket), count) in aagg {
+            ins_attr.execute(params![dim, source_ref, kind, level, level_inf, entity, bucket, count])?;
         }
     }
     Ok((n_templates, n_rollups))

@@ -57,7 +57,7 @@ pub use sources::{source_aliases, sources, SourceSummary};
 pub use ticket::{ticket, Ticket};
 pub use stats::{stats, StatRow};
 pub use timeline::{timeline, timeline_scoped, EventScope, TimelineBucket};
-pub use top::{top, TopValue, top_filtered, TopFilter};
+pub use top::{top, TopValue, top_filtered, top_filtered_levels, TopFilter};
 pub use trace::{trace, Trace, TraceNode};
 
 /// Error de `chrono-metrics`: no exige un tipo concreto a los llamadores

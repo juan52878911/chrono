@@ -71,8 +71,9 @@ fn logs(conn: &rusqlite::Connection, args: &Value, since_epoch: i64) -> Result<V
     // Por nivel: servicios, contenedores y mensajes más repetidos.
     let mut por_nivel = Vec::new();
     let mut graves: Vec<String> = Vec::new();
-    for lv in LEVELS {
-        let svc = chrono_metrics::top_filtered(conn, "entity", since_epoch, &base(Some(lv)), 10)?;
+    // Los servicios de todos los niveles de una pasada (mismas cifras que `top`).
+    let svcs = chrono_metrics::top_filtered_levels(conn, "entity", since_epoch, &base(None), LEVELS, 10)?;
+    for (lv, svc) in LEVELS.iter().zip(svcs) {
         if svc.is_empty() {
             continue;
         }
