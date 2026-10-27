@@ -291,6 +291,35 @@ fn redact_clave_valor_con_espacios() {
     }
 }
 
+/// Una credencial `Basic` corta (menos de 16 caracteres) en una cabecera
+/// `Authorization` quedaba a la vista: `dTpw` es `u:p` en base64.
+#[test]
+fn redact_basic_corta_en_authorization() {
+    for (linea, secreto) in [
+        ("Authorization: Basic dTpw", "dTpw"),
+        ("authorization: basic YWRtaW46eA==", "YWRtaW46eA=="),
+        ("curl -H 'Authorization: Basic dTpw' https://api", "dTpw"),
+        ("Proxy-Authorization: Basic YTpiYw==", "YTpiYw=="),
+        (r#"{"Authorization":"Basic dTpw"}"#, "dTpw"),
+        (r#"headers={"authorization": "Basic YWRtaW46eA"}"#, "YWRtaW46eA"),
+        ("Authorization=Basic dTpw;", "dTpw"),
+    ] {
+        let (out, n) = redact(linea);
+        assert!(!out.contains(secreto) && n == 1, "{linea:?} → {out:?} ({n})");
+    }
+    // Fuera de una cabecera, o lo que no es `usuario:clave` en base64, queda.
+    for linea in [
+        "Basic dTpw",
+        "authorization: basic auth disabled",
+        "Authorization uses Basic realm=api",
+        "WWW-Authenticate: Basic realm=x",
+        "authorization header: Basic scheme only",
+        "Authorization: Basic",
+    ] {
+        assert_eq!(r(linea), linea);
+    }
+}
+
 /// Una contraseña con `@` en una URL no puede dejar la cola.
 #[test]
 fn redact_url_con_arroba_en_la_clave() {
@@ -331,6 +360,9 @@ fn redact_falsos_positivos() {
         "sk-learn version 1.3.0",
         "AKIA prefix detected in config",
         "basic auth disabled",
+        "authorization: basic auth disabled",
+        "Authorization failed: basic scheme not allowed",
+        "authorization=basic mode",
         "bearer token missing",
         "secret_santa_list.txt updated",
         "eyJ is the base64 of {\"",
