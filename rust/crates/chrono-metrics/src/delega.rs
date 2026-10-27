@@ -344,7 +344,7 @@ pub fn delega_report(conn: &Connection, o: &DelegaOpts) -> Result<DelegaReport> 
             Some(format!("rc={rc}"))
         } else if j.ended {
             (j.output == Some(false)).then(|| "no_output".to_string())
-        } else if horizon - j.last > o.stale_ms {
+        } else if horizon.saturating_sub(j.last) > o.stale_ms {
             Some("never_ended".to_string())
         } else {
             infra.running += 1;
@@ -385,7 +385,7 @@ pub fn delega_report(conn: &Connection, o: &DelegaOpts) -> Result<DelegaReport> 
                 }
                 asked += 1;
                 if let Some((ans, _)) = evs[i + 1..].iter().find(|(t, k)| *k == "MESSAGE" && t >= at) {
-                    samples.push((job.to_string(), ans - at));
+                    samples.push((job.to_string(), ans.saturating_sub(*at)));
                 }
             }
         }
@@ -417,7 +417,7 @@ pub fn delega_report(conn: &Connection, o: &DelegaOpts) -> Result<DelegaReport> 
             }
         });
         if let Some((_, t, _, _)) = ans {
-            samples.push((job.clone().unwrap_or_default(), t - at));
+            samples.push((job.clone().unwrap_or_default(), t.saturating_sub(*at)));
         }
     }
     rep.latency_nod = latency(samples, asked, o.limit);

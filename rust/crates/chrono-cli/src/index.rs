@@ -1062,7 +1062,10 @@ const IDS_MARK: &str = "ids:2";
 /// sha, y un commit es el mismo en cualquier clon o fork (ver [`id_salt`]).
 /// Tampoco nod (sus ids son `nod:<instancia>:<run>:<seq>`, nunca de hash: la
 /// marca solo costaría un reindex) ni oslog (no es un fichero: el log del
-/// sistema es uno, y su ventana no se puede releer para reindexar).
+/// sistema es uno, y su ventana no se puede releer para reindexar). delega sí
+/// lleva la marca aunque sus ids tengan `:`: los de audit llevan su propia sal
+/// de la fuente (`delega:audit:<sal>:<byte>`) y la marca reindexa una vez la
+/// fuente indexada con los de antes (`delega:audit:<byte>`).
 fn salts_ids(source: &dyn Source) -> bool {
     !matches!(source.kind(), "git" | "nod" | "oslog")
 }

@@ -66,6 +66,36 @@ pub fn text(obj: &Map<String, Value>, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|k| obj.get(*k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string))
 }
 
+/// Offset local máximo admitido (±18 h, el rango de ISO 8601 y de chrono).
+pub const MAX_OFFSET_S: i64 = 18 * 3600;
+
+/// 0000-01-01T00:00:00Z y 9999-12-31T23:59:59.999Z en ms: fuera de los años
+/// 0000–9999 una marca no es una fecha (un epoch en otra unidad, basura), y sin
+/// tope una resta de dos de ellas desbordaba.
+const MIN_MS: i64 = -62_167_219_200_000;
+const MAX_MS: i64 = 253_402_300_799_999;
+
+/// `ms` si cae en los años 0000–9999.
+pub fn valid_ms(ms: i64) -> Option<i64> {
+    (MIN_MS..=MAX_MS).contains(&ms).then_some(ms)
+}
+
+/// Segundos epoch (como los guarda delega en `state.json` y `meta`) → ms, o `None`
+/// si no es un número finito o se sale de los años 0000–9999.
+pub fn epoch_s_to_ms(s: f64) -> Option<i64> {
+    let ms = s * 1000.0;
+    (ms.is_finite() && ms >= MIN_MS as f64 && ms <= MAX_MS as f64).then_some(ms as i64)
+}
+
+fn days_in_month(y: i64, m: i64) -> i64 {
+    match m {
+        2 if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
 /// Días desde 1970-01-01 de una fecha civil (Hinnant).
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
@@ -87,7 +117,9 @@ pub fn parse_ts(s: &str) -> Option<(i64, Option<i64>)> {
     }
     let n = |r: std::ops::Range<usize>| s.get(r).and_then(|x| x.parse::<i64>().ok());
     let (y, mo, d, h, mi, se) = (n(0..4)?, n(5..7)?, n(8..10)?, n(11..13)?, n(14..16)?, n(17..19)?);
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 60 {
+    // El año son cuatro cifras (sin signo): «-001» o «+999» no son fechas. El día,
+    // el del mes (antes un 31 de febrero pasaba como 3 de marzo).
+    if !s.as_bytes()[..4].iter().all(u8::is_ascii_digit) || !(1..=12).contains(&mo) || d < 1 || d > days_in_month(y, mo) || h > 23 || mi > 59 || se > 60 {
         return None;
     }
     let mut rest = &s[19..];
@@ -106,7 +138,11 @@ pub fn parse_ts(s: &str) -> Option<(i64, Option<i64>)> {
             let r = r[1..].replace(':', "");
             let hh: i64 = r.get(0..2)?.parse().ok()?;
             let mm: i64 = r.get(2..4)?.parse().ok()?;
-            Some(sign * (hh * 3600 + mm * 60))
+            let off = hh * 3600 + mm * 60;
+            if mm > 59 || off > MAX_OFFSET_S {
+                return None;
+            }
+            Some(sign * off)
         }
         _ => return None,
     };
@@ -118,7 +154,7 @@ pub fn parse_ts(s: &str) -> Option<(i64, Option<i64>)> {
 /// (hora local = UTC + offset).
 pub fn ts_ms(s: &str, offset_s: i64) -> Option<i64> {
     let (ms, tz) = parse_ts(s)?;
-    Some(ms - tz.unwrap_or(offset_s) * 1000)
+    valid_ms(ms - tz.unwrap_or(offset_s).clamp(-MAX_OFFSET_S, MAX_OFFSET_S) * 1000)
 }
 
 /// Términos de un fichero de términos prohibidos: uno por línea, `#` comenta.

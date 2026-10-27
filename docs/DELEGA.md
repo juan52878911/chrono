@@ -54,6 +54,14 @@ guarda el id corto del trabajo (`20261026-122251-88099`): se resuelve a la carpe
 - **Hora.** delega escribe hora local sin zona. El offset sale de la opción `utc_offset` (`-05:00`) o se deduce de
   los trabajos que guardan las dos formas (resumen en hora local frente a estado en epoch; el más votado,
   redondeado a 15 min). Queda en el watermark: cambiar `utc_offset` después obliga a reindexar (la fuente diverge).
+  Un `utc_offset` mal escrito (no `±hh:mm`, o más de ±18 h) es un error, no se ignora. Una fecha imposible (31 de
+  febrero, mes 13, zona de más de 18 h) o un epoch fuera de los años 0000–9999 no es una fecha: ese campo no cuenta
+  y se usa el siguiente de la lista.
+- **Ids únicos por fuente.** Los de trabajo son `delega:<carpeta>:start|end|result|p<línea>|n<aviso>`: la carpeta
+  es la identidad del trabajo, así que la misma carpeta en dos directorios de estado es el mismo trabajo (como un
+  commit en dos clones). Los de audit son posicionales y llevan la sal de la fuente,
+  `delega:audit:<sal>:<byte>`: dos `audit.jsonl` indexados como fuentes ya no se pisan. Un índice que tenía la
+  fuente de antes la reindexa una vez (marca `ids:2`, decisión 37).
 - **Incremental.** Watermark `mt:<ns>|a:<off>|p:<hash>|tz:<s>`: se releen solo las carpetas con algún fichero más
   nuevo que `mt` (los eventos ya guardados se descartan por id; un trabajo en curso se relee entero cada vez, son
   pocos KB) y `audit.jsonl` desde `a`, solo líneas completas. Si audit encoge o cambia su prefijo, la fuente
