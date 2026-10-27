@@ -167,9 +167,10 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
     };
     let sql = format!(
         "SELECT e.id, e.at, e.at_epoch, {entity}, {key_col} FROM events e
-         WHERE e.at_epoch > 0 AND (?1 = 0 OR e.at_epoch >= ?1) {filters}
+         WHERE e.at_epoch > 0 AND (?1 = 0 OR e.at_epoch >= ?1) {filters}{pre}
          ORDER BY e.at_epoch ASC, e.id ASC",
-        entity = entity_sql()
+        entity = entity_sql(),
+        pre = level_prefilter(conn, &o.anchor)?
     );
     let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&o.since_epoch];
     for p in &extra {
@@ -354,6 +355,30 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
     commons.truncate(10);
     let episodes: Vec<Episode> = episodes.into_iter().take(o.max_episodes).map(|(e, _)| e).collect();
     Ok(Preceded { episodes, episodes_total, common: commons, anchors_without_key, anchors_without_time: anchors_without_time as usize, precursors_total })
+}
+
+/// Condición de más para las anclas con nivel: el filtro de nivel (`UPPER` del
+/// nivel, o del deducido) no puede usar `idx_events_level` y recorría `events`
+/// entero (el FATAL de `informe`). Esto dice lo mismo en forma de índice: los
+/// niveles de la fuente que en mayúsculas están en la lista y, con
+/// `infer_level`, los sin nivel. Es un superconjunto (el filtro de siempre sigue
+/// ahí), así que las anclas son las mismas. `UPPER` de SQLite solo pasa ASCII.
+fn level_prefilter(conn: &Connection, scope: &EventScope) -> Result<String> {
+    let Some(l) = scope.level.filter(|l| !l.trim().is_empty()) else { return Ok(String::new()) };
+    let want = crate::timeline::comma_list(l, true);
+    // Una lista sin ningún nivel (`,`) casa los eventos sin nivel: sin atajo.
+    if want == ",," {
+        return Ok(String::new());
+    }
+    let mut st = conn.prepare("SELECT DISTINCT level FROM events")?;
+    let raw = st.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let list: Vec<String> = raw
+        .iter()
+        .filter(|v| !v.is_empty() && want.contains(&format!(",{},", v.to_ascii_uppercase())))
+        .map(|v| format!("'{}'", v.replace('\'', "''")))
+        .collect();
+    let unlabeled = if scope.infer_level { " OR e.level = ''" } else { "" };
+    Ok(format!(" AND (e.level IN ({}){unlabeled})", list.join(", ")))
 }
 
 /// Precursor interno del barrido: (nivel, plantilla, entidad).
@@ -649,6 +674,32 @@ mod tests {
         assert_eq!(eps[1].preceding.len(), 2);
         assert_eq!(common.len(), 1, "solo el mismatch está en los dos: {common:?}");
         assert_eq!(common[0].episodes, 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn el_atajo_de_nivel_no_cambia_las_anclas() {
+        let (path, mut store) = temp_store("prenivel");
+        {
+            let mut w = store.writer().unwrap();
+            for (i, lv) in ["FATAL", "Fatal", "fatal", "critical", "ERROR", "", "", "INFO", "it's"].iter().enumerate() {
+                let mut e = ev(&format!("n{i}"), 100 + i as i64, lv, "db", "x");
+                if lv.is_empty() {
+                    e.attrs.insert("level_inferred".into(), if i % 2 == 0 { "FATAL".into() } else { "info".into() });
+                }
+                w.add_event(&e).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        let c = store.conn();
+        for level in ["FATAL", "fatal,CRITICAL", "info", "IT'S", "nada", " , ", "ERROR,"] {
+            for infer_level in [false, true] {
+                let scope = EventScope { level: Some(level), infer_level, ..Default::default() };
+                let (f, x) = scope.sql(1);
+                let n = |extra: &str| -> i64 { c.query_row(&format!("SELECT COUNT(*) FROM events e WHERE 1 {f}{extra}"), rusqlite::params_from_iter(&x), |r| r.get(0)).unwrap() };
+                assert_eq!(n(&level_prefilter(c, &scope).unwrap()), n(""), "{level:?} infer={infer_level}");
+            }
+        }
         let _ = std::fs::remove_file(&path);
     }
 
