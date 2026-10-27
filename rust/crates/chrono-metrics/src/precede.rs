@@ -521,8 +521,13 @@ fn base_rates(conn: &Connection, templates: &[&str], window_ms: i64, since: i64,
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(60_000);
-    let (lo, hi): (Option<i64>, Option<i64>) =
-        conn.query_row("SELECT MIN(at_epoch), MAX(at_epoch) FROM events WHERE at_epoch > 0", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    // Dos subconsultas: con MIN y MAX en la misma, SQLite no usa el atajo del
+    // índice y recorre `idx_events_at` entero (2,5 s a 5M).
+    let (lo, hi): (Option<i64>, Option<i64>) = conn.query_row(
+        "SELECT (SELECT MIN(at_epoch) FROM events WHERE at_epoch > 0), (SELECT MAX(at_epoch) FROM events WHERE at_epoch > 0)",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     let (Some(mut lo), Some(hi)) = (lo, hi) else { return Ok(out) };
     // `hi` es exclusivo y un episodio puede empezar en el último evento del
     // índice: sin el +1, su ventana no salía activa (active < episodios con la
