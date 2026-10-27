@@ -234,6 +234,41 @@ fn entity_via_con_el_resultado_leido_antes_que_su_uso() {
     assert_eq!(tool_result_entities(&env), ["Bash"]);
 }
 
+/// Un resultado ya agregado en los rollups cuyo uso llega en un `sync`
+/// posterior: la entidad se corrige en el índice Y en los rollups. `top
+/// entity` y `patterns` cuadran con un índice hecho de una vez (antes los
+/// rollups seguían contando el resultado en `unknown`).
+#[test]
+fn entity_via_con_el_uso_en_un_sync_posterior_corrige_los_rollups() {
+    let consultas: [&[&str]; 4] = [&["top", "entity"], &["top", "entity", "--kind", "tool_result"], &["patterns"], &["patterns", "--entity", "Bash"]];
+    // Sin la hora a la que se generó la respuesta.
+    let salida = |env: &Env| consultas.iter().map(|q| env.ok(q).lines().filter(|l| !l.contains("generated_at")).collect::<Vec<_>>().join("\n")).collect::<Vec<_>>();
+
+    let partido = Env::new("via-rollups", r#"{"version":2}"#);
+    let d = partido.dir().join("datos");
+    write(&d, "a-res.jsonl", &format!("{RESULT_LINE}\n"));
+    let pat = path_s(&d.join("*.jsonl"));
+    partido.ok(&["add", &pat, "--as", "jsonl", "--preset", "claude-sessions"]);
+    assert_eq!(tool_result_entities(&partido), ["unknown"]);
+    write(&d, "b-uso.jsonl", &format!("{USE_LINE}\n"));
+    partido.ok(&["sync"]);
+    assert_eq!(tool_result_entities(&partido), ["Bash"]);
+
+    let entero = Env::new("via-rollups-entero", r#"{"version":2}"#);
+    let d = entero.dir().join("datos");
+    write(&d, "a-res.jsonl", &format!("{RESULT_LINE}\n"));
+    write(&d, "b-uso.jsonl", &format!("{USE_LINE}\n"));
+    entero.ok(&["add", &path_s(&d.join("*.jsonl")), "--as", "jsonl", "--preset", "claude-sessions"]);
+
+    let (a, b) = (salida(&partido), salida(&entero));
+    for ((q, x), y) in consultas.iter().zip(&a).zip(&b) {
+        assert_eq!(x, y, "{q:?}");
+        assert!(!x.contains("unknown"), "{q:?}: {x}");
+    }
+    let rollups = "SELECT en.key, SUM(r.count) FROM dim_rollups r JOIN entities en ON en.id = r.entity_id GROUP BY 1 ORDER BY 1";
+    assert_eq!(partido.sql(rollups), entero.sql(rollups));
+}
+
 #[test]
 fn tail_no_escribe_una_relacion_nueva_sin_reindexar() {
     let env = Env::new("tail", r#"{"version":2}"#);

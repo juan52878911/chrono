@@ -25,8 +25,6 @@ mod matcher;
 mod record;
 #[allow(dead_code)]
 mod simhash;
-#[allow(dead_code)]
-mod timeutil;
 
 pub use cursor::TemplateCursor;
 

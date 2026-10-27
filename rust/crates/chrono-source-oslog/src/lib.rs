@@ -27,7 +27,6 @@ mod cursor;
 mod linux;
 mod macos;
 mod simhash;
-mod timeutil;
 mod util;
 
 use chrono_core::{CoreError, Result as CoreResult, Source, SourceConfig, Watermark};
@@ -128,7 +127,7 @@ fn window_from_cfg(cfg: &SourceConfig) -> String {
 /// --start` ("YYYY-MM-DD HH:MM:SS"). Ver limitación de zona horaria en el
 /// comentario de cabecera del módulo.
 fn macos_start_str(epoch: i64) -> String {
-    let iso = timeutil::epoch_to_iso8601(epoch); // "YYYY-MM-DDTHH:MM:SSZ"
+    let iso = chrono_core::time::epoch_to_iso8601(epoch); // "YYYY-MM-DDTHH:MM:SSZ"
     iso.replace('T', " ").trim_end_matches('Z').to_string()
 }
 
@@ -242,7 +241,7 @@ mod tests {
 
     #[test]
     fn macos_start_str_da_formato_esperado() {
-        let epoch = crate::timeutil::parse_rfc3339("2026-09-23T04:12:11Z").unwrap();
+        let epoch = chrono_core::time::parse_rfc3339("2026-09-23T04:12:11Z").unwrap();
         assert_eq!(macos_start_str(epoch), "2026-09-23 04:12:11");
     }
 }

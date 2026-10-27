@@ -21,7 +21,6 @@ mod gitutil;
 mod parse;
 mod show;
 mod simhash;
-mod timeutil;
 
 pub use blame::{blame, file_lines, Blame, BlameCommit};
 pub use branches::{branches, Branch, BranchAuthor, BranchTip};

@@ -4,7 +4,7 @@
 
 use crate::preset::ParsedLine;
 use crate::simhash::{fnv1a64_line, simhash, tokenize};
-use crate::timeutil::epoch_to_iso8601;
+use chrono_core::time::epoch_to_iso8601;
 use chrono_core::{Actor, Event, Touch};
 use std::collections::BTreeMap;
 
@@ -44,7 +44,7 @@ pub fn line_to_event(parsed: &ParsedLine, raw_line: &str, offset: u64, source_id
 
     match parsed {
         ParsedLine::Nginx(f) => {
-            let at = epoch_to_iso8601(f.epoch);
+            let at = if f.epoch == 0 { String::new() } else { epoch_to_iso8601(f.epoch) };
             let level = status_to_level(&f.status);
             // method/path siempre no vacíos: `nginx::parse` los exige.
             let title = format!("{} {} {}", f.method, f.path, f.status);
@@ -84,7 +84,7 @@ pub fn line_to_event(parsed: &ParsedLine, raw_line: &str, offset: u64, source_id
             }
         }
         ParsedLine::Syslog(f) => {
-            let at = epoch_to_iso8601(f.epoch);
+            let at = if f.epoch == 0 { String::new() } else { epoch_to_iso8601(f.epoch) };
             // entity = TAG/APP (programa); si no vino (nil en RFC5424), cae al
             // host, y si tampoco hay host, a "unknown" (mismo patrón que jsonl).
             let entity = if !f.tag.is_empty() {

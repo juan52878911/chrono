@@ -19,7 +19,7 @@
 use crate::gitutil;
 use crate::parse::{self, RECORD_SEP};
 use crate::simhash;
-use crate::timeutil::epoch_to_iso8601;
+use chrono_core::time::epoch_to_iso8601;
 use chrono_core::{Actor, CoreError, Cursor, Event, Link, Result as CoreResult, Watermark};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
