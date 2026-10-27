@@ -37,17 +37,28 @@ impl Window {
     }
 }
 
-/// Arma el envelope común leyendo el manifiesto del store. `truncated` si se
-/// devolvió el tope entero (puede haber más).
+/// Arma el envelope común leyendo el manifiesto del store. `truncated` es
+/// exacto: hay más de lo devuelto (un total conocido mayor, o la fila de más
+/// que se pide con [`cut`]). Antes era `returned >= max_items`: con exactamente
+/// `max_items` elementos salía truncado sin estarlo.
 fn envelope(
     store: &Store,
     question: &str,
     window: &Window,
     max_items: usize,
     returned: usize,
+    truncated: bool,
     result: Json,
 ) -> Result<Json> {
-    envelope_with(store, question, window, max_items, returned, returned >= max_items, result)
+    envelope_with(store, question, window, max_items, returned, truncated, result)
+}
+
+/// Para saber si hay más sin contarlo todo se piden `limit + 1` filas: recorta a
+/// `limit` y dice si sobró alguna.
+fn cut<T>(mut rows: Vec<T>, limit: usize) -> (Vec<T>, bool) {
+    let more = rows.len() > limit;
+    rows.truncate(limit);
+    (rows, more)
 }
 
 /// Envelope de una respuesta que va siempre entera (un inventario, una ficha):
@@ -120,9 +131,9 @@ pub fn hotspots(store: &Store, w: &Window, symbols_only: bool) -> Result<Json> {
             "hotspots needs a git source (changes × size of each file) and this index has none; for logs or tools: chrono top entity",
             "hotspots necesita una fuente git (cambios × tamaño de cada fichero) y este índice no tiene ninguna; para logs o tools: chrono top entity",
         );
-        return envelope(store, "hotspots", w, LIMIT, 0, with_hints(Json::obj().set("hotspots", Json::Arr(vec![])), vec![hint]));
+        return envelope(store, "hotspots", w, LIMIT, 0, false, with_hints(Json::obj().set("hotspots", Json::Arr(vec![])), vec![hint]));
     }
-    let rows = chrono_metrics::hotspots(store.conn(), w.since_epoch, LIMIT, symbols_only)?;
+    let (rows, more) = cut(chrono_metrics::hotspots(store.conn(), w.since_epoch, LIMIT + 1, symbols_only)?, LIMIT);
     let items: Vec<Json> = rows
         .iter()
         .map(|h| {
@@ -134,12 +145,13 @@ pub fn hotspots(store: &Store, w: &Window, symbols_only: bool) -> Result<Json> {
         })
         .collect();
     let n = items.len();
-    envelope(store, "hotspots", w, LIMIT, n, Json::obj().set("hotspots", Json::Arr(items)))
+    envelope(store, "hotspots", w, LIMIT, n, more, Json::obj().set("hotspots", Json::Arr(items)))
 }
 
 pub fn coupling(store: &Store, w: &Window, entity: &str, symbols_only: bool) -> Result<Json> {
     const LIMIT: usize = 25;
-    let (rows, _total) = chrono_metrics::coupling(store.conn(), entity, 2, w.since_epoch, LIMIT, symbols_only)?;
+    let (rows, _total) = chrono_metrics::coupling(store.conn(), entity, 2, w.since_epoch, LIMIT + 1, symbols_only)?;
+    let (rows, more) = cut(rows, LIMIT);
     let items: Vec<Json> = rows
         .iter()
         .map(|c| {
@@ -156,6 +168,7 @@ pub fn coupling(store: &Store, w: &Window, entity: &str, symbols_only: bool) -> 
         w,
         LIMIT,
         n,
+        more,
         Json::obj().set("for", Json::str(entity)).set("coupled", Json::Arr(items)),
     )
 }
@@ -172,11 +185,10 @@ pub fn owners(store: &Store, w: &Window, prefix: &str, symbols_only: bool) -> Re
         })
         .collect();
     let n = items.len();
-    envelope(
+    envelope_complete(
         store,
         "owners",
         w,
-        n,
         n,
         Json::obj().set("owners", Json::Arr(items)).set("bus_factor", Json::Int(bus_factor)),
     )
@@ -184,7 +196,7 @@ pub fn owners(store: &Store, w: &Window, prefix: &str, symbols_only: bool) -> Re
 
 pub fn churn(store: &Store, w: &Window, symbols_only: bool) -> Result<Json> {
     const LIMIT: usize = 25;
-    let rows = chrono_metrics::churn(store.conn(), w.since_epoch, LIMIT, symbols_only)?;
+    let (rows, more) = cut(chrono_metrics::churn(store.conn(), w.since_epoch, LIMIT + 1, symbols_only)?, LIMIT);
     let items: Vec<Json> = rows
         .iter()
         .map(|r| {
@@ -195,14 +207,14 @@ pub fn churn(store: &Store, w: &Window, symbols_only: bool) -> Result<Json> {
         })
         .collect();
     let n = items.len();
-    envelope(store, "churn", w, LIMIT, n, Json::obj().set("churn", Json::Arr(items)))
+    envelope(store, "churn", w, LIMIT, n, more, Json::obj().set("churn", Json::Arr(items)))
 }
 
 pub fn search(store: &Store, query: &str, limit: Option<&str>) -> Result<Json> {
     // `--limit` se ignoraba: siempre 25, aunque la ayuda de las demás consultas lo admite.
     let limit = parse_limit(limit, 25)?;
     let w = Window { since_text: None, since_epoch: 0 };
-    let rows = chrono_metrics::search(store.conn(), query, limit)?;
+    let (rows, more) = cut(chrono_metrics::search(store.conn(), query, limit + 1)?, limit);
     let items: Vec<Json> = rows
         .iter()
         .map(|h| {
@@ -219,6 +231,7 @@ pub fn search(store: &Store, query: &str, limit: Option<&str>) -> Result<Json> {
         &w,
         limit,
         n,
+        more,
         Json::obj().set("query", Json::str(query)).set("results", Json::Arr(items)),
     )
 }
@@ -226,7 +239,7 @@ pub fn search(store: &Store, query: &str, limit: Option<&str>) -> Result<Json> {
 pub fn similar(store: &Store, id: &str) -> Result<Json> {
     const LIMIT: usize = 15;
     let w = Window { since_text: None, since_epoch: 0 };
-    let rows = chrono_metrics::similar(store.conn(), id, 4, LIMIT)?;
+    let (rows, more) = cut(chrono_metrics::similar(store.conn(), id, 4, LIMIT + 1)?, LIMIT);
     let items: Vec<Json> = rows
         .iter()
         .map(|s| {
@@ -243,6 +256,7 @@ pub fn similar(store: &Store, id: &str) -> Result<Json> {
         &w,
         LIMIT,
         n,
+        more,
         Json::obj().set("of", Json::str(id)).set("similar", Json::Arr(items)),
     )
 }
@@ -254,7 +268,13 @@ fn no_window() -> Window {
 
 pub fn bugs(store: &Store, w: &Window) -> Result<Json> {
     const LIMIT: usize = 15;
-    let b = chrono_metrics::bugs(store.conn(), w.since_epoch, LIMIT)?;
+    // Dos listas acotadas a LIMIT: se pide una de más en cada una para saber si
+    // alguna se recortó.
+    let mut b = chrono_metrics::bugs(store.conn(), w.since_epoch, LIMIT + 1)?;
+    let more = b.categories.len() > LIMIT || b.hot_areas.len() > LIMIT;
+    b.categories.truncate(LIMIT);
+    b.hot_areas.truncate(LIMIT);
+    let returned = b.categories.len().max(b.hot_areas.len());
     let categories: Vec<Json> = b
         .categories
         .iter()
@@ -284,9 +304,8 @@ pub fn bugs(store: &Store, w: &Window) -> Result<Json> {
         .set("total_fixes", Json::Int(b.total_fixes))
         .set("categories", Json::Arr(categories))
         .set("hot_areas", Json::Arr(hot_areas));
-    // Paridad con el Go: max_items/returned fijos a LIMIT (no hay una sola
-    // lista plana que truncar; el token_budget aquí es solo orientativo).
-    envelope(store, "bugs", w, LIMIT, LIMIT, result)
+    // `returned`: la más larga de las dos listas; `truncated`, si alguna tenía más.
+    envelope(store, "bugs", w, LIMIT, returned, more, result)
 }
 
 pub fn ticket(store: &Store, id: &str) -> Result<Json> {
@@ -312,7 +331,7 @@ pub fn prs(store: &Store) -> Result<Json> {
          ORDER BY number DESC
          LIMIT ?1",
     )?;
-    let rows = stmt.query_map([LIMIT as i64], |r| {
+    let rows = stmt.query_map([LIMIT as i64 + 1], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
@@ -339,8 +358,9 @@ pub fn prs(store: &Store) -> Result<Json> {
                 .set("is_bug", Json::Bool(is_bug != 0)),
         );
     }
+    let (items, more) = cut(items, LIMIT);
     let n = items.len();
-    envelope(store, "prs", &w, LIMIT, n, Json::obj().set("pull_requests", Json::Arr(items)))
+    envelope(store, "prs", &w, LIMIT, n, more, Json::obj().set("pull_requests", Json::Arr(items)))
 }
 
 pub fn phases(store: &Store) -> Result<Json> {
@@ -482,7 +502,11 @@ pub fn trace(store: &Store, id: &str, depth: Option<&str>, limit: Option<&str>) 
         },
     };
     let limit = parse_limit(limit, DEFAULT_LIMIT)?;
-    let tr = chrono_metrics::trace(store.conn(), id, max_depth, limit)?;
+    // Un nodo de más dice si había más (el BFS admite por orden: los `limit`
+    // primeros son los mismos).
+    let mut tr = chrono_metrics::trace(store.conn(), id, max_depth, limit + 1)?;
+    let more = tr.nodes.len() > limit;
+    tr.nodes.truncate(limit);
     let event_json = |e: &chrono_metrics::EventRow| {
         Json::obj()
             .set("id", Json::str(&e.id))
@@ -501,7 +525,7 @@ pub fn trace(store: &Store, id: &str, depth: Option<&str>, limit: Option<&str>) 
         .collect();
     let n = nodes.len();
     let result = Json::obj().set("anchor", event_json(&tr.anchor)).set("chain", Json::Arr(nodes));
-    envelope(store, "trace", &w, limit, n, result)
+    envelope(store, "trace", &w, limit, n, more, result)
 }
 
 /// `--until` → epoch en ms (0 = sin fin).
@@ -544,7 +568,7 @@ pub fn events(
         join: scope.join,
         infer_level: scope.infer_level,
     };
-    let rows = chrono_metrics::events_ordered(store.conn(), &filter, limit, newest_first)?;
+    let (rows, more) = cut(chrono_metrics::events_ordered(store.conn(), &filter, limit + 1, newest_first)?, limit);
     let items: Vec<Json> = rows
         .iter()
         .map(|e| {
@@ -559,7 +583,7 @@ pub fn events(
         .collect();
     let n = items.len();
     let result = Json::obj().set("order", Json::str(if newest_first { "desc" } else { "asc" })).set("events", Json::Arr(items));
-    envelope(store, "events", w, limit, n, result)
+    envelope(store, "events", w, limit, n, more, result)
 }
 
 /// `patterns`: plantillas de log más frecuentes (Drain-light, desde rollups).
@@ -573,7 +597,7 @@ pub fn patterns(
     const DEFAULT_LIMIT: usize = 25;
     let limit = parse_limit(limit, DEFAULT_LIMIT)?;
     let scope = chrono_metrics::EventScope { until_epoch: until_epoch(until)?, ..scope.clone() };
-    let rows = chrono_metrics::patterns_scoped(store.conn(), w.since_epoch, &scope, limit)?;
+    let (rows, more) = cut(chrono_metrics::patterns_scoped(store.conn(), w.since_epoch, &scope, limit + 1)?, limit);
     let items: Vec<Json> = rows
         .iter()
         .map(|p| {
@@ -584,7 +608,7 @@ pub fn patterns(
         })
         .collect();
     let n = items.len();
-    envelope(store, "patterns", w, limit, n, Json::obj().set("patterns", Json::Arr(items)))
+    envelope(store, "patterns", w, limit, n, more, Json::obj().set("patterns", Json::Arr(items)))
 }
 
 /// `show <id> [--entity ruta]`: enseña el diff de un commit (git en vivo, sin
@@ -648,7 +672,7 @@ pub fn timeline(
         None | Some("") => None,
         Some(b) => Some(b),
     };
-    let rows = chrono_metrics::timeline_scoped(store.conn(), w.since_epoch, until_epoch, bucket_ms, group_by, scope, limit)?;
+    let (rows, more) = cut(chrono_metrics::timeline_scoped(store.conn(), w.since_epoch, until_epoch, bucket_ms, group_by, scope, limit + 1)?, limit);
     let items: Vec<Json> = rows
         .iter()
         .map(|b| {
@@ -677,7 +701,7 @@ pub fn timeline(
             )],
         );
     }
-    envelope(store, "timeline", w, limit, n, result)
+    envelope(store, "timeline", w, limit, n, more, result)
 }
 
 /// `top <dim>`: valores más frecuentes de una dimensión.
@@ -702,7 +726,7 @@ pub fn top(
         infer_level: scope.infer_level,
         until_epoch: until_epoch(until)?,
     };
-    let rows = chrono_metrics::top_filtered(store.conn(), dim, w.since_epoch, &filter, limit)?;
+    let (rows, more) = cut(chrono_metrics::top_filtered(store.conn(), dim, w.since_epoch, &filter, limit + 1)?, limit);
     let items: Vec<Json> = rows
         .iter()
         .map(|v| Json::obj().set("value", Json::str(&v.value)).set("count", Json::Int(v.count)))
@@ -717,7 +741,7 @@ pub fn top(
         }
     }
     let result = Json::obj().set("dim", Json::str(dim)).set("top", Json::Arr(items));
-    envelope(store, "top", w, limit, n, with_hints(result, hints))
+    envelope(store, "top", w, limit, n, more, with_hints(result, hints))
 }
 
 /// `precede`: episodios de lo que casan los filtros y qué los precede.
@@ -827,7 +851,7 @@ pub fn precede(
         .set("window_ms", Json::Int(o.window_ms))
         .set("common_precursors", Json::Arr(commons))
         .set("episodes", Json::Arr(episodes));
-    envelope(store, "precede", w, max, n, with_hints(result, hints))
+    envelope(store, "precede", w, max, n, total > n, with_hints(result, hints))
 }
 
 /// Serializa un `EventRef` de `correlate` a JSON.
@@ -860,7 +884,9 @@ pub fn correlate(store: &Store, id: &str, delta: Option<&str>, kind: Option<&str
     let limit = parse_limit(limit, DEFAULT_LIMIT)?;
     // `--kind commit,ci.*`: solo esos tipos (ver `correlate_kinds`).
     let kinds: Vec<String> = kind.unwrap_or("").split(',').map(str::to_string).collect();
-    let corr = chrono_metrics::correlate_kinds(store.conn(), id, delta_ms, &kinds, limit)?;
+    let mut corr = chrono_metrics::correlate_kinds(store.conn(), id, delta_ms, &kinds, limit + 1)?;
+    let more = corr.related.len() > limit;
+    corr.related.truncate(limit);
     let related: Vec<Json> = corr.related.iter().map(event_ref_json).collect();
     let n = related.len();
     let result = Json::obj()
@@ -885,7 +911,7 @@ pub fn correlate(store: &Store, id: &str, delta: Option<&str>, kind: Option<&str
             )
         });
     }
-    envelope(store, "correlate", &w, limit, n, with_hints(result, hints))
+    envelope(store, "correlate", &w, limit, n, more, with_hints(result, hints))
 }
 
 /// `correlate <id> --via K`: lo que comparte la clave `K` con el evento, de
@@ -912,7 +938,7 @@ pub fn correlate_via(store: &Store, id: &str, via: &str, kind: Option<&str>, lim
         .set("by_source", Json::Arr(by_source))
         .set("by_kind_level", Json::Arr(by_kind))
         .set("related", Json::Arr(related));
-    envelope(store, "correlate", &w, limit, n, result)
+    envelope(store, "correlate", &w, limit, n, v.total > n as i64, result)
 }
 
 /// `gaps --from A --to B --via K [--by U]`: «X sin Y» con cifras exactas.
@@ -942,8 +968,10 @@ pub fn gaps(
     }
     let (fs, ts) = (side(&from_raw, "from")?, side(&to_raw, "to")?);
     let limit = parse_limit(limit, 25)?;
-    let o = chrono_metrics::GapsOpts { since_epoch: w.since_epoch, until_epoch: until_epoch(until)?, any_order, limit };
-    let g = chrono_metrics::gaps(store.conn(), &fs, &ts, &via, by, &o)?;
+    let o = chrono_metrics::GapsOpts { since_epoch: w.since_epoch, until_epoch: until_epoch(until)?, any_order, limit: limit + 1 };
+    let mut g = chrono_metrics::gaps(store.conn(), &fs, &ts, &via, by, &o)?;
+    let more = g.sample.len() > limit;
+    g.sample.truncate(limit);
     let sample: Vec<Json> = g
         .sample
         .iter()
@@ -981,7 +1009,7 @@ pub fn gaps(
         .set("units_without_time", Json::Int(g.units_without_time))
         .set("until", until.filter(|u| !u.is_empty()).map_or(Json::Null, Json::str))
         .set("missing_sample", Json::Arr(sample));
-    envelope(store, "gaps", w, limit, n, result)
+    envelope(store, "gaps", w, limit, n, more, result)
 }
 
 /// `branches [base]`: lee git EN VIVO (no el índice), usando `repo_path` de
@@ -1016,11 +1044,10 @@ pub fn branches(store: &Store, repo: &Path, base: &str) -> Result<Json> {
         })
         .collect();
     let n = items.len();
-    envelope(
+    envelope_complete(
         store,
         "branches",
         &w,
-        n,
         n,
         Json::obj().set("base", Json::str(&base)).set("current", Json::str(&current)).set(
             "branches",
@@ -1236,7 +1263,8 @@ pub fn session_patterns(
             "no hay eventos Nod en el índice: todas las cifras son 0 (añádelos con: chrono add <events.jsonl> --as nod)",
         ));
     }
-    envelope(store, "session_patterns", w, limit, returned, with_hints(result, hints))
+    let more = sp.tasks_total > sp.tasks.len() || sp.sessions_total > sp.sessions.len();
+    envelope(store, "session_patterns", w, limit, returned, more, with_hints(result, hints))
 }
 
 /// `stats <attr>`: min/p50/p95/max/suma de un atributo numérico por grupo
@@ -1253,7 +1281,7 @@ pub fn stats(
     const DEFAULT_LIMIT: usize = 25;
     let limit = parse_limit(limit, DEFAULT_LIMIT)?;
     let scope = chrono_metrics::EventScope { until_epoch: until_epoch(until)?, ..scope.clone() };
-    let rows = chrono_metrics::stats(store.conn(), attr, by, w.since_epoch, &scope, limit)?;
+    let (rows, more) = cut(chrono_metrics::stats(store.conn(), attr, by, w.since_epoch, &scope, limit + 1)?, limit);
     let items: Vec<Json> = rows
         .iter()
         .map(|r| {
@@ -1280,7 +1308,7 @@ pub fn stats(
             unknown_attr_hint(store, attr)?
         });
     }
-    envelope(store, "stats", w, limit, n, with_hints(result, hints))
+    envelope(store, "stats", w, limit, n, more, with_hints(result, hints))
 }
 
 /// `explain <fichero>[:desde-hasta]`: por qué un trozo de código está así.
@@ -1359,7 +1387,7 @@ pub fn explain(store: &Store, target: &str, limit: Option<&str>) -> Result<Json>
             row
         })
         .collect();
-    let total_commits = x.total_commits;
+    let (total_commits, returned) = (x.total_commits, x.commits.len());
     let result = Json::obj()
         .set("file", Json::str(&file))
         .set("from", Json::Int(b.from as i64))
@@ -1394,5 +1422,5 @@ pub fn explain(store: &Store, target: &str, limit: Option<&str>) -> Result<Json>
                     .collect(),
             ),
         );
-    envelope(store, "explain", &w, limit, total_commits, result)
+    envelope(store, "explain", &w, limit, returned, total_commits > returned, result)
 }

@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use crate::since::since_to_epoch;
 
 /// Herramientas que consultan eventos y llevan cabecera, con su lista principal
-/// y su tope por defecto (para `truncated`).
+/// y su tope por defecto.
 pub fn main_list(tool: &str) -> Option<(&'static str, i64)> {
     Some(match tool {
         "top" => ("top", 25),
@@ -126,8 +126,10 @@ fn count_args(tool: &str, args: &Value) -> Value {
     a
 }
 
-/// Cabecera (texto y objeto `meta`) de una respuesta.
-pub fn header(conn: &Connection, tool: &str, args: &Value, result: &Value) -> (String, Value) {
+/// Cabecera (texto y objeto `meta`) de una respuesta. `truncated` lo da la
+/// herramienta: hay más de lo devuelto en su lista principal (antes era
+/// «devolvió el tope», que con exactamente `limit` elementos mentía).
+pub fn header(conn: &Connection, tool: &str, args: &Value, truncated: bool) -> (String, Value) {
     let since = args.get("since").and_then(Value::as_str).unwrap_or("");
     let until = args.get("until").and_then(Value::as_str).unwrap_or("");
     let since_epoch = since_to_epoch(since);
@@ -135,10 +137,6 @@ pub fn header(conn: &Connection, tool: &str, args: &Value, result: &Value) -> (S
     let args_q = args;
     let args = &count_args;
     let (total, cov) = coverage(conn, args, since_epoch);
-    let (list, default_limit) = main_list(tool).unwrap_or(("", 0));
-    let limit = crate::tools::arg_i64(args, "limit", default_limit);
-    let returned = result.get(list).and_then(Value::as_array).map(|a| a.len() as i64);
-    let truncated = matches!(returned, Some(n) if limit > 0 && n >= limit);
     let mut warn = Vec::new();
     if let Some((first, _, last, _)) = &cov {
         let tol = 60 * 60 * 1000; // una hora de holgura: los datos no empiezan en punto

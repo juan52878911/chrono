@@ -358,12 +358,12 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
             let by = args.get("by").and_then(Value::as_str).filter(|s| !s.is_empty());
             let limit = arg_i64(args, "limit", 500).max(1) as usize;
             let scope = scope_from(args);
-            let rows = chrono_metrics::timeline_scoped(conn, since_epoch, scope.until_epoch, bucket_ms, by, &scope, limit)?;
+            let (rows, more) = cut(chrono_metrics::timeline_scoped(conn, since_epoch, scope.until_epoch, bucket_ms, by, &scope, limit + 1)?, limit);
             let buckets: Vec<Value> = rows
                 .iter()
                 .map(|b| json!({"bucket_epoch": b.bucket_epoch, "key": b.key, "count": b.count}))
                 .collect();
-            let mut out = json!({"bucket_ms": bucket_ms, "by": by, "buckets": buckets});
+            let mut out = json!({"bucket_ms": bucket_ms, "by": by, "buckets": buckets, MORE: more});
             // Los eventos sin tiempo no caben en ningún bucket ni en `total`: se dicen.
             let untimed = chrono_metrics::untimed_events(conn, &scope)?;
             if untimed > 0 {
@@ -387,9 +387,9 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
                 infer_level: sc.infer_level,
                 until_epoch: sc.until_epoch,
             };
-            let rows = chrono_metrics::top_filtered(conn, dim, since_epoch, &filter, limit)?;
+            let (rows, more) = cut(chrono_metrics::top_filtered(conn, dim, since_epoch, &filter, limit + 1)?, limit);
             let items: Vec<Value> = rows.iter().map(|v| json!({"value": v.value, "count": v.count})).collect();
-            let mut out = json!({"dim": dim, "top": items});
+            let mut out = json!({"dim": dim, "top": items, MORE: more});
             if let Some(k) = dim.strip_prefix("attr:").filter(|_| rows.is_empty()) {
                 if !chrono_metrics::attr_key_known(conn, k)? {
                     out["hints"] = json!([format!("ningún evento tiene la attr {k:?}; las que hay: {}", chrono_metrics::attr_keys(conn, 20)?.join(", "))]);
@@ -431,7 +431,7 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
                 })
                 .collect();
             let commons: Vec<Value> = r.common.iter().map(|c| common_json(c, n)).collect();
-            let mut out = json!({"episodes_total": n, "episodes_returned": r.episodes.len(), "precursors_total": r.precursors_total, "common_precursors": commons, "episodes": episodes});
+            let mut out = json!({"episodes_total": n, "episodes_returned": r.episodes.len(), "precursors_total": r.precursors_total, "common_precursors": commons, "episodes": episodes, MORE: n > r.episodes.len()});
             if r.anchors_without_time > 0 {
                 out["anchors_without_time"] = json!(r.anchors_without_time);
             }
@@ -457,12 +457,12 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
             // Aquí `attr` es el atributo numérico, no el filtro `clave:valor`
             // de las demás consultas: el filtro va en `where_attr`.
             let filters = stats_filters(args);
-            let rows = chrono_metrics::stats(conn, attr, by, since_epoch, &scope_from(&filters), limit)?;
+            let (rows, more) = cut(chrono_metrics::stats(conn, attr, by, since_epoch, &scope_from(&filters), limit + 1)?, limit);
             let groups: Vec<Value> = rows
                 .iter()
                 .map(|r| json!({"group": r.group, "count": r.count, "min": r.min, "p50": r.p50, "p95": r.p95, "max": r.max, "sum": r.sum}))
                 .collect();
-            let mut out = json!({"attr": attr, "by": by, "groups": groups});
+            let mut out = json!({"attr": attr, "by": by, "groups": groups, MORE: more});
             if rows.is_empty() {
                 let hint = if chrono_metrics::attr_key_known(conn, attr)? {
                     format!("la attr {attr:?} no tiene valores numéricos en estos eventos (stats solo cuenta números)")
@@ -524,12 +524,12 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
         }
         "patterns" => {
             let limit = arg_i64(args, "limit", 25).max(1) as usize;
-            let rows = chrono_metrics::patterns_scoped(conn, since_epoch, &scope_from(args), limit)?;
+            let (rows, more) = cut(chrono_metrics::patterns_scoped(conn, since_epoch, &scope_from(args), limit + 1)?, limit);
             let items: Vec<Value> = rows
                 .iter()
                 .map(|p| json!({"template": p.template, "count": p.count, "example_id": p.example_id}))
                 .collect();
-            json!({"patterns": items})
+            json!({"patterns": items, MORE: more})
         }
         "trace" => {
             let id = arg_str(args, "id")?;
@@ -585,7 +585,10 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
                 hints.push(format!("ningún evento tiene el nivel {}; los que hay: {}", unknown.join(","), known.join(",")));
             }
         }
-        let (mut head, mut meta) = crate::contract::header(conn, name, args, &result);
+        // Si la lista principal se recortó (lo dice la herramienta: total conocido
+        // o una fila de más pedida con `cut`); no sale en la respuesta.
+        let more = result.as_object_mut().and_then(|o| o.remove(MORE)).and_then(|v| v.as_bool()).unwrap_or(false);
+        let (mut head, mut meta) = crate::contract::header(conn, name, args, more);
         for h in &hints {
             head.push_str(&format!("\n⚠ {h}"));
         }
@@ -624,6 +627,18 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
         return Ok(text_content(format!("{head}\n{}", crate::contract::render(&result))));
     }
     result_content(&result)
+}
+
+/// Clave interna con la que una herramienta con cabecera dice si su lista
+/// principal se recortó; la cabecera la quita y la da como `truncated`.
+const MORE: &str = "_more";
+
+/// Para saber si hay más sin contarlo todo se piden `limit + 1` filas: recorta a
+/// `limit` y dice si sobró alguna.
+pub(crate) fn cut<T>(mut rows: Vec<T>, limit: usize) -> (Vec<T>, bool) {
+    let more = rows.len() > limit;
+    rows.truncate(limit);
+    (rows, more)
 }
 
 fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
@@ -993,7 +1008,7 @@ fn trace(conn: &Connection, id: &str, depth: i64, limit: usize) -> Result<Value>
 }
 
 fn events(conn: &Connection, filter: &chrono_metrics::EventFilter, limit: usize, newest_first: bool) -> Result<Value> {
-    let rows = chrono_metrics::events_ordered(conn, filter, limit, newest_first)?;
+    let (rows, more) = cut(chrono_metrics::events_ordered(conn, filter, limit + 1, newest_first)?, limit);
     let items: Vec<Value> = rows
         .iter()
         .map(|e| json!({
@@ -1001,7 +1016,7 @@ fn events(conn: &Connection, filter: &chrono_metrics::EventFilter, limit: usize,
             "at": e.at, "level": e.level, "title": e.title,
         }))
         .collect();
-    Ok(json!({"events": items}))
+    Ok(json!({"events": items, MORE: more}))
 }
 
 fn correlate(conn: &Connection, id: &str, delta_ms: i64, limit: usize) -> Result<Value> {
