@@ -21,7 +21,7 @@ pub fn ticket(conn: &Connection, id: &str) -> Result<Ticket> {
     let mut stmt = conn.prepare(
         "SELECT ev.id
          FROM links l
-         JOIN events ev ON ev.id = l.event_id
+         JOIN events ev ON ev.rid = l.event_rid
          WHERE l.rel = 'ticket' AND l.target = ?1
          ORDER BY ev.at_epoch",
     )?;
@@ -34,7 +34,7 @@ pub fn ticket(conn: &Connection, id: &str) -> Result<Ticket> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT e.key
          FROM links l
-         JOIN touches t ON t.event_id = l.event_id
+         JOIN touches t ON t.event_rid = l.event_rid
          JOIN entities e ON e.id = t.entity_id
          WHERE l.rel = 'ticket' AND l.target = ?1
          ORDER BY e.key

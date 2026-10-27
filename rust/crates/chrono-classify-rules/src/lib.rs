@@ -45,6 +45,9 @@ const TRAILERS: [&str; 13] = [
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Versión del esquema del fichero ([`CONFIG_VERSION`]). Ausente = 1: los
+    /// ficheros anteriores al versionado son la versión 1.
+    pub version: u32,
     /// Palabras que marcan un commit como "fix" (case-insensitive, multiidioma).
     pub fix_keywords: Vec<String>,
     /// Regex (formato Go) para extraer ids de ticket. No se usa en este crate
@@ -77,6 +80,36 @@ pub struct Config {
     /// script) se convierte en una fuente más, correlacionable con el resto.
     /// Solo se ejecuta lo que está escrito aquí, nunca algo que venga de los datos.
     pub commands: BTreeMap<String, CommandSpec>,
+    /// Reglas del intermediario (hooks de Claude Code: resumir salidas grandes
+    /// de MCP, lecturas de ficheros de datos). Antes vivían en
+    /// `.chrono/intermediario.json`, que se sigue leyendo si esta clave falta.
+    /// Se guarda como JSON libre: la forma la valida `chrono config check`.
+    pub intermediario: Option<serde_json::Value>,
+    /// Relaciones por clave entre fuentes (P-REL-2): nombre -> de dónde sale
+    /// la clave en cada fuente. Al ingerir, cada valor es un `link` con
+    /// `rel = nombre`; dos eventos con el mismo valor quedan relacionados
+    /// aunque vengan de fuentes distintas. Ver [`RelationSide`].
+    pub relations: BTreeMap<String, Vec<RelationSide>>,
+}
+
+/// Un extremo de una relación: en qué fuentes y de qué campo sale la clave.
+/// `{"source": "pruebas", "field": "file", "pattern": "prueba-(\\d+)"}`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RelationSide {
+    /// Fuente: su alias (`--name`), id, ruta, nombre de fichero o tipo
+    /// (`git`, `jsonl`…). Vacío = todas.
+    pub source: String,
+    /// `title`, `id` (sin su prefijo `kind:`/`fichero:`), `kind`, `level`, `actor`, `entity`, `file`,
+    /// `link:<rel>` o una clave de `attrs`. Vacío = la clave con el nombre
+    /// de la relación.
+    pub field: String,
+    /// Patrón de `chrono_core::Pattern` (sin `regex`): el valor es lo que
+    /// captura su grupo, o la coincidencia entera. Vacío = el campo entero.
+    pub pattern: String,
+    /// Recorta el valor a N caracteres (un sha de 40 frente a uno corto de
+    /// 7). 0 = sin recorte.
+    pub len: usize,
 }
 
 /// Una fuente de comando (ver [`Config::commands`]).
@@ -105,6 +138,9 @@ impl Default for CommandSpec {
     }
 }
 
+/// Versión del esquema de `.chrono/config.json` que entiende este binario.
+pub const CONFIG_VERSION: u32 = 2;
+
 /// Sufijo del caché de una fuente de comando: `<nombre>.cmd.jsonl`.
 pub const COMMAND_CACHE_SUFFIX: &str = ".cmd.jsonl";
 
@@ -118,6 +154,7 @@ impl Config {
     /// Reglas sensatas de arranque, mismos valores que `internal/config.Default()` (Go).
     pub fn defaults() -> Config {
         Config {
+            version: CONFIG_VERSION,
             fix_keywords: vec![
                 "fix".into(),
                 "bug".into(),
@@ -293,6 +330,8 @@ impl Config {
             body_max_bytes: 0,
             max_events_per_source: 0,
             commands: BTreeMap::new(),
+            intermediario: None,
+            relations: BTreeMap::new(),
         }
     }
 
@@ -324,12 +363,43 @@ impl Config {
 /// `Config::defaults()`. Los campos ausentes del JSON toman su valor default
 /// (paridad con `internal/config.Load()`, que parte de `Default()` y hace
 /// `json.Unmarshal` encima).
+///
+/// Un fichero inválido avisa por stderr (una vez por proceso) en vez de caer a
+/// los defaults en silencio: la causa exacta la da `chrono config check`.
 pub fn load(repo: &Path) -> Config {
-    let p = repo.join(".chrono").join("config.json");
+    let p = config_path(repo);
     match std::fs::read(&p) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| Config::defaults()),
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                eprintln!("chrono: {} ({e}): defaults in use / se usan los valores por defecto — `chrono config check`", p.display())
+            });
+            Config::defaults()
+        }),
         Err(_) => Config::defaults(),
     }
+}
+
+/// `<repo>/.chrono/config.json`.
+pub fn config_path(repo: &Path) -> std::path::PathBuf {
+    repo.join(".chrono").join("config.json")
+}
+
+/// Config del intermediario de `repo`: la clave `intermediario` de
+/// `config.json` o, si falta, el fichero antiguo `.chrono/intermediario.json`.
+/// `None` si no hay ninguna de las dos; `Some(Err)` si la que hay no se lee.
+pub fn load_intermediario(repo: &Path) -> Option<Result<serde_json::Value, String>> {
+    // Un config.json roto no activa ni tapa nada: el hook no debe fallar por él
+    // (lo explica `chrono config check`).
+    let in_config = std::fs::read(config_path(repo))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|mut v| v.get_mut("intermediario").map(serde_json::Value::take));
+    if let Some(i) = in_config {
+        return Some(Ok(i));
+    }
+    let bytes = std::fs::read(repo.join(".chrono/intermediario.json")).ok()?;
+    Some(serde_json::from_slice(&bytes).map_err(|e| format!("intermediario.json: {e}")))
 }
 
 /// Clasificador Level-0: reglas y taxonomía deterministas, sin modelo.
@@ -580,6 +650,23 @@ mod tests {
         assert_eq!(cfg.bug_labels, Config::defaults().bug_labels);
         assert!(!cfg.bug_categories.is_empty());
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn intermediario_en_config_gana_al_fichero_antiguo() {
+        let dir = std::env::temp_dir().join(format!("chrono-classify-rules-test-{}-intermediario", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join(".chrono")).unwrap();
+        assert!(load_intermediario(&dir).is_none());
+        std::fs::write(dir.join(".chrono/intermediario.json"), r#"{"verify": false}"#).unwrap();
+        assert_eq!(load_intermediario(&dir).unwrap().unwrap()["verify"], false);
+        // Un config.json roto o sin la clave no tapa al antiguo.
+        std::fs::write(dir.join(".chrono/config.json"), "{roto").unwrap();
+        assert_eq!(load_intermediario(&dir).unwrap().unwrap()["verify"], false);
+        std::fs::write(dir.join(".chrono/config.json"), r#"{"version": 1, "intermediario": {"verify": true}}"#).unwrap();
+        assert_eq!(load_intermediario(&dir).unwrap().unwrap()["verify"], true);
+        assert_eq!(load(&dir).intermediario.unwrap()["verify"], true);
         std::fs::remove_dir_all(&dir).ok();
     }
 

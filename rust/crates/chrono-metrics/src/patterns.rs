@@ -12,7 +12,7 @@ use crate::Result;
 pub struct Pattern {
     pub template: String,
     pub count: i64,
-    /// Un event id de ejemplo (el último visto de la plantilla) para inspección.
+    /// Un event id de ejemplo (el último ingerido de la plantilla) para inspección.
     pub example_id: String,
 }
 
@@ -39,19 +39,23 @@ pub fn patterns_filtered(
     let source_like: Option<String> = source
         .filter(|s| !s.is_empty())
         .map(|s| if s.contains(':') { format!("{s}%") } else { format!("{s}:%") });
-    let grep_like: Option<String> = grep.filter(|g| !g.is_empty()).map(|g| format!("%{g}%"));
+    // Escapado siempre, con `ESCAPE` fijo: la plantilla no usa índice.
+    let grep_like: Option<String> = grep.filter(|g| !g.is_empty()).map(|g| format!("%{}%", crate::timeline::like_lit(g).0));
     let mut stmt = conn.prepare(
-        "SELECT t.template, SUM(r.count) AS c, MAX(r.last_id) AS ex
-         FROM rollups r
-         JOIN templates t ON t.id = r.template_id
-         WHERE (?1 = 0 OR r.bucket_epoch >= ?1)
-           AND (?3 IS NULL OR r.source_id LIKE ?3)
-           AND (?4 IS NULL OR t.template LIKE ?4)
-         GROUP BY r.template_id
-         ORDER BY c DESC, t.template ASC
-         LIMIT ?2",
+        "SELECT template, c, COALESCE((SELECT id FROM events WHERE rid = ex), '') FROM (
+             SELECT t.template, SUM(r.count) AS c, MAX(r.last_rid) AS ex
+             FROM rollups r
+             JOIN templates t ON t.id = r.template_id
+             WHERE (?1 = 0 OR r.bucket_epoch >= ?1)
+               AND (?3 IS NULL OR r.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?3
+                                                   OR json_extract(manifest_json, '$.alias') = ?5))
+               AND (?4 IS NULL OR t.template LIKE ?4 ESCAPE '\\')
+             GROUP BY r.template_id
+             ORDER BY c DESC, t.template ASC
+             LIMIT ?2)
+         ORDER BY c DESC, template ASC",
     )?;
-    let rows = stmt.query_map(params![since_epoch, limit as i64, source_like, grep_like], |r| {
+    let rows = stmt.query_map(params![since_epoch, limit as i64, source_like, grep_like, source], |r| {
         Ok(Pattern {
             template: r.get::<_, String>(0)?,
             count: r.get::<_, i64>(1)?,
@@ -82,15 +86,21 @@ pub fn patterns_by_level(
 /// [`crate::EventScope`]): «las 3 plantillas FATAL más frecuentes», «las de
 /// `product_service` entre las 18 y las 19».
 ///
-/// Si solo se filtra por fuente y/o texto, lee los `rollups` como siempre. Con
-/// nivel, tipo, entidad o fin de ventana no sirven (no los guardan), así que
-/// agrupa en el momento sobre `events`: O(eventos que casan), que en la práctica
-/// son pocos, porque lo que se acota así son los errores (en 24 h de logs
-/// reales, 114 de 17 505). `grep` casa entonces con el título del evento.
+/// Sin texto, del cubo (`dim_rollups`) si está al día; si no (o con `grep`, que
+/// casa con el título del evento y no con la plantilla), agrupa en el momento
+/// sobre `events`. Los dos caminos dan lo mismo con el mismo filtro: antes, con
+/// solo fuente o texto se leían los `rollups`, que no miran su watermark, no
+/// cuentan los eventos sin tiempo y casaban `grep` con la plantilla.
 pub fn patterns_scoped(conn: &Connection, since_epoch: i64, scope: &crate::EventScope, limit: usize) -> Result<Vec<Pattern>> {
     use std::collections::HashMap;
-    if scope.only_source_grep() {
-        return patterns_filtered(conn, since_epoch, scope.source, scope.grep, limit);
+    if let Some(cells) = crate::cube::cube(conn, since_epoch, scope, &[crate::cube::Dim::Template], None)? {
+        let mut v: Vec<(String, i64, i64)> = cells.into_iter().map(|((k, _), (n, last))| (k.into_iter().next().unwrap_or_default(), n, last)).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        v.truncate(limit);
+        return v
+            .into_iter()
+            .map(|(template, count, last)| Ok(Pattern { template, count, example_id: crate::cube::id_of(conn, last)? }))
+            .collect();
     }
     let (filters, extra) = scope.sql(2);
     let sql = format!(
@@ -264,6 +274,49 @@ mod tests {
         assert_eq!(pats[1].template, "timeout after <NUM> s");
         let solo_timeout = patterns_by_level(store.conn(), 0, None, Some("timeout"), "error", 10).unwrap();
         assert_eq!(solo_timeout.len(), 1);
+    }
+
+    /// Con solo fuente o texto, las mismas cifras que con un nivel que lo cubre
+    /// todo: también los eventos sin tiempo, los que aún no están en los rollups y
+    /// `grep` contra el título (no contra la plantilla, que cambia los números).
+    #[test]
+    fn patterns_con_solo_fuente_o_texto_cuadra_con_el_camino_con_nivel() {
+        let db = TempDb::new();
+        let mut store = Store::open(db.path()).unwrap();
+        let lv = |id: &str, at: i64, level: &str, title: &str| Event { level: level.to_string(), ..ev(id, at, title) };
+        {
+            let mut w = store.writer().unwrap();
+            w.add_event(&lv("a", 100, "INFO", "request took 12 ms")).unwrap();
+            w.add_event(&lv("b", 0, "INFO", "request took 40 ms")).unwrap();
+            w.add_event(&lv("c", 102, "ERROR", "timeout after 30 s")).unwrap();
+            w.commit().unwrap();
+        }
+        store.build_rollups(60).unwrap();
+        {
+            let mut w = store.writer().unwrap();
+            w.add_event(&lv("d", 103, "ERROR", "timeout after 31 s")).unwrap();
+            w.commit().unwrap();
+        }
+        let conn = store.conn();
+        let both = |grep: Option<&'static str>| {
+            let solo = crate::EventScope { source: Some("jsonl"), grep, ..Default::default() };
+            let nivel = crate::EventScope { level: Some("INFO,ERROR"), ..solo.clone() };
+            (patterns_scoped(conn, 0, &solo, 10).unwrap(), patterns_scoped(conn, 0, &nivel, 10).unwrap())
+        };
+        // Rollups atrasados y un evento sin tiempo.
+        let (solo, nivel) = both(None);
+        assert_eq!(solo, nivel);
+        assert_eq!(solo.iter().map(|p| p.count).sum::<i64>(), 4, "{solo:?}");
+        let (solo, nivel) = both(Some("12"));
+        assert_eq!(solo, nivel);
+        assert_eq!(solo.len(), 1, "{solo:?}");
+        // Al día: los dos caminos salen del cubo y siguen cuadrando.
+        store.build_rollups(60).unwrap();
+        let conn = store.conn();
+        let solo = patterns_scoped(conn, 0, &crate::EventScope { source: Some("jsonl"), ..Default::default() }, 10).unwrap();
+        let nivel = patterns_scoped(conn, 0, &crate::EventScope { source: Some("jsonl"), level: Some("INFO,ERROR"), ..Default::default() }, 10).unwrap();
+        assert_eq!(solo, nivel);
+        assert_eq!(solo[0], Pattern { template: "request took <NUM> ms".into(), count: 2, example_id: "b".into() });
     }
 
     #[test]

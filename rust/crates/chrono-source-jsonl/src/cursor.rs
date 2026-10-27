@@ -19,8 +19,9 @@ pub(crate) fn peek_first_nonempty_line(path: &Path) -> Option<String> {
     let reader = BufReader::new(file);
     for line in reader.lines() {
         let line = line.ok()?;
+        let line = line.strip_prefix('\u{feff}').unwrap_or(&line);
         if !line.trim().is_empty() {
-            return Some(line);
+            return Some(line.to_string());
         }
     }
     None
@@ -106,6 +107,8 @@ pub struct JsonlCursor {
     /// eventos no entregados (los ids son deterministas, re-emitir es
     /// idempotente).
     line_start: u64,
+    /// Entidades vistas en el fichero, para `entity_join`.
+    memo: record::EntityMemo,
 }
 
 impl JsonlCursor {
@@ -113,6 +116,7 @@ impl JsonlCursor {
     /// bytes (0 si no hay watermark previo).
     pub fn open(path: &Path, start_offset: u64, cfg: &SourceConfig) -> CoreResult<Self> {
         config::validate_options(cfg)?;
+        let cfg = &config::effective_options(cfg)?;
         let sample: Map<String, Value> = peek_first_nonempty_line(path)
             .and_then(|line| serde_json::from_str::<Value>(&line).ok())
             .and_then(|v| v.as_object().cloned())
@@ -133,6 +137,7 @@ impl JsonlCursor {
             path: path.to_path_buf(),
             pending: VecDeque::new(),
             line_start: start_offset,
+            memo: record::EntityMemo::default(),
         })
     }
 
@@ -146,6 +151,18 @@ impl JsonlCursor {
         if n == 0 {
             return Ok(None);
         }
+        // Final sin `\n` que aún no es un objeto JSON: el escritor está a
+        // mitad de línea. No se consume (el watermark queda delante) y se
+        // relee entera en el sync siguiente; antes se saltaba y su resto
+        // llegaba suelto y se descartaba: la línea se perdía. Un final sin
+        // `\n` que ya es JSON completo sí entra (ficheros sin salto final).
+        // BOM de UTF-8 al principio del fichero (PowerShell, editores de
+        // Windows): fuera, o la primera línea no era JSON y se descartaba.
+        let bom = if self.bytes_read == 0 && buf.starts_with(b"\xEF\xBB\xBF") { 3 } else { 0 };
+        if buf.last() != Some(&b'\n') && !serde_json::from_slice::<Value>(&buf[bom..]).is_ok_and(|v| v.is_object()) {
+            self.reader.seek(SeekFrom::Start(self.bytes_read))?;
+            return Ok(None);
+        }
         self.bytes_read += n as u64;
         if buf.last() == Some(&b'\n') {
             buf.pop();
@@ -153,7 +170,7 @@ impl JsonlCursor {
         if buf.last() == Some(&b'\r') {
             buf.pop();
         }
-        Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+        Ok(Some(String::from_utf8_lossy(&buf[bom.min(buf.len())..]).into_owned()))
     }
 }
 
@@ -180,7 +197,7 @@ impl Cursor for JsonlCursor {
             };
             // Una línea puede dar 0 (explode sin array/sin coincidencias), 1 o
             // N eventos; los N se encolan y se entregan de uno en uno.
-            self.pending = record::line_to_events(&obj, &raw, line_offset, &self.overrides, &self.source_id).into();
+            self.pending = record::line_to_events(&obj, &raw, line_offset, &self.overrides, &self.source_id, &mut self.memo).into();
             self.line_start = line_offset;
             if let Some(ev) = self.pending.pop_front() {
                 return Ok(Some(ev));

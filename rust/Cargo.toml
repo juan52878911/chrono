@@ -14,13 +14,14 @@ members = [
     "crates/chrono-source-oslog",
     "crates/chrono-source-template",
     "crates/chrono-source-nod",
+    "crates/chrono-source-dir",
     "crates/chrono-source-delega",
     "crates/chrono-mcp",
     "crates/chrono-cli",
 ]
 
 [workspace.package]
-version = "0.2.7"
+version = "0.7.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/juan52878911/chrono"

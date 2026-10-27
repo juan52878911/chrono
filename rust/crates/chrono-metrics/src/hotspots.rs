@@ -77,7 +77,7 @@ fn hotspots_filtered(
         format!(
             "SELECT e.key, COUNT(*) AS changes, e.size
              FROM touches t
-             JOIN events ev ON ev.id = t.event_id
+             JOIN events ev ON ev.rid = t.event_rid
              JOIN entities e ON e.id = t.entity_id
              WHERE e.deleted = 0 AND e.excluded = 0 AND e.type {op} 'symbol' AND ev.at_epoch >= ?1
                AND (?3 IS NULL OR e.type = ?3)
@@ -157,17 +157,17 @@ mod tests_p3 {
                 (5,'src/del.rs','file',99,1,0),
                 (6,'src/exc.rs','file',99,0,1);
              INSERT INTO sources(ref,id,kind) VALUES (1,'git:/r','git');
-             INSERT INTO events(id,source_ref,kind,at,at_epoch,title) VALUES
-                ('e1',1,'commit','',1000,''),
-                ('e2',1,'commit','',2000,''),
-                ('e3',1,'commit','',3000,'');
-             INSERT INTO touches(event_id,entity_id,weight,attrs) VALUES
-                ('e1',1,12,'{}'),('e2',1,5,'{}'),('e3',1,4,'{}'),
-                ('e1',2,2,'{}'),('e3',2,1,'{}'),
-                ('e3',3,1,'{}'),
-                ('e1',4,3,'{}'),('e2',4,1,'{}'),
-                ('e1',5,1,'{}'),
-                ('e1',6,1,'{}');",
+             INSERT INTO events(rid,id,source_ref,kind,at_epoch,title) VALUES
+                (1,'e1',1,'commit',1000,''),
+                (2,'e2',1,'commit',2000,''),
+                (3,'e3',1,'commit',3000,'');
+             INSERT INTO touches(event_rid,entity_id,weight,attrs) VALUES
+                (1,1,12,'{}'),(2,1,5,'{}'),(3,1,4,'{}'),
+                (1,2,2,'{}'),(3,2,1,'{}'),
+                (3,3,1,'{}'),
+                (1,4,3,'{}'),(2,4,1,'{}'),
+                (1,5,1,'{}'),
+                (1,6,1,'{}');",
         )
         .unwrap();
     }
@@ -179,7 +179,7 @@ mod tests_p3 {
             .prepare(&format!(
                 "SELECT e.key, COUNT(*) AS changes, e.size
                  FROM touches t
-                 JOIN events ev ON ev.id = t.event_id
+                 JOIN events ev ON ev.rid = t.event_rid
                  JOIN entities e ON e.id = t.entity_id
                  WHERE e.deleted = 0 AND e.excluded = 0 AND e.type {op} 'symbol' AND ev.at_epoch >= ?1
                  GROUP BY e.id
@@ -241,10 +241,10 @@ mod tests_p3 {
         conn.execute_batch(
             "INSERT INTO entities(id,key,type,size,deleted,excluded) VALUES
                 (7,'src/ancient.rs','file',77,0,0);
-             INSERT INTO events(id,source_ref,kind,at,at_epoch,title) VALUES
-                ('eneg',1,'commit','',-5000,'');
-             INSERT INTO touches(event_id,entity_id,weight,attrs) VALUES
-                ('eneg',7,1,'{}'),('eneg',1,1,'{}');",
+             INSERT INTO events(rid,id,source_ref,kind,at_epoch,title) VALUES
+                (99,'eneg',1,'commit',-5000,'');
+             INSERT INTO touches(event_rid,entity_id,weight,attrs) VALUES
+                (99,7,1,'{}'),(99,1,1,'{}');",
         )
         .unwrap();
         assert!(super::has_negative_epoch(conn).unwrap(), "debe detectar el epoch negativo");

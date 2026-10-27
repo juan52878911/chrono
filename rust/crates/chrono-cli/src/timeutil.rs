@@ -42,34 +42,85 @@ pub fn epoch_to_iso8601(epoch_ms: i64) -> String {
     }
 }
 
-/// Parsea `--since`: `YYYY-MM-DD` (medianoche UTC) o `YYYY-MM-DDThh:mm:ss[Z]`.
-/// Devuelve `None` si no lo entiende.
+/// Parsea una fecha de `since`/`until`: `YYYY-MM-DD` (medianoche UTC) o
+/// `YYYY-MM-DD[T ]hh[:mm[:ss[.fff]]]` con `Z` o un desfase (`+02:00`, `-0500`,
+/// `+02`) opcionales; sin zona es UTC. Lo que escribe chrono
+/// (`…T10:00:00.123Z`) vuelve a entrar. Una fecha u hora fuera de rango
+/// (`2024-02-30`, `25:00`) o cualquier otra cosa: `None`.
 pub fn parse_since(s: &str) -> Option<i64> {
-    let s = s.trim().trim_end_matches('Z');
-    let (date, time) = match s.split_once('T') {
-        Some((d, t)) => (d, Some(t)),
-        None => (s, None),
-    };
-    let mut dp = date.split('-');
-    let y: i64 = dp.next()?.parse().ok()?;
-    let m: u32 = dp.next()?.parse().ok()?;
-    let d: u32 = dp.next()?.parse().ok()?;
-    if dp.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+    let s = s.trim();
+    if !s.is_ascii() {
         return None;
     }
-    let mut secs = 0i64;
+    let (date, time) = match s.find(['T', 't', ' ']) {
+        Some(i) => (&s[..i], Some(&s[i + 1..])),
+        None => (s.strip_suffix(['Z', 'z']).unwrap_or(s), None),
+    };
+    let mut dp = date.split('-');
+    let y = digits(dp.next()?, 4, 4)?;
+    let m = digits(dp.next()?, 1, 2)?;
+    let d = digits(dp.next()?, 1, 2)?;
+    if dp.next().is_some() || !(1..=12).contains(&m) || d < 1 || d > days_in_month(y, m) {
+        return None;
+    }
+    let mut ms = 0i64;
     if let Some(t) = time {
-        let parts: Vec<&str> = t.split(':').collect();
-        if parts.is_empty() || parts.len() > 3 {
+        let (t, offset_secs) = split_zone(t)?;
+        let (hms, frac) = match t.split_once(['.', ',']) {
+            Some((a, f)) => (a, Some(f)),
+            None => (t, None),
+        };
+        let mut parts = hms.split(':');
+        let hh = digits(parts.next()?, 1, 2)?;
+        let mm = parts.next().map_or(Some(0), |p| digits(p, 2, 2))?;
+        let ss = parts.next().map_or(Some(0), |p| digits(p, 2, 2))?;
+        if parts.next().is_some() || hh > 23 || mm > 59 || ss > 60 {
             return None;
         }
-        let hh: i64 = parts[0].parse().ok()?;
-        let mm: i64 = parts.get(1).map_or(Some(0), |p| p.parse().ok())?;
-        let ss: i64 = parts.get(2).map_or(Some(0), |p| p.parse().ok())?;
-        secs = hh * 3600 + mm * 60 + ss;
+        let frac_ms = match frac {
+            // Más de tres cifras: se truncan a milisegundos.
+            Some(f) => digits(&format!("{:0<3}", &f[..f.len().min(3)]), 3, 3).filter(|_| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit()))?,
+            None => 0,
+        };
+        ms = (hh * 3600 + mm * 60 + ss.min(59) - offset_secs) * 1000 + frac_ms;
     }
-    // Medianoche (o la hora dada) en MILISEGUNDOS UTC.
-    Some((days_from_civil(y, m, d) * 86_400 + secs) * 1000)
+    Some(days_from_civil(y, m as u32, d as u32) * 86_400_000 + ms)
+}
+
+/// Entre `min` y `max` cifras ASCII, sin signo.
+fn digits(s: &str, min: usize, max: usize) -> Option<i64> {
+    (s.len() >= min && s.len() <= max && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse().ok())?
+}
+
+fn days_in_month(y: i64, m: i64) -> i64 {
+    match m {
+        2 if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+/// Separa la zona del final de la hora: `Z`, `±hh`, `±hhmm` o `±hh:mm` →
+/// segundos a restar para llegar a UTC. Una zona mal formada: `None`.
+fn split_zone(t: &str) -> Option<(&str, i64)> {
+    if let Some(base) = t.strip_suffix(['Z', 'z']) {
+        return Some((base, 0));
+    }
+    let Some(p) = t.rfind(['+', '-']) else { return Some((t, 0)) };
+    let off = &t[p + 1..];
+    let (h, m) = match off.len() {
+        2 => (off, "00"),
+        4 => (&off[..2], &off[2..]),
+        5 if off.as_bytes()[2] == b':' => (&off[..2], &off[3..]),
+        _ => return None,
+    };
+    let (h, m) = (digits(h, 2, 2)?, digits(m, 2, 2)?);
+    if h > 23 || m > 59 {
+        return None;
+    }
+    let secs = h * 3600 + m * 60;
+    Some((&t[..p], if t.as_bytes()[p] == b'+' { secs } else { -secs }))
 }
 
 /// Parsea una duración a MILISEGUNDOS: entero de segundos (`3600`) o con sufijo
@@ -126,6 +177,79 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--since`/`--until` con zona, fracción, fechas imposibles y basura.
+    #[test]
+    fn since_bordes() {
+        let base = 1_704_067_200_000; // 2024-01-01T00:00:00Z
+        let ok: &[(&str, i64)] = &[
+            ("2024-01-01", base),
+            ("2024-01-01Z", base),
+            (" 2024-01-01 ", base),
+            ("2024-1-1", base),
+            ("2024-01-01T10", base + 36_000_000),
+            ("2024-01-01T10:00", base + 36_000_000),
+            ("2024-01-01T10:00:00Z", base + 36_000_000),
+            ("2024-01-01t10:00:00z", base + 36_000_000),
+            ("2024-01-01 10:00:00", base + 36_000_000),
+            ("2024-01-01T10:00:00.123Z", base + 36_000_123),
+            ("2024-01-01T10:00:00,5Z", base + 36_000_500),
+            ("2024-01-01T10:00:00.123456789Z", base + 36_000_123),
+            ("2024-01-01T12:00:00+02:00", base + 36_000_000),
+            ("2024-01-01T12:00:00+0200", base + 36_000_000),
+            ("2024-01-01T12:00:00+02", base + 36_000_000),
+            ("2024-01-01T05:00:00-05:00", base + 36_000_000),
+            ("2024-01-01T00:30:00.250+01:00", base - 1_800_000 + 250),
+            ("2024-02-29", base + 59 * 86_400_000),
+            ("2000-02-29", 951_782_400_000),
+            ("0000-01-01", -62_167_219_200_000),
+            ("9999-12-31", 253_402_214_400_000),
+        ];
+        for (s, want) in ok {
+            assert_eq!(parse_since(s), Some(*want), "{s:?}");
+        }
+        for bad in [
+            "", "ayer", "24h", "now-1h", "2024", "2024-01", "2024-01-01-01", "2024-13-01", "2024-00-10", "2024-01-00",
+            "2024-01-32", "2023-02-29", "1900-02-29", "2024-04-31", "2024-01-01T", "2024-01-01T24:00:00", "2024-01-01T10:60",
+            "2024-01-01T10:00:61", "2024-01-01T-1:00", "2024-01-01T10:00:00.", "2024-01-01T10:00:00.1a", "2024-01-01T1:2:3:4",
+            "2024-01-01T10:00:00+2", "2024-01-01T10:00:00+25:00", "2024-01-01T10:00:00+02:60", "2024-01-01T10:00:00+02:00:00",
+            "+2024-01-01", "-2024-01-01", "99999-01-01", "9223372036854775807-01-01", "2024-01-01T10:00:00Zjunk",
+            "２０２４-01-01", "2024-01-01T10:00:00＋02:00", "2024-01-01T😀", "2024‐01‐01",
+        ] {
+            assert_eq!(parse_since(bad), None, "{bad:?} debía rechazarse");
+        }
+    }
+
+    /// `--bucket`/`--delta`/`--gap`: desbordes, signos, unicode y unidades raras.
+    #[test]
+    fn duraciones_bordes() {
+        for (s, want) in [(" 5 m ", Some(300_000)), ("1H", Some(3_600_000)), ("2D", Some(172_800_000)), ("1MS", Some(1))] {
+            assert_eq!(parse_duration(s), want, "{s:?}");
+        }
+        for bad in [
+            "1.5h", "1e3", "+", "-1h", "0ms", "-5ms", "ms", "s", "1w", "1y", "1hh", "h1", "5é", "😀", "١h", "9223372036854775807d",
+            "9223372036854775807ms0", "106751991167301d", " ", "\u{0}",
+        ] {
+            assert_eq!(parse_duration(bad), None, "{bad:?} debía rechazarse");
+        }
+        assert_eq!(parse_duration("9223372036854775807ms"), Some(i64::MAX));
+    }
+
+    /// Lo que escribe chrono vuelve a entrar igual, en todo el rango.
+    #[test]
+    fn since_ida_y_vuelta_aleatoria() {
+        let mut x: u64 = 0x5eed_0007;
+        for _ in 0..20_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let ms = (x % 253_402_300_799_999) as i64; // 1970..9999
+            let iso = epoch_to_iso8601(ms);
+            assert_eq!(parse_since(&iso), Some(ms), "{iso}");
+            let neg = -((x % 62_167_219_200_000) as i64); // 0000..1970
+            assert_eq!(parse_since(&epoch_to_iso8601(neg)), Some(neg), "{}", epoch_to_iso8601(neg));
+        }
+    }
 
     #[test]
     fn ida_y_vuelta() {

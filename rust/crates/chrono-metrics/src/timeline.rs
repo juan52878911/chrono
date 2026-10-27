@@ -64,7 +64,7 @@ pub fn timeline(
         Some("level") => "level",
         Some("kind") => "kind",
         Some(other) => {
-            return Err(format!("timeline: unsupported group_by: {other}").into());
+            return Err(format!("timeline: unsupported --by {other:?} (use level or kind; for other dimensions, top <dim>)").into());
         }
     };
 
@@ -76,6 +76,10 @@ pub fn timeline(
         if let Some(rows) = timeline_from_rollups(conn, since_epoch, until_epoch, bucket_secs, limit)? {
             return Ok(rows);
         }
+    }
+    // v6: con desglose (o buckets que no son múltiplo del minuto), `dim_rollups`.
+    if let Some(rows) = timeline_from_cube(conn, since_epoch, until_epoch, bucket_secs, group_by, &EventScope::default(), limit)? {
+        return Ok(rows);
     }
 
     // `at_epoch - ((at_epoch % ?1 + ?1) % ?1)` reproduce
@@ -134,6 +138,10 @@ pub struct EventScope<'a> {
     pub kind: Option<&'a str>,
     pub entity: Option<&'a str>,
     pub attr: Option<&'a str>,
+    /// Relación por clave (P-REL-2): `K=valor`, `K=prefijo*`, `K=@id` (los que
+    /// comparten algún valor de `K` con ese evento) o solo `K` (los que la tienen).
+    /// `K` es un `rel` de links o una dim (ver `relate`).
+    pub join: Option<&'a str>,
     pub infer_level: bool,
     pub until_epoch: i64,
 }
@@ -148,9 +156,91 @@ pub(crate) fn level_expr(t: &str, infer: bool) -> String {
     }
 }
 
+/// Valor de la attr `key` del evento `t`: su dim si la fuente la declaró (v6,
+/// `event_dims`), si no el JSON con `json_path` (expresión SQL: un literal o un
+/// parámetro). `key` ya validada (`[A-Za-z0-9_.-]`).
+pub(crate) fn attr_sql(t: &str, key: &str, json_path: &str) -> String {
+    format!(
+        "COALESCE((SELECT v.value FROM event_dims d JOIN dim_values v ON v.id = d.dim_id
+                   WHERE d.event_rid = {t}.rid AND v.key = '{key}'), {})",
+        attr_json(t, key, json_path)
+    )
+}
+
+/// La attr `key` del JSON de `attrs`: primero como clave literal y, si no está,
+/// como ruta (`json_path`). Las fuentes guardan las claves pedidas tal cual
+/// (`message.model`), así que una clave con punto leída solo como ruta no casaba
+/// nunca fuera de las dims. `key` ya validada (sin comillas).
+pub(crate) fn attr_json(t: &str, key: &str, json_path: &str) -> String {
+    if key.contains('.') {
+        format!("COALESCE(json_extract({t}.attrs, '$.\"{key}\"'), json_extract({t}.attrs, {json_path}))")
+    } else {
+        format!("json_extract({t}.attrs, {json_path})")
+    }
+}
+
+/// Rids de los eventos con la attr `key` igual a (o, con `like`, que empieza por)
+/// el parámetro `p`: por `event_dims`, más el JSON solo de las fuentes que tienen
+/// `key` en `attrs` (`attr_keys`). Sin ninguna, el JSON no se lee.
+pub(crate) fn attr_rids_sql(key: &str, p: &str, like: bool) -> String {
+    // Con `like`, el parámetro ya va escapado con `like_lit`.
+    let (op, esc) = if like { ("LIKE", " ESCAPE '\\'") } else { ("=", "") };
+    format!(
+        "SELECT d.event_rid FROM event_dims d JOIN dim_values v ON v.id = d.dim_id WHERE v.key = '{key}' AND v.value {op} {p}{esc}
+         UNION ALL
+         SELECT ea.rid FROM events ea WHERE ea.source_ref IN (SELECT source_ref FROM attr_keys WHERE key = '{key}')
+                                        AND {} {op} {p}{esc}",
+        attr_json("ea", key, &format!("'$.{key}'"))
+    )
+}
+
+/// Un literal para `LIKE`: `%`, `_` y `\` escapados, con el `ESCAPE` que hay
+/// que poner tras el patrón (vacío si no hacía falta, para no tocar las
+/// consultas de siempre). Sin esto `--grep user_id` casaba `user-id` y
+/// `--grep 100%` cualquier cosa que empezara por `100`.
+pub(crate) fn like_lit(s: &str) -> (String, &'static str) {
+    if !s.contains(['%', '_', '\\']) {
+        return (s.to_string(), "");
+    }
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    (out, " ESCAPE '\\'")
+}
+
+/// Una condición de `attr` (`k:v` o `k=v`) partida por el PRIMER separador:
+/// `k=v:w` es la clave `k` con valor `v:w` (antes se partía por `:` primero y
+/// la clave `k=v` se descartaba sin avisar).
+pub(crate) fn split_attr(cond: &str) -> (&str, &str) {
+    match cond.find([':', '=']) {
+        Some(i) => (cond[..i].trim(), &cond[i + 1..]),
+        None => (cond.trim(), ""),
+    }
+}
+
+/// Un literal de cadena JSON (para `json_each`): comillas, barras y controles escapados.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// `,A,B,` en mayúsculas y sin espacios: el parámetro de una lista separada por
 /// comas, para casar con `instr(?, ',' || x || ',')`.
-fn comma_list(raw: &str, upper: bool) -> String {
+pub(crate) fn comma_list(raw: &str, upper: bool) -> String {
     let items: Vec<String> = raw
         .split(',')
         .map(str::trim)
@@ -163,13 +253,7 @@ fn comma_list(raw: &str, upper: bool) -> String {
 impl EventScope<'_> {
     pub fn is_empty(&self) -> bool {
         self.until_epoch <= 0
-            && [self.source, self.grep, self.level, self.kind, self.entity, self.attr].iter().all(|v| v.map_or(true, str::is_empty))
-    }
-
-    /// Solo filtra por fuente y/o texto: lo único que saben responder los
-    /// rollups de `patterns`.
-    pub fn only_source_grep(&self) -> bool {
-        self.until_epoch <= 0 && [self.level, self.kind, self.entity, self.attr].iter().all(|v| v.map_or(true, str::is_empty))
+            && [self.source, self.grep, self.level, self.kind, self.entity, self.attr, self.join].iter().all(|v| v.map_or(true, str::is_empty))
     }
 
     /// Como `sql`, para otros crates (la cabecera del MCP cuenta con los mismos filtros).
@@ -186,66 +270,91 @@ impl EventScope<'_> {
     pub(crate) fn sql_on(&self, t: &str, first: usize) -> (String, Vec<String>) {
         let mut sql = String::new();
         let mut params: Vec<String> = Vec::new();
+        let source_list: Option<&str> = self.source.filter(|s| {
+            let items: Vec<&str> = s.split(',').map(str::trim).filter(|x| !x.is_empty()).collect();
+            items.len() > 1 && items.iter().all(|x| !x.contains(':'))
+        });
+        if let Some(s) = source_list {
+            // Lista de kinds o alias (`delega,nod`): cualquiera de ellos.
+            sql.push_str(&format!(
+                " AND {t}.source_ref IN (SELECT ref FROM sources WHERE instr(?{first}, ',' || kind || ',') > 0
+                    OR instr(?{first}, ',' || json_extract(manifest_json, '$.alias') || ',') > 0)"
+            ));
+            params.push(comma_list(s, false));
+        } else if let Some(s) = self.source.filter(|s| !s.trim().is_empty()) {
+            // Kind (`jsonl`), prefijo de id (`jsonl:/var/log`) o alias de una fuente glob.
+            let like = if s.contains(':') { format!("{s}%") } else { format!("{s}:%") };
+            sql.push_str(&format!(
+                " AND {t}.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?{} OR json_extract(manifest_json, '$.alias') = ?{})",
+                first,
+                first + 1
+            ));
+            params.extend([like, s.to_string()]);
+        }
+        if let Some(j) = self.join.filter(|j| !j.trim().is_empty()) {
+            // Una clave inválida no casa nada (como un valor que no existe).
+            let n = first + params.len();
+            match crate::relate::join_clause(t, j, &format!("?{n}")) {
+                Some((clause, Some(value))) => {
+                    sql.push_str(&format!(" AND {clause}"));
+                    params.push(value);
+                }
+                Some((clause, None)) => sql.push_str(&format!(" AND {clause}")),
+                None => sql.push_str(" AND 0"),
+            }
+        }
         let mut push = |clause: &str, value: String| {
             let n = first + params.len();
             sql.push_str(&format!(" AND {}", clause.replace("?N", &format!("?{n}")).replace("$t", t)));
             params.push(value);
         };
-        if let Some(s) = self.source.filter(|s| !s.trim().is_empty()) {
-            let items: Vec<&str> = s.split(',').map(str::trim).filter(|x| !x.is_empty()).collect();
-            if items.len() > 1 && items.iter().all(|x| !x.contains(':')) {
-                // Lista de kinds (`delega,nod`): cualquiera de ellos.
-                push("$t.source_ref IN (SELECT ref FROM sources WHERE instr(?N, ',' || kind || ',') > 0)", comma_list(s, false));
-            } else {
-                let like = if s.contains(':') { format!("{s}%") } else { format!("{s}:%") };
-                push("$t.source_ref IN (SELECT ref FROM sources WHERE id LIKE ?N)", like);
-            }
-        }
         if let Some(g) = self.grep.filter(|g| !g.is_empty()) {
-            push("$t.title LIKE ?N", format!("%{g}%"));
+            let (g, esc) = like_lit(g);
+            push(&format!("$t.title LIKE ?N{esc}"), format!("%{g}%"));
         }
         if let Some(l) = self.level.filter(|l| !l.trim().is_empty()) {
             let expr = level_expr("$t", self.infer_level);
             push(&format!("instr(?N, ',' || UPPER({expr}) || ',') > 0"), comma_list(l, true));
         }
         if let Some(k) = self.kind.filter(|k| k.contains(',')) {
-            // Lista (`delega.*,nod.job.*`): exactos o prefijos con `*`, cualquiera de ellos.
-            let items: Vec<String> = k
-                .split(',')
-                .map(str::trim)
-                .filter(|x| !x.is_empty())
-                .map(|x| format!("\"{}\"", x.replace('\\', "\\\\").replace('"', "\\\"")))
-                .collect();
+            // Lista (`delega.*,nod.job.*`): exactos o prefijos con `*`, cualquiera
+            // de ellos. El prefijo se compara con `substr` y no con LIKE: un `_` o
+            // un `%` del kind son literales, como en el caso de un solo kind.
+            let items: Vec<&str> = k.split(',').map(str::trim).filter(|x| !x.is_empty()).collect();
             push(
-                "EXISTS (SELECT 1 FROM json_each(?N) j WHERE (substr(j.value, -1) = '*' AND $t.kind LIKE substr(j.value, 1, length(j.value) - 1) || '%') OR $t.kind = j.value)",
-                format!("[{}]", items.join(",")),
+                "EXISTS (SELECT 1 FROM json_each(?N) j WHERE CASE WHEN substr(j.value, -1) = '*'
+                    THEN substr($t.kind, 1, length(j.value) - 1) = substr(j.value, 1, length(j.value) - 1)
+                    ELSE $t.kind = j.value END)",
+                format!("[{}]", items.iter().map(|x| json_str(x)).collect::<Vec<_>>().join(",")),
             );
         } else if let Some(k) = self.kind.filter(|k| !k.is_empty()) {
             match k.strip_suffix('*') {
-                Some(prefix) => push("$t.kind LIKE ?N", format!("{prefix}%")),
+                Some(prefix) => {
+                    let (prefix, esc) = like_lit(prefix);
+                    push(&format!("$t.kind LIKE ?N{esc}"), format!("{prefix}%"))
+                }
                 None => push("$t.kind = ?N", k.to_string()),
             }
         }
         if let Some(en) = self.entity.filter(|e| !e.trim().is_empty()) {
             push(
                 "EXISTS (SELECT 1 FROM touches tq JOIN entities enq ON enq.id = tq.entity_id
-                         WHERE tq.event_id = $t.id AND instr(?N, ',' || enq.key || ',') > 0)",
+                         WHERE tq.event_rid = $t.rid AND instr(?N, ',' || enq.key || ',') > 0)",
                 comma_list(en, false),
             );
         }
         for cond in self.attr.unwrap_or("").split(',').map(str::trim).filter(|c| !c.is_empty()) {
-            let (k, v) = cond.split_once(':').or_else(|| cond.split_once('=')).unwrap_or((cond, ""));
+            let (k, v) = split_attr(cond);
             // La clave va en el path JSON: solo caracteres seguros (como en `top attr:`).
-            let k = k.trim();
-            if k.is_empty() || !k.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+            // Los frontales la validan antes (`check_attr`); aquí, por si acaso,
+            // una clave inválida no casa nada en vez de quitar el filtro.
+            if !crate::relate::valid_key(k) {
+                push("0 = ?N", "1".to_string());
                 continue;
             }
-            let path = format!("$.{k}");
             match v.trim().strip_suffix('*') {
-                Some(prefix) => {
-                    push(&format!("json_extract($t.attrs, '{path}') LIKE ?N"), format!("{prefix}%"));
-                }
-                None => push(&format!("json_extract($t.attrs, '{path}') = ?N"), v.trim().to_string()),
+                Some(prefix) => push(&format!("$t.rid IN ({})", attr_rids_sql(k, "?N", true)), format!("{}%", like_lit(prefix).0)),
+                None => push(&format!("$t.rid IN ({})", attr_rids_sql(k, "?N", false)), v.trim().to_string()),
             }
         }
         if self.until_epoch > 0 {
@@ -257,8 +366,9 @@ impl EventScope<'_> {
 }
 
 /// Como [`timeline`], contando solo los eventos de `scope`: «¿desde cuándo
-/// aparece este error?», «¿cuántos despliegues fallidos por semana?». Siempre
-/// barre `events` (los rollups no guardan nivel ni kind).
+/// aparece este error?», «¿cuántos despliegues fallidos por semana?». Lee
+/// `dim_rollups` cuando pueden responder (fuente, nivel, kind, entidad; bucket
+/// múltiplo de 10 min) y si no barre `events`.
 pub fn timeline_scoped(
     conn: &Connection,
     since_epoch: i64,
@@ -278,8 +388,11 @@ pub fn timeline_scoped(
         None => "''",
         Some("level") => "e.level",
         Some("kind") => "e.kind",
-        Some(other) => return Err(format!("timeline: unsupported group_by: {other}").into()),
+        Some(other) => return Err(format!("timeline: unsupported --by {other:?} (use level or kind; for other dimensions, top <dim>)").into()),
     };
+    if let Some(rows) = timeline_from_cube(conn, since_epoch, until_epoch, bucket_secs, group_by, scope, limit)? {
+        return Ok(rows);
+    }
     let (filters, extra) = scope.sql(5);
     let sql = format!(
         "SELECT bucket_epoch, key, COUNT(*) AS count FROM (
@@ -308,6 +421,41 @@ pub fn timeline_scoped(
         out.push(row?);
     }
     Ok(out)
+}
+
+/// `timeline` desde `dim_rollups` (ver [`crate::cube`]): mismas filas que el
+/// camino de `events`, o `None` si el cubo no puede responder.
+fn timeline_from_cube(
+    conn: &Connection,
+    since_epoch: i64,
+    until_epoch: i64,
+    bucket_ms: i64,
+    group_by: Option<&str>,
+    scope: &EventScope,
+    limit: usize,
+) -> Result<Option<Vec<TimelineBucket>>> {
+    use crate::cube::Dim;
+    let dims: &[Dim] = match group_by {
+        None => &[],
+        Some("level") => &[Dim::Level],
+        Some("kind") => &[Dim::Kind],
+        Some(_) => return Ok(None),
+    };
+    let mut sc = scope.clone();
+    if until_epoch > 0 {
+        sc.until_epoch = if sc.until_epoch > 0 { sc.until_epoch.min(until_epoch) } else { until_epoch };
+    }
+    let Some(cells) = crate::cube::cube(conn, since_epoch, &sc, dims, Some(bucket_ms))? else { return Ok(None) };
+    // `Cells` va ordenado por (claves, bucket); la salida, por (bucket, clave).
+    let mut out: Vec<TimelineBucket> = cells
+        .into_iter()
+        .map(|((keys, bucket), (count, _))| TimelineBucket { bucket_epoch: bucket, key: keys.into_iter().next().unwrap_or_default(), count })
+        .collect();
+    out.sort_by(|a, b| a.bucket_epoch.cmp(&b.bucket_epoch).then_with(|| a.key.cmp(&b.key)));
+    if limit > 0 {
+        out.truncate(limit);
+    }
+    Ok(Some(out))
 }
 
 /// Lee un valor de `meta` como `i64`, o `None` si la clave falta o no parsea.

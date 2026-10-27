@@ -10,12 +10,16 @@ pub mod classify;
 pub mod domain;
 pub mod error;
 pub mod level;
+pub mod pattern;
+pub mod redact;
 pub mod source;
 pub mod template;
 
 pub use classify::{Chain, Classifier};
 pub use template::templatize;
 pub use level::infer_level;
+pub use pattern::Pattern;
+pub use redact::{redact, redact_event};
 pub use domain::{Actor, Event, Label, Link, Touch};
 pub use error::{CoreError, Result};
-pub use source::{Cursor, Registry, Source, SourceConfig, Watermark};
+pub use source::{dims_option, Cursor, Registry, Source, SourceConfig, Watermark};

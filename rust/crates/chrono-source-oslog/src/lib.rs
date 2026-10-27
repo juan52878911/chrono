@@ -95,6 +95,12 @@ impl Source for OsLogSource {
         }
     }
 
+    fn options(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("window", "ventana inicial a leer (p. ej. 24h)"),
+        ]
+    }
+
     fn open(&self, path: &Path, watermark: Option<Watermark>, cfg: &SourceConfig) -> CoreResult<Box<dyn chrono_core::Cursor>> {
         let Some(token) = path.to_str() else {
             return Err(CoreError::Other("chrono-source-oslog: ruta no es UTF-8 válida".to_string()));

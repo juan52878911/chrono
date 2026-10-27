@@ -59,6 +59,8 @@ fn norm_type(t: &str) -> (String, String) {
 /// Contexto común de la fuente.
 pub struct Ctx<'a> {
     pub source_id: &'a str,
+    /// Sal de los ids de `audit.jsonl` (ver `audit_salt` en `lib.rs`).
+    pub audit_salt: &'a str,
     /// Hora local de delega = UTC + `offset_s`.
     pub offset_s: i64,
     /// Términos del fichero global (`forbidden_terms` en las opciones de la fuente).
@@ -86,7 +88,8 @@ fn id_naive_ms(job: &str) -> Option<i64> {
     if b.len() < 15 || b[8] != b'-' {
         return None;
     }
-    let iso = format!("{}-{}-{}T{}:{}:{}", &job[0..4], &job[4..6], &job[6..8], &job[9..11], &job[11..13], &job[13..15]);
+    // `get` y no `[..]`: un nombre con un carácter de varios bytes al principio hacía panic.
+    let iso = format!("{}-{}-{}T{}:{}:{}", job.get(0..4)?, job.get(4..6)?, job.get(6..8)?, job.get(9..11)?, job.get(11..13)?, job.get(13..15)?);
     util::parse_ts(&iso).map(|(ms, _)| ms)
 }
 
@@ -96,9 +99,11 @@ pub fn observed_offset(dir: &Path) -> Option<i64> {
     let summary = read_json(&channel_file(dir, "summary.json"));
     let state = read_json(&channel_file(dir, "state.json"));
     let naive = util::parse_ts(&text(&summary, &["start", "inicio"])?)?.0;
-    let epoch_ms = (num(&state, &["start", "inicio"])? * 1000.0) as i64;
-    let diff_s = (naive - epoch_ms) as f64 / 1000.0;
-    Some(((diff_s / 900.0).round() as i64) * 900)
+    let epoch_ms = util::epoch_s_to_ms(num(&state, &["start", "inicio"])?)?;
+    let diff_s = (naive as f64 - epoch_ms as f64) / 1000.0;
+    let o = ((diff_s / 900.0).round() as i64).saturating_mul(900);
+    // Una diferencia de más de 18 h no es la zona: son datos inconsistentes.
+    (o.abs() <= util::MAX_OFFSET_S).then_some(o)
 }
 
 fn fmt_num(x: f64) -> String {
@@ -198,8 +203,8 @@ pub fn job_events(dir: &Path, job: &str, ctx: &Ctx) -> Vec<Event> {
     let start = progress
         .start
         .or_else(|| text(&summary, &["start", "inicio"]).and_then(|s| ts_ms(&s, off)))
-        .or_else(|| num(&state, &["start", "inicio"]).map(|s| (s * 1000.0) as i64))
-        .or_else(|| id_naive_ms(job).map(|ms| ms - off * 1000))
+        .or_else(|| num(&state, &["start", "inicio"]).and_then(util::epoch_s_to_ms))
+        .or_else(|| id_naive_ms(job).and_then(|ms| util::valid_ms(ms - off * 1000)))
         .unwrap_or(0);
 
     let mut out = Vec::new();
@@ -257,8 +262,8 @@ pub fn job_events(dir: &Path, job: &str, ctx: &Ctx) -> Vec<Event> {
 
     let end = text(&summary, &["end", "fin"])
         .and_then(|s| ts_ms(&s, off))
-        .or_else(|| m("END").and_then(|s| s.parse::<f64>().ok()).map(|s| (s * 1000.0) as i64))
-        .or_else(|| num(&state, &["last_event", "ultimo_evento"]).map(|s| (s * 1000.0) as i64))
+        .or_else(|| m("END").and_then(|s| s.parse::<f64>().ok()).and_then(util::epoch_s_to_ms))
+        .or_else(|| num(&state, &["last_event", "ultimo_evento"]).and_then(util::epoch_s_to_ms))
         .or(progress.last)
         .unwrap_or(start)
         .max(start);
@@ -275,9 +280,9 @@ pub fn job_events(dir: &Path, job: &str, ctx: &Ctx) -> Vec<Event> {
         a.insert("cost_usd".into(), fmt_num(c));
         a.insert("cost_from".into(), from.into());
     }
-    let duration_min = num(&summary, &["duration_min", "duracion_min"]).unwrap_or(((end - start) as f64 / 6000.0).round() / 10.0);
+    let duration_min = num(&summary, &["duration_min", "duracion_min"]).unwrap_or((end.saturating_sub(start) as f64 / 6000.0).round() / 10.0);
     a.insert("duration_min".into(), fmt_num(duration_min));
-    a.insert("duration_ms".into(), (end - start).to_string());
+    a.insert("duration_ms".into(), end.saturating_sub(start).to_string());
     for (attr, s_keys, st_keys) in [
         ("messages", &["messages", "mensajes"][..], &["turns", "turnos"][..]),
         ("tools", &["tools", "herramientas"][..], &["tools", "herramientas"][..]),
@@ -362,7 +367,7 @@ pub fn audit_event(rec: &Map<String, Value>, off: u64, ctx: &Ctx) -> Option<Even
     }
     let name = attrs.get("owner").or(attrs.get("profile")).cloned().unwrap_or_else(|| "delega".into());
     let actor = Actor { key: format!("delega:{name}"), name };
-    let mut ev = event(ctx, format!("delega:audit:{off}"), &format!("delega.audit.{kind_name}"), at, level, title, &actor, "", attrs);
+    let mut ev = event(ctx, format!("delega:audit:{}:{off}", ctx.audit_salt), &format!("delega.audit.{kind_name}"), at, level, title, &actor, "", attrs);
     ev.touches = job.map(|j| vec![Touch { entity: j, entity_type: "job".into(), weight: 1, attrs: BTreeMap::new() }]).unwrap_or_default();
     Some(ev)
 }

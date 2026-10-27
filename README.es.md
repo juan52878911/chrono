@@ -22,7 +22,7 @@ $ chrono bugs            # ¿dónde se concentran los arreglos y de qué tipo?
 | --- | --- | --- |
 | **git** | Sí | leer el historial (ya lo tienes si tienes repos) |
 | **gh** ([cli.github.com](https://cli.github.com)) | Opcional | leer PRs e issues de GitHub (`chrono prs`, tickets) |
-| **Go 1.23+** | Solo para compilar | no hace falta si usas un binario precompilado |
+| **Rust (cargo)** | Solo para compilar | no hace falta si usas un binario precompilado |
 
 chrono **no** necesita base de datos, servidor ni conexión (salvo `gh` para PRs). El índice es un archivo local.
 
@@ -59,9 +59,9 @@ Detecta tu plataforma, descarga el binario correcto del último release, **verif
 curl -fsSL https://raw.githubusercontent.com/juan52878911/chrono/main/install.sh | sh
 ```
 
-Sin clonar, sin Go, sin compilador. Funciona en macOS (Apple Silicon e Intel) y Linux (x86-64 y arm64).
+Sin clonar, sin compilador. Funciona en macOS (Apple Silicon e Intel) y Linux (x86-64 y arm64).
 
-- Fijar una versión: `curl -fsSL https://raw.githubusercontent.com/juan52878911/chrono/main/install.sh | VERSION=v0.1.0 sh`
+- Fijar una versión: `curl -fsSL https://raw.githubusercontent.com/juan52878911/chrono/main/install.sh | VERSION=v0.6.0 sh`
 - Elegir el directorio de instalación: `... | PREFIX="$HOME/.local/bin" sh`
 - Por defecto instala en `/usr/local/bin` si tiene permisos; si no, en `~/.local/bin` (el script te avisa si hay que añadirlo al `PATH`).
 
@@ -71,23 +71,23 @@ Descarga el `.tar.gz` de tu plataforma desde la [página de Releases](https://gi
 
 **macOS (Apple Silicon / M1–M4):**
 ```bash
-tar -xzf chrono-v0.1.0-darwin-arm64.tar.gz
-sudo mv chrono-v0.1.0-darwin-arm64/chrono /usr/local/bin/
+tar -xzf chrono-vX.Y.Z-darwin-arm64.tar.gz
+sudo mv chrono-vX.Y.Z-darwin-arm64/chrono /usr/local/bin/
 ```
 **macOS (Intel):** usa `...-darwin-amd64.tar.gz`.
 
 **Linux x86-64 (Debian/Ubuntu, Arch, …):**
 ```bash
-tar -xzf chrono-v0.1.0-linux-amd64.tar.gz
-sudo install -m755 chrono-v0.1.0-linux-amd64/chrono /usr/local/bin/chrono
+tar -xzf chrono-vX.Y.Z-linux-amd64.tar.gz
+sudo install -m755 chrono-vX.Y.Z-linux-amd64/chrono /usr/local/bin/chrono
 ```
 > El binario de Linux es **estático** (sin dependencias de sistema): el mismo archivo vale para Debian, Ubuntu, Arch, Alpine, etc.
 
 Desde un checkout también puedes ejecutar `./install.sh` (el mismo script; usa `./dist` si existe).
 
-### Opción C — Desde código (con Go)
+### Opción C — Desde código (con Rust)
 ```bash
-make install     # instala en ~/go/bin
+make install     # instala en ~/.cargo/bin
 ```
 
 ### Opción D — Nix
@@ -121,7 +121,8 @@ El índice se **auto-descubre** subiendo desde el directorio actual, como git co
 | Comando | Responde |
 | --- | --- |
 | `init [repo]` | Prepara el índice (crea `.chrono/`) e ingiere todo. |
-| `sync [repo]` | Procesa solo el delta desde la última vez. |
+| `sync [repo]` | Procesa solo el delta desde la última vez. Una fuente que no se puede leer no para las demás; `sources` enseña su `sync_error`. |
+| `reindex` | Rehace el índice desde cero con las mismas fuentes (git, logs, globs, comandos), p. ej. tras una versión que cambia el esquema. Si se corta, se vuelve a lanzar: reanuda desde la copia, que se conserva. |
 | `hotspots` | ¿Qué es peligroso tocar? (frecuencia × tamaño) |
 | `coupling <fichero>` | ¿Qué se rompe si toco esto? (acoplamiento temporal) |
 | `owners <ruta>` | Propiedad por autor y **bus factor**. |
@@ -134,9 +135,12 @@ El índice se **auto-descubre** subiendo desde el directorio actual, como git co
 | `search <texto>` | Busca commits por significado (texto completo). |
 | `similar <sha>` | Commits casi-duplicados (por huella SimHash). |
 | `explain <fichero>[:A-B]` | ¿Por qué este código está así? Commits que escribieron esas líneas (`git blame` en la revisión indexada), certeza de arreglo (`yes`/`maybe`), tickets/PRs, autores y qué cambia con esas líneas (también funciones con `init --symbols`). Determinista. |
+| `top <dim>` | Recuento exacto de los valores más frecuentes: `level`, `kind`, `actor`, `entity`, `attr:<k>`; una dim declarada por una fuente vale sin prefijo (`top cwd` = `top attr:cwd`). |
+| `events` | Stream cronológico de todas las fuentes; `--order desc` para lo más reciente primero. |
+| `gaps --from A --to B --via K [--by U]` | «X sin Y» con cifras exactas. Solo cubre un B en o después del primer A de la unidad (`--any-order` para cualquiera); `--until` acota los dos lados. |
 | `mcp` | Servidor MCP por stdio (para una IA). |
 
-Opciones: `--db RUTA`, `--since FECHA`, `--lang en|es`.
+Opciones: `--db RUTA`, `--since FECHA`, `--lang en|es`. `chrono <comando> --help` da las flags de cada comando; `chrono help`, todas.
 
 ---
 
@@ -177,6 +181,16 @@ El servidor se lanza bajo demanda y muere con la sesión (serverless). Auto-desc
 ## Configuración (opcional)
 
 `chrono init` crea `.chrono/config.json`, versionable y ajustable por repo: `fix_keywords`, `ticket_patterns`, `exclude_globs`, `bug_labels`, y `bug_categories` (taxonomía `categoría → palabras clave` para clasificar los fixes).
+
+Los secretos (tokens de proveedores, JWT, `Bearer …`, contraseñas en URLs, valores tipo `password=…`, claves
+privadas) se cambian por `<SECRET>` antes de entrar al índice; `sources` dice cuántos. Para guardar una fuente tal
+cual: `"source_options": {"app.log": {"redact": "off"}}`.
+
+Los atributos por los que más se agrupa o filtra (`host`, `container`, `cwd`…) se pueden declarar como dims:
+`"source_options": {"app.log": {"dims": "host,container"}}`. Cada valor se guarda una vez y queda indexado, así
+`top attr:host` y `--attr host:x` no recorren los eventos (también vale `top host`). Cambiar las dims o las
+opciones de una fuente (`entity_via`, `explode`, `attrs`…) la reindexa en el siguiente `sync`, salvo que parte de
+ella ya no se pueda releer: entonces avisa de cuántos eventos se perderían y los conserva.
 
 ---
 

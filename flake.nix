@@ -9,13 +9,14 @@
       forAll = f: nixpkgs.lib.genAttrs systems (s: f nixpkgs.legacyPackages.${s});
     in {
       packages = forAll (pkgs: {
-        default = pkgs.buildGoModule {
+        default = pkgs.rustPlatform.buildRustPackage {
           pname = "chrono";
-          version = "0.1.0";
-          src = ./.;
-          vendorHash = "sha256-tQ39T7gLFDK5OH6MxXsx0usdHRPdAdOViSP9P1Df5B4=";
-          ldflags = [ "-s" "-w" "-X main.version=v0.1.0" ];
-          subPackages = [ "cmd/chrono" ];
+          version = (builtins.fromTOML (builtins.readFile ./rust/Cargo.toml)).workspace.package.version;
+          src = ./rust;
+          cargoLock.lockFile = ./rust/Cargo.lock;
+          cargoBuildFlags = [ "-p" "chrono-cli" ];
+          # Los tests ya corren en el CI; aquí solo se empaqueta el binario.
+          doCheck = false;
           # chrono usa `git` (obligatorio) y `gh` (opcional, para PRs) en runtime.
           nativeBuildInputs = [ pkgs.makeWrapper ];
           postInstall = ''

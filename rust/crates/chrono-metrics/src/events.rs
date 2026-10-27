@@ -37,6 +37,8 @@ pub struct EventFilter<'a> {
     pub entity: Option<&'a str>,
     /// `clave:valor` sobre los atributos (ver `EventScope::attr`).
     pub attr: Option<&'a str>,
+    /// Relación por clave (ver `EventScope::join`).
+    pub join: Option<&'a str>,
     /// `level` casa también el nivel deducido del texto.
     pub infer_level: bool,
 }
@@ -45,6 +47,13 @@ pub struct EventFilter<'a> {
 /// filtros. Solo eventos con `at_epoch > 0` (los sin tiempo no entran en una
 /// vista temporal). `limit` acota (salida "bounded for an AI").
 pub fn events(conn: &Connection, f: &EventFilter, limit: usize) -> Result<Vec<EventRow>> {
+    events_ordered(conn, f, limit, false)
+}
+
+/// Como [`events`]; con `newest_first`, los `limit` MÁS RECIENTES, del más
+/// nuevo al más viejo (`at_epoch` DESC, `id` DESC): «¿qué pasó lo último?» sin
+/// tener que adivinar un `since`.
+pub fn events_ordered(conn: &Connection, f: &EventFilter, limit: usize, newest_first: bool) -> Result<Vec<EventRow>> {
     // Mismas reglas de filtro que `top`/`patterns`/`timeline` (ver `EventScope`).
     let scope = crate::EventScope {
         source: f.source,
@@ -53,10 +62,12 @@ pub fn events(conn: &Connection, f: &EventFilter, limit: usize) -> Result<Vec<Ev
         kind: f.kind,
         entity: f.entity,
         attr: f.attr,
+        join: f.join,
         infer_level: f.infer_level,
         until_epoch: f.until_epoch,
     };
     let (filters, extra) = scope.sql(3);
+    let dir = if newest_first { "DESC" } else { "ASC" };
     // v5: events.source_ref es entero; el string ("git:/path") se recupera por
     // JOIN a sources. El JOIN es INNER pero todo evento tiene un source_ref
     // válido (lo garantiza el Writer), así que no se pierde ninguna fila.
@@ -66,7 +77,7 @@ pub fn events(conn: &Connection, f: &EventFilter, limit: usize) -> Result<Vec<Ev
          WHERE e.at_epoch > 0
            AND (?1 = 0 OR e.at_epoch >= ?1)
            {filters}
-         ORDER BY e.at_epoch ASC, e.id ASC
+         ORDER BY e.at_epoch {dir}, e.id {dir}
          LIMIT ?2"
     );
     let limit = limit as i64;
@@ -91,6 +102,50 @@ pub fn events(conn: &Connection, f: &EventFilter, limit: usize) -> Result<Vec<Ev
         out.push(row?);
     }
     Ok(out)
+}
+
+/// Los eventos con `rid` mayor que `after_rid`, en orden de inserción, de
+/// `limit` en `limit` (con `since` de `f`, sin `until`). Lo
+/// usa `tail`: paginar por tiempo perdía los que comparten instante con el
+/// último mostrado cuando entraban más de `limit` de golpe.
+pub fn events_after_rid(conn: &Connection, f: &EventFilter, after_rid: i64, limit: usize) -> Result<Vec<(i64, EventRow)>> {
+    let scope = crate::EventScope {
+        source: f.source,
+        grep: f.grep,
+        level: f.level,
+        kind: f.kind,
+        entity: f.entity,
+        attr: f.attr,
+        join: f.join,
+        infer_level: f.infer_level,
+        until_epoch: 0,
+    };
+    let (mut filters, mut extra) = scope.sql(3);
+    // `tail --since`: lo ya indexado desde esa hora, y después solo lo nuevo de ahí en adelante.
+    if f.since_epoch > 0 {
+        filters.push_str(&format!(" AND e.at_epoch >= CAST(?{} AS INTEGER)", 3 + extra.len()));
+        extra.push(f.since_epoch.to_string());
+    }
+    let sql = format!(
+        "SELECT e.rid, e.id, s.id, e.kind, e.at, e.at_epoch, e.level, e.title
+         FROM events e JOIN sources s ON s.ref = e.source_ref
+         WHERE e.rid > ?1 {filters}
+         ORDER BY e.rid ASC
+         LIMIT ?2"
+    );
+    let limit = limit as i64;
+    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&after_rid, &limit];
+    for p in &extra {
+        bound.push(p);
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(bound), |r| {
+        Ok((
+            r.get(0)?,
+            EventRow { id: r.get(1)?, source_id: r.get(2)?, kind: r.get(3)?, at: r.get(4)?, at_epoch: r.get(5)?, level: r.get(6)?, title: r.get(7)? },
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 #[cfg(test)]
@@ -195,6 +250,14 @@ mod tests {
 
         // limit.
         assert_eq!(events(conn, &EventFilter::default(), 2).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn newest_first_da_los_mas_recientes() {
+        let (_db, store) = fixture();
+        let rows = events_ordered(store.conn(), &EventFilter::default(), 2, true).unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["c2", "e1"]);
     }
 
     #[test]

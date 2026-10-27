@@ -75,7 +75,10 @@ impl Source for JsonlSource {
             return 0;
         }
         let Some(first_line) = cursor::peek_first_nonempty_line(path) else {
-            return 0;
+            // Vacío (un log recién creado): solo una extensión inequívoca lo dice
+            // (`.log`/`.json` no: podría ser texto); confianza baja.
+            let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+            return if matches!(ext.as_deref(), Some("jsonl" | "ndjson")) { 20 } else { 0 };
         };
         let Ok(value) = serde_json::from_str::<Value>(&first_line) else {
             return 0;
@@ -89,6 +92,27 @@ impl Source for JsonlSource {
         } else {
             40
         }
+    }
+
+    fn options(&self) -> &'static [(&'static str, &'static str)] {
+        config::OPTIONS
+    }
+
+    fn validate(&self, cfg: &SourceConfig) -> CoreResult<()> {
+        config::validate_options(cfg)
+    }
+
+    fn dims(&self, cfg: &SourceConfig) -> Vec<String> {
+        config::effective_options(cfg).map(|c| chrono_core::dims_option(&c)).unwrap_or_default()
+    }
+
+    fn entity_via(&self, cfg: &SourceConfig) -> Option<String> {
+        let c = config::effective_options(cfg).ok()?;
+        c.options.get("entity_via").map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    }
+
+    fn ingest_options(&self, cfg: &SourceConfig) -> SourceConfig {
+        config::effective_options(cfg).unwrap_or_else(|_| cfg.clone())
     }
 
     fn open(&self, path: &Path, watermark: Option<Watermark>, cfg: &SourceConfig) -> CoreResult<Box<dyn chrono_core::Cursor>> {

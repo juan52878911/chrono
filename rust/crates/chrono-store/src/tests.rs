@@ -76,12 +76,12 @@ fn open_crea_esquema_y_version_actual_y_reabrir_no_falla() {
     let db = TempDb::new("open");
 
     let store = Store::open(db.path()).expect("open crea el índice");
-    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("5"));
+    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("7"));
     drop(store);
 
     // Reabrir un índice ya existente (mismo schema_version) no debe fallar.
     let store2 = Store::open(db.path()).expect("reabrir no falla");
-    assert_eq!(store2.meta("schema_version").unwrap().as_deref(), Some("5"));
+    assert_eq!(store2.meta("schema_version").unwrap().as_deref(), Some("7"));
 }
 
 #[test]
@@ -183,6 +183,19 @@ fn add_event_es_idempotente_en_reingesta() {
 }
 
 #[test]
+fn un_evento_repetido_con_otra_entidad_no_suma_touches() {
+    let db = TempDb::new("repetido");
+    let mut store = Store::open(db.path()).unwrap();
+    let mut w = store.writer().unwrap();
+    assert!(w.add_event(&sample_event("tool_use:toolu_1", &["Bash"], "a")).unwrap());
+    // La misma llamada copiada en otro fichero, sin su uso previo: otra entidad.
+    assert!(!w.add_event(&sample_event("tool_use:toolu_1", &["unknown"], "a")).unwrap());
+    w.commit().unwrap();
+    let touches: i64 = store.conn().query_row("SELECT count(*) FROM touches", [], |r| r.get(0)).unwrap();
+    assert_eq!(touches, 1);
+}
+
+#[test]
 fn writer_sin_commit_revierte_al_hacer_drop() {
     let db = TempDb::new("rollback");
     let mut store = Store::open(db.path()).unwrap();
@@ -212,7 +225,7 @@ fn weight_binario_menos_uno_se_guarda_tal_cual() {
     }
 
     let weight: i64 =
-        store.conn().query_row("SELECT weight FROM touches WHERE event_id='sha1'", [], |r| r.get(0)).unwrap();
+        store.conn().query_row("SELECT weight FROM touches WHERE event_rid = (SELECT rid FROM events WHERE id = 'sha1')", [], |r| r.get(0)).unwrap();
     assert_eq!(weight, -1);
 }
 
@@ -351,7 +364,7 @@ fn reset_borra_datos_pero_conserva_meta() {
     }
     // meta se conserva.
     assert_eq!(store.meta("git_version").unwrap().as_deref(), Some("2.45.0"));
-    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("5"));
+    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("7"));
 }
 
 #[test]
@@ -364,4 +377,232 @@ fn open_con_schema_version_distinta_devuelve_err() {
 
     let err = Store::open(db.path());
     assert!(err.is_err(), "abrir con schema_version incompatible debe fallar");
+}
+
+#[test]
+fn open_read_usa_la_cache_pequena_y_sin_mmap() {
+    let db = TempDb::new("open-read");
+    drop(Store::open(db.path()).unwrap());
+    let s = Store::open_read(db.path()).unwrap();
+    let pragma = |p: &str| -> i64 { s.conn().query_row(&format!("PRAGMA {p}"), [], |r| r.get(0)).unwrap() };
+    assert_eq!(pragma("cache_size"), -16384);
+    assert_eq!(pragma("mmap_size"), 0);
+    // La de ingesta sigue con su caché grande.
+    let w = Store::open(db.path()).unwrap();
+    assert_eq!(w.conn().query_row("PRAGMA cache_size", [], |r| r.get::<_, i64>(0)).unwrap(), -262144);
+}
+
+#[test]
+fn borrar_eventos_invalida_los_rollups_y_el_incremental_no_suma_dos_veces() {
+    let db = TempDb::new("rollups-borrado");
+    let mut store = Store::open(db.path()).unwrap();
+    let log = |id: &str, source: &str| Event { source_id: source.to_string(), kind: "log".to_string(), level: "ERROR".to_string(), ..sample_event(id, &["svc"], "") };
+    {
+        let mut w = store.writer().unwrap();
+        for (id, src) in [("a1", "jsonl:/a"), ("b1", "jsonl:/b"), ("a2", "jsonl:/a")] {
+            w.add_event(&log(id, src)).unwrap();
+        }
+        w.commit().unwrap();
+    }
+    store.build_rollups(60_000).unwrap();
+    let total = |s: &Store| -> (i64, i64) {
+        s.conn().query_row("SELECT (SELECT SUM(count) FROM rollups), (SELECT SUM(count) FROM dim_rollups)", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+    };
+    assert_eq!(total(&store), (3, 3));
+    // Borrar una fuente deja los rollups sin watermark (nadie los da por al día)…
+    store.delete_source_events("jsonl:/b").unwrap();
+    assert_eq!(store.meta("rollup_max_rowid").unwrap(), None);
+    // …y un build incremental sin watermark reconstruye en vez de sumar encima.
+    store.build_rollups_sync(60_000).unwrap();
+    assert_eq!(total(&store), (2, 2));
+    assert_eq!(store.meta("rollup_max_rowid").unwrap().as_deref(), Some("3"));
+}
+
+#[test]
+fn un_indice_v6_migra_sus_links_a_targets_internados() {
+    let db = TempDb::new("v6-links");
+    {
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO meta VALUES ('schema_version', '6');
+             CREATE TABLE links(event_rid INTEGER NOT NULL, rel TEXT NOT NULL, target TEXT NOT NULL,
+                                PRIMARY KEY (event_rid, rel, target)) WITHOUT ROWID;
+             CREATE INDEX idx_links_rel ON links(rel, target);
+             INSERT INTO links VALUES (1, 'tool_use', 'toolu_a'), (2, 'tool_use', 'toolu_a'), (2, 'file', 'x.rs'), (3, 'file', 'x.rs');",
+        )
+        .unwrap();
+    }
+    let store = Store::open(db.path()).unwrap();
+    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("7"));
+    let c = store.conn();
+    let n = |sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(n("SELECT COUNT(*) FROM link_targets"), 2);
+    assert_eq!(n("SELECT COUNT(*) FROM event_links"), 4);
+    // La vista conserva la forma de antes.
+    assert_eq!(n("SELECT COUNT(*) FROM links WHERE rel = 'tool_use' AND target = 'toolu_a'"), 2);
+    assert_eq!(n("SELECT COUNT(*) FROM links WHERE event_rid = 2"), 2);
+    assert_eq!(n("SELECT COUNT(*) FROM sqlite_master WHERE name = 'links_v6'"), 0, "la tabla vieja no queda");
+    assert_eq!(n("SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'links'"), 1);
+    assert_eq!(n("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('idx_event_links_target', 'idx_link_targets_target')"), 2);
+    drop(store);
+    // Reabrir no vuelve a migrar.
+    Store::open(db.path()).unwrap();
+}
+
+/// Varios procesos (aquí hilos con su propia conexión) abren a la vez el mismo
+/// índice v6: uno migra y los demás esperan y siguen, sin error.
+#[test]
+fn la_migracion_v6_con_aperturas_simultaneas_no_falla() {
+    let db = TempDb::new("v6-a-la-vez");
+    {
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO meta VALUES ('schema_version', '6');
+             CREATE TABLE links(event_rid INTEGER NOT NULL, rel TEXT NOT NULL, target TEXT NOT NULL,
+                                PRIMARY KEY (event_rid, rel, target)) WITHOUT ROWID;
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200000)
+             INSERT INTO links SELECT i, 'file', 'f' || (i % 5000) FROM n;",
+        )
+        .unwrap();
+    }
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(6));
+    let handles: Vec<_> = (0..6)
+        .map(|_| {
+            let (path, barrier) = (db.path().to_path_buf(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                Store::open(&path).map(|_| ()).map_err(|e| e.to_string())
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap().expect("las aperturas que no migran esperan a la que migra y siguen");
+    }
+    let store = Store::open(db.path()).unwrap();
+    assert_eq!(store.meta("schema_version").unwrap().as_deref(), Some("7"));
+    let n: i64 = store.conn().query_row("SELECT COUNT(*) FROM links", [], |r| r.get(0)).unwrap();
+    assert_eq!(n, 200_000);
+}
+
+/// Esperar a otra migración más de la cuenta da un error que lo dice, no un
+/// «database is locked» a secas.
+#[test]
+fn la_espera_de_otra_migracion_agotada_lo_dice() {
+    let db = TempDb::new("v6-espera");
+    let conn = rusqlite::Connection::open(db.path()).unwrap();
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         INSERT INTO meta VALUES ('schema_version', '6');
+         CREATE TABLE links(event_rid INTEGER NOT NULL, rel TEXT NOT NULL, target TEXT NOT NULL,
+                            PRIMARY KEY (event_rid, rel, target)) WITHOUT ROWID;
+         BEGIN IMMEDIATE;",
+    )
+    .unwrap();
+    crate::store::MIGRATION_WAIT_MS.with(|w| w.set(300));
+    let err = Store::open(db.path()).err().expect("con la migración de otro en curso no abre").to_string();
+    assert!(err.contains("otro proceso sigue migrando"), "{err}");
+    conn.execute_batch("ROLLBACK").unwrap();
+}
+
+/// Varias aperturas a la vez sobre una ruta nueva: una crea el esquema y las
+/// demás lo ven entero (antes alguna veía `meta` sin versión: «esquema ?»).
+#[test]
+fn aperturas_simultaneas_sobre_una_ruta_nueva_no_fallan() {
+    for round in 0..5 {
+        let db = TempDb::new(&format!("nueva-a-la-vez-{round}"));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(6));
+        let handles: Vec<_> = (0..6)
+            .map(|_| {
+                let (path, barrier) = (db.path().to_path_buf(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Store::open(&path).map(|_| ()).map_err(|e| e.to_string())
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap().expect("ninguna apertura ve el esquema a medias");
+        }
+    }
+}
+
+/// Una consulta sobre una ruta sin índice falla diciéndolo y no crea un `.db` vacío.
+#[test]
+fn open_read_sin_indice_no_crea_nada() {
+    let db = TempDb::new("sin-indice");
+    let err = Store::open_read(db.path()).err().expect("sin índice no abre").to_string();
+    assert!(err.contains("no hay índice"), "{err}");
+    assert!(!db.path().exists());
+}
+
+/// Eventos de log de `src`, uno por id, con la dim `file`. Devuelve sus rid.
+fn add_logs(store: &mut Store, src: &str, file: &str, ids: &[&str]) -> Vec<i64> {
+    let mut w = store.writer().unwrap();
+    w.set_dims(vec!["file".to_string()]);
+    for id in ids {
+        let ev = Event {
+            source_id: src.to_string(),
+            kind: "log".to_string(),
+            attrs: attrs(&[("file", file)]),
+            touches: vec![],
+            links: vec![],
+            ..sample_event(id, &[], "")
+        };
+        assert!(w.add_event(&ev).unwrap());
+    }
+    w.commit().unwrap();
+    ids.iter().map(|id| store.conn().query_row("SELECT rid FROM events WHERE id = ?1", [id], |r| r.get(0)).unwrap()).collect()
+}
+
+#[test]
+fn los_rid_de_lo_borrado_no_se_reutilizan() {
+    let db = TempDb::new("rid-hwm");
+    let mut store = Store::open(db.path()).unwrap();
+    assert_eq!(add_logs(&mut store, "jsonl:/a", "a", &["a1", "a2", "a3"]), [1, 2, 3]);
+    // Borrar los rid más altos (relectura de una fuente): antes lo nuevo volvía a
+    // tener 1, 2, 3 y quien sigue por rid (`tail`) no lo veía.
+    store.delete_source_events("jsonl:/a").unwrap();
+    assert_eq!(add_logs(&mut store, "jsonl:/a", "a", &["b1", "b2"]), [4, 5]);
+    // Igual con un fichero de una glob y tras `reset`.
+    store.delete_source_file_events("jsonl:/a", "a").unwrap();
+    assert_eq!(add_logs(&mut store, "jsonl:/a", "a", &["c1"]), [6]);
+    store.reset().unwrap();
+    assert_eq!(add_logs(&mut store, "jsonl:/a", "a", &["d1"]), [7]);
+    // Un índice sin la marca (de antes) sigue por encima de su máximo.
+    store.conn().execute("DELETE FROM meta WHERE key = 'rid_hwm'", []).unwrap();
+    assert_eq!(add_logs(&mut store, "jsonl:/a", "a", &["e1"]), [8]);
+    // Un evento repetido no gasta rid.
+    let mut w = store.writer().unwrap();
+    let dup = Event { source_id: "jsonl:/a".into(), kind: "log".into(), touches: vec![], links: vec![], ..sample_event("e1", &[], "") };
+    assert!(!w.add_event(&dup).unwrap());
+    w.commit().unwrap();
+    assert_eq!(add_logs(&mut store, "jsonl:/a", "a", &["f1"]), [9]);
+}
+
+#[test]
+fn la_marca_stale_dims_no_cuenta_lo_que_entra_tras_un_borrado() {
+    let db = TempDb::new("stale-dims-rid");
+    let mut store = Store::open(db.path()).unwrap();
+    add_logs(&mut store, "jsonl:/g", "viejo", &["v1"]);
+    add_logs(&mut store, "jsonl:/g", "b", &["b1", "b2"]);
+    // Cambian las dims sin poder releer: lo que hay hasta hoy queda con las de antes.
+    store.set_source_dims("jsonl:/g", &["file".to_string()]).unwrap();
+    // b se relee (sus rid, los más altos, se borran) y entra con las dims nuevas.
+    store.delete_source_file_events("jsonl:/g", "b").unwrap();
+    add_logs(&mut store, "jsonl:/g", "b", &["b1", "b2"]);
+    let stale: i64 = store
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE source_ref = (SELECT ref FROM sources WHERE id = ?1)
+               AND rid <= CAST((SELECT value FROM meta WHERE key = 'stale_dims:' || ?1) AS INTEGER)",
+            ["jsonl:/g"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    // Antes: 3 (los b releídos reutilizaban los rid 2 y 3, bajo la marca).
+    assert_eq!(stale, 1);
 }

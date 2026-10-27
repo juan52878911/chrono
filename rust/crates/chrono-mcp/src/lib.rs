@@ -38,30 +38,96 @@ const INDEX_REL: &str = ".chrono/index.db";
 /// aparezca: el intermediario o el hook de inicio pueden crearlo a mitad de
 /// sesión, y el servidor no debe quedarse ciego hasta reiniciarse.
 pub struct State {
-    store: std::cell::OnceCell<Store>,
+    store: std::cell::RefCell<Option<Opened>>,
+    /// Por qué no se pudo abrir el índice que hay (p. ej. otra versión de
+    /// esquema): las tools lo dicen en vez de pedir un `chrono init`.
+    open_error: std::cell::RefCell<Option<String>>,
     db: Option<PathBuf>,
     /// Buscar el índice (si falta) en cada llamada. Los tests lo apagan para no
     /// encontrar el índice real del repo donde corren.
     discover: bool,
 }
 
+/// El índice abierto y de qué fichero: un `reindex` lo cambia por otro (aparta
+/// el viejo y crea uno nuevo en la misma ruta) y la conexión abierta seguiría
+/// leyendo el viejo sin dar error.
+struct Opened {
+    store: Store,
+    /// `(ruta, dispositivo, inodo)`; `None` en los tests con un `Store` a mano.
+    file: Option<(PathBuf, (u64, u64))>,
+}
+
+/// Dispositivo e inodo de un fichero (un `stat`).
+fn file_id(path: &std::path::Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::metadata(path).ok().and_then(|m| m.modified().ok()).map(|t| (0, t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)))
+    }
+}
+
 impl State {
     /// Para tests: arranca ya con (o sin) un `Store` construido a mano.
     #[cfg(test)]
     fn with_store(store: Option<Store>) -> State {
-        let cell = std::cell::OnceCell::new();
-        if let Some(s) = store {
-            let _ = cell.set(s);
-        }
-        State { store: cell, db: None, discover: false }
+        let opened = store.map(|store| Opened { store, file: None });
+        State { store: std::cell::RefCell::new(opened), open_error: Default::default(), db: None, discover: false }
     }
 
-    pub fn store(&self) -> Option<&Store> {
-        if self.store.get().is_none() && self.discover {
-            let s = open_or_discover(self.db.clone())?;
-            let _ = self.store.set(s);
+    /// El índice para esta llamada: lo abre si aún no lo estaba y lo reabre si
+    /// el fichero ya no es el mismo (un stat por consulta). Con un `reindex` a
+    /// medias, nada: las tools lo dicen.
+    pub fn store(&self) -> Option<std::cell::Ref<'_, Store>> {
+        let stale = match &*self.store.borrow() {
+            Some(Opened { file: Some((path, id)), .. }) => {
+                if let Some((backup, running)) = chrono_store::reindex_pending(path) {
+                    *self.open_error.borrow_mut() = Some(reindex_text(path, &backup, running));
+                    return None;
+                }
+                file_id(path) != Some(*id)
+            }
+            Some(_) => false,
+            None => self.discover,
+        };
+        if stale {
+            *self.store.borrow_mut() = None;
+            match open_or_discover(self.db.clone()) {
+                Ok(Some((store, path))) => {
+                    let file = file_id(&path).map(|id| (path, id));
+                    *self.store.borrow_mut() = Some(Opened { store, file });
+                    *self.open_error.borrow_mut() = None;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    *self.open_error.borrow_mut() = Some(e);
+                    return None;
+                }
+            }
         }
-        self.store.get()
+        std::cell::Ref::filter_map(self.store.borrow(), |o| o.as_ref().map(|o| &o.store)).ok()
+    }
+
+    /// El error de la última vez que se intentó abrir el índice, si lo hubo.
+    pub fn open_error(&self) -> Option<String> {
+        self.open_error.borrow().clone()
+    }
+}
+
+/// Texto de un `reindex` en marcha o cortado sobre el índice.
+fn reindex_text(db: &std::path::Path, backup: &std::path::Path, running: bool) -> String {
+    if running {
+        format!("chrono: hay un reindex en marcha sobre {}; repite la consulta cuando acabe", db.display())
+    } else {
+        format!(
+            "chrono: un reindex de {} no terminó: el índice puede estar a medias y la copia buena es {}. Reanúdalo con: chrono --db {} reindex",
+            db.display(),
+            backup.display(),
+            db.display()
+        )
     }
 }
 
@@ -69,7 +135,7 @@ impl State {
 /// de E/S. Nunca falla por falta de índice: `db` ausente o inválido deja
 /// `State` sin store y el servidor sigue sirviendo `tools/list` etc.
 pub fn serve(db: Option<PathBuf>) -> Result<()> {
-    let state = State { store: std::cell::OnceCell::new(), db, discover: true };
+    let state = State { store: Default::default(), open_error: Default::default(), db, discover: true };
 
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
@@ -88,27 +154,39 @@ pub fn serve(db: Option<PathBuf>) -> Result<()> {
 }
 
 /// Abre el índice explícito, o lo autodescubre subiendo desde el cwd. Nunca
-/// propaga error: si no hay fichero, o si `Store::open` falla, se queda sin
-/// store (se loguea a stderr) en vez de abortar el arranque del servidor.
-fn open_or_discover(db: Option<PathBuf>) -> Option<Store> {
-    let path = db.or_else(discover_db)?;
-    if !path.is_file() {
-        return None;
+/// aborta el servidor: sin fichero es `Ok(None)`, y si `Store::open_read` falla
+/// devuelve el motivo (se loguea a stderr) para que las tools lo digan.
+fn open_or_discover(db: Option<PathBuf>) -> std::result::Result<Option<(Store, PathBuf)>, String> {
+    let Some(path) = db.or_else(discover_db) else { return Ok(None) };
+    if let Some((backup, running)) = chrono_store::reindex_pending(&path) {
+        return Err(reindex_text(&path, &backup, running));
     }
-    match Store::open(&path) {
-        Ok(store) => Some(store),
+    if !path.is_file() {
+        return Ok(None);
+    }
+    match Store::open_read(&path) {
+        Ok(store) => Ok(Some((store, path))),
         Err(err) => {
-            eprintln!(
-                "chrono-mcp: no se pudo abrir el índice {}: {err}",
-                path.display()
-            );
-            None
+            let msg = match err.downcast_ref::<chrono_store::SchemaMismatch>() {
+                Some(m) if m.is_unknown() => format!("chrono: {}: {err}", path.display()),
+                Some(m) if !m.is_newer() => format!(
+                    "chrono: el índice {p} es de una versión anterior de chrono (esquema {}; esta versión necesita el v{}). \
+                     Reconstrúyelo con las mismas fuentes: chrono --db {p} reindex",
+                    m.found_label(),
+                    m.want,
+                    p = path.display()
+                ),
+                Some(_) => format!("chrono: {err}"),
+                None => format!("chrono: no se pudo abrir el índice {}: {err}", path.display()),
+            };
+            eprintln!("{msg}");
+            Err(msg)
         }
     }
 }
 
 /// Sube desde el cwd buscando `.chrono/index.db` (mismo algoritmo que
-/// `discoverDB` en `cmd/chrono/main.go`).
+/// `discoverDB` del binario Go v0.1.1).
 fn discover_db() -> Option<PathBuf> {
     let mut dir = std::env::current_dir().ok()?;
     loop {
@@ -190,3 +268,7 @@ mod informe;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_contrato;
+#[cfg(test)]
+mod tests_adversario;

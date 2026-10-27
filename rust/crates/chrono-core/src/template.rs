@@ -69,7 +69,21 @@ fn normalize_segment(seg: &str) -> String {
     }
     let mut out = String::with_capacity(seg.len());
     let mut run_start: Option<usize> = None;
+    // Un marcador ya puesto (`<NUM>`) sigue la tira en la que está: si no,
+    // plantillizar una plantilla partía `deadbeef<NUM>x` en otra tira y
+    // `deadbeef` pasaba a `<HEX>` (no era idempotente).
+    let mut skip_to = 0;
     for (i, c) in seg.char_indices() {
+        if i < skip_to {
+            continue;
+        }
+        if c == '<' {
+            if let Some(m) = MARKERS.iter().find(|m| seg[i..].starts_with(*m)) {
+                skip_to = i + m.len();
+                run_start.get_or_insert(i);
+                continue;
+            }
+        }
         let word = c.is_alphanumeric() || c == '_';
         match (word, run_start) {
             (true, None) => run_start = Some(i),
@@ -87,6 +101,8 @@ fn normalize_segment(seg: &str) -> String {
     }
     out
 }
+
+const MARKERS: [&str; 5] = ["<NUM>", "<HEX>", "<IP>", "<UUID>", "<TS>"];
 
 /// Una tira de caracteres de palabra: hex (`0x…` o ≥6 con letra y dígito) o
 /// sus dígitos a `<NUM>`.
@@ -185,7 +201,10 @@ fn is_ipv4(s: &str) -> bool {
 /// Número hex: `0x…` con dígitos hex, o una tira de ≥6 hex que incluya al
 /// menos una letra a-f Y un dígito. La letra evita marcar como HEX un entero
 /// decimal largo (va a `<NUM>`); el dígito, marcar palabras que solo usan
-/// letras a-f (`facade`, `decade`, `accede`).
+/// letras a-f (`facade`, `decade`, `accede`). Desde 8 caracteres basta con que
+/// sea hex: un id aleatorio de 8 sale sin dígitos 1 de cada ~2 500 veces
+/// (`aebaadfc`), y cada uno era una plantilla nueva de un solo evento (medido:
+/// 53 de 68 plantillas a 1M); no hay palabras corrientes así de largas solo con a-f.
 fn is_hex_number(s: &str) -> bool {
     if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_hexdigit());
@@ -193,7 +212,7 @@ fn is_hex_number(s: &str) -> bool {
     s.len() >= 6
         && s.bytes().all(|b| b.is_ascii_hexdigit())
         && s.bytes().any(|b| b.is_ascii_alphabetic())
-        && s.bytes().any(|b| b.is_ascii_digit())
+        && (s.len() >= 8 || s.bytes().any(|b| b.is_ascii_digit()))
 }
 
 /// Sustituye cada tira maximal de dígitos por `<NUM>` (deja el resto intacto).
@@ -287,5 +306,12 @@ mod tests {
     fn palabras_de_letras_hex_no_son_hex() {
         assert_eq!(templatize("facade decade accede"), "facade decade accede");
         assert_eq!(templatize("sha f27eb09f merged"), "sha <HEX> merged");
+    }
+
+    #[test]
+    fn id_hex_sin_digitos_desde_ocho() {
+        // Ids aleatorios que salieron solo con letras: misma plantilla que el resto.
+        assert_eq!(templatize("retry 3/5 for job aebaadfc"), templatize("retry 3/5 for job 1f2e3d4c"));
+        assert_eq!(templatize("auth token deadbeef expired"), "auth token <HEX> expired");
     }
 }

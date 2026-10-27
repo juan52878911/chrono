@@ -39,6 +39,47 @@ pub trait Source {
         watermark: Option<Watermark>,
         cfg: &SourceConfig,
     ) -> Result<Box<dyn Cursor>>;
+
+    /// Opciones que el adaptador lee de `SourceConfig.options`, como
+    /// `(clave, ayuda)`. Es lo que `chrono config check` usa para señalar claves
+    /// desconocidas; las comunes a todas las fuentes (`adapter`, `redact`) no van aquí.
+    fn options(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
+
+    /// Comprueba los VALORES de las opciones (formas `clave=valor`, opciones que
+    /// requieren otra…) sin abrir nada. `chrono config check` la llama por fuente.
+    fn validate(&self, _cfg: &SourceConfig) -> Result<()> {
+        Ok(())
+    }
+
+    /// Claves de `attrs` que el índice guarda como dims (`event_dims`): la opción
+    /// común `dims`, o la de un preset del adaptador.
+    fn dims(&self, cfg: &SourceConfig) -> Vec<String> {
+        dims_option(cfg)
+    }
+
+    /// `entity_via`: el `rel` de link por el que un evento sin entidad toma la
+    /// del evento con su misma clave (ver el CLI). La opción común, o la de un
+    /// preset del adaptador.
+    fn entity_via(&self, cfg: &SourceConfig) -> Option<String> {
+        cfg.options.get("entity_via").map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    }
+
+    /// Opciones con que de verdad se ingiere (un preset del adaptador ya
+    /// desplegado): el CLI guarda su firma con la fuente y, si cambian, la reindexa.
+    fn ingest_options(&self, cfg: &SourceConfig) -> SourceConfig {
+        cfg.clone()
+    }
+}
+
+/// La opción `dims` (`"host,container"`) como lista ordenada y sin repetidos.
+pub fn dims_option(cfg: &SourceConfig) -> Vec<String> {
+    let mut dims: Vec<String> =
+        cfg.options.get("dims").map(|s| s.split(',').map(str::trim).filter(|k| !k.is_empty()).map(str::to_string).collect()).unwrap_or_default();
+    dims.sort();
+    dims.dedup();
+    dims
 }
 
 /// Cursor de streaming sobre una fuente: entrega eventos uno a uno con RAM constante.
@@ -83,6 +124,11 @@ impl Registry {
     }
 
     /// Busca un adaptador por su `kind` (para forzar con `--as`).
+    /// Todos los adaptadores registrados, en orden de registro.
+    pub fn all(&self) -> impl Iterator<Item = &dyn Source> {
+        self.sources.iter().map(|b| b.as_ref())
+    }
+
     pub fn by_kind(&self, kind: &str) -> Option<&dyn Source> {
         self.sources.iter().map(|s| s.as_ref()).find(|s| s.kind() == kind)
     }

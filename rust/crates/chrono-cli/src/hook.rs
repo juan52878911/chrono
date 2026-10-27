@@ -1,8 +1,9 @@
 //! `chrono hook <modo>`: chrono como intermediario entre las herramientas y el
 //! modelo, para los hooks de Claude Code. Sustituye al prototipo en Python.
 //!
-//! Solo actúa donde `.chrono/intermediario.json` lo pide (lo escribe la skill
-//! `chrono-intermediario`) y por encima de sus límites; en cualquier otro caso
+//! Solo actúa donde la config del intermediario lo pide (clave `intermediario`
+//! de `.chrono/config.json` o el antiguo `.chrono/intermediario.json`; la escribe
+//! la skill `chrono-intermediario`) y por encima de sus límites; en cualquier otro caso
 //! no imprime nada y la herramienta sigue igual. Nunca rompe la herramienta: un
 //! error se apunta en `CHRONO_INTERMEDIARIO_LOG` (si está) y se sale con 0.
 //!
@@ -77,9 +78,8 @@ fn handle(mode: &str, ev: &Value) -> R<Option<String>> {
         return Ok(edit_hint(ev)?.map(|ctx| json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": ctx}}).to_string()));
     }
     let cwd = ev.get("cwd").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let Some(root) = find_root(&cwd) else { return Ok(None) };
-    let cfg: Value = serde_json::from_str(&std::fs::read_to_string(root.join(".chrono/intermediario.json")).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("intermediario.json: {e}"))?;
+    let Some((root, cfg)) = find_root(&cwd) else { return Ok(None) };
+    let cfg = cfg?;
     if !cfg.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
         return Ok(None);
     }
@@ -146,11 +146,13 @@ fn wild(p: &[u8], s: &[u8]) -> bool {
     }
 }
 
-fn find_root(start: &Path) -> Option<PathBuf> {
+/// Primer directorio, subiendo desde `start`, con config del intermediario
+/// (`config.json#intermediario` o el antiguo `intermediario.json`), y esa config.
+fn find_root(start: &Path) -> Option<(PathBuf, R<Value>)> {
     let mut d = start.to_path_buf();
     loop {
-        if d.join(".chrono/intermediario.json").is_file() {
-            return Some(d);
+        if let Some(cfg) = chrono_classify_rules::load_intermediario(&d) {
+            return Some((d, cfg));
         }
         if !d.pop() {
             return None;
@@ -190,16 +192,20 @@ fn to_ns(v: Option<&str>, default: &str) -> R<i64> {
             return Ok(now_ns);
         }
         let d = rest.strip_prefix('-').and_then(crate::timeutil::parse_duration).ok_or(format!("tiempo no válido: {v}"))?;
-        return Ok(now_ns - d * 1_000_000);
+        return Ok(now_ns.saturating_sub(d.saturating_mul(1_000_000)));
     }
     let (main, offset_secs) = split_offset(v);
     let (base, frac) = match main.split_once('.') {
         Some((b, f)) => (b, f),
         None => (main, ""),
     };
+    // Cifras ASCII: cortar una fracción con `é` en el byte 9 era un panic.
+    if !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("tiempo no válido: {v}"));
+    }
     let ms = crate::timeutil::parse_since(base).ok_or(format!("tiempo no válido: {v}"))?;
     let frac_ns: i64 = format!("{:0<9}", &frac[..frac.len().min(9)]).parse().unwrap_or(0);
-    Ok((ms - offset_secs * 1000) * 1_000_000 + frac_ns)
+    Ok((ms - offset_secs * 1000).saturating_mul(1_000_000).saturating_add(frac_ns))
 }
 
 fn split_offset(v: &str) -> (&str, i64) {
@@ -310,8 +316,8 @@ fn covered_windows(root: &Path, selector: &str) -> Vec<(i64, i64)> {
 /// encuentre los datos.
 fn prefetch(ev: &Value) -> R<()> {
     let cwd = ev.get("cwd").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let Some(root) = find_root(&cwd) else { return Ok(()) };
-    let cfg: Value = serde_json::from_str(&std::fs::read_to_string(root.join(".chrono/intermediario.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let Some((root, cfg)) = find_root(&cwd) else { return Ok(()) };
+    let cfg = cfg?;
     for rule in cfg.get("rules").and_then(Value::as_array).cloned().unwrap_or_default() {
         let Some(pf) = rule.get("prefetch") else { continue };
         let Some(sel) = pf.get("selector").and_then(Value::as_str) else { continue };
@@ -548,10 +554,9 @@ fn loki_index(job: &Value) -> R<()> {
     let root = PathBuf::from(job["root"].as_str().ok_or("sin root")?);
     let dir = root.join(".chrono/mcp");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let lock = dir.join("loki.index.lock");
-    if std::fs::create_dir(&lock).is_err() {
+    let Some(_lock) = try_lock_file(&dir.join("loki.index.flock"))? else {
         return Ok(()); // otro proceso indexando
-    }
+    };
     let res = (|| -> R<()> {
         let cover_p = dir.join("loki.cover.json");
         let mut cover: Vec<Value> = std::fs::read_to_string(&cover_p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -574,8 +579,22 @@ fn loki_index(job: &Value) -> R<()> {
         log(&format!("loki-index {selector} → {} líneas{}", rows.len(), if more { " (incompleto)" } else { "" }));
         Ok(())
     })();
-    let _ = std::fs::remove_dir(&lock);
     res
+}
+
+/// Cerrojo exclusivo del SO sobre `path` sin esperar: `None` si otro proceso lo
+/// tiene. Se suelta al soltar el fichero, también si el proceso muere: antes
+/// era un directorio (`loki.index.lock`) que, si el proceso moría, se quedaba
+/// para siempre y todo `loki_index` posterior salía bien sin traer nada. Ese
+/// directorio viejo se quita si está.
+fn try_lock_file(path: &Path) -> R<Option<std::fs::File>> {
+    let _ = std::fs::remove_dir(path.with_file_name("loki.index.lock"));
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).map_err(|e| e.to_string())?;
+    match f.try_lock() {
+        Ok(()) => Ok(Some(f)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(e.to_string()),
+    }
 }
 
 // ── Ingesta y resumen ─────────────────────────────────────────────────────────
@@ -595,6 +614,9 @@ fn ingest(root: &Path, name: &str, rows: &[Value]) -> R<String> {
         let line = r.to_string();
         let k = format!("{:016x}", chrono_core_hash(&line));
         if seen.insert(k.clone()) {
+            // Lo que devolvió el MCP queda en disco: sin secretos (como el caché de `cmd:`).
+            let mut red = r.clone();
+            let line = if crate::command::redact_json(&mut red) > 0 { red.to_string() } else { line };
             writeln!(out, "{line}").map_err(|e| e.to_string())?;
             writeln!(keys, "{k}").map_err(|e| e.to_string())?;
         }
@@ -1108,11 +1130,10 @@ fn edit_hint(ev: &Value) -> R<Option<String>> {
 fn verify_numbers(ev: &Value) -> R<Option<String>> {
     // Opt-in (medido con Opus: al bloquear, el modelo responde al aviso y ESE mensaje queda como respuesta
     // final, tapando la buena; y los falsos positivos —un código HTTP, una suma de 4 cifras— lo disparan).
-    // Se activa con CHRONO_VERIFY=1 o "verify": true en .chrono/intermediario.json.
+    // Se activa con CHRONO_VERIFY=1 o "verify": true en la config del intermediario.
     let cwd = ev.get("cwd").and_then(Value::as_str).map(PathBuf::from).unwrap_or_default();
     let by_config = find_root(&cwd)
-        .and_then(|r| std::fs::read_to_string(r.join(".chrono/intermediario.json")).ok())
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|(_, c)| c.ok())
         .and_then(|c| c.get("verify").and_then(Value::as_bool))
         .unwrap_or(false);
     let on = match std::env::var("CHRONO_VERIFY").as_deref() {
@@ -1317,6 +1338,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn encuentra_la_lista_de_registros_mas_larga() {
+        let v = json!({"meta": {"n": 2}, "data": {"result": [{"a": 1}, {"a": 2}, {"a": 3}]}, "tags": [{"x": 1}]});
+        assert_eq!(find_records(&v).len(), 3);
+        // Una lista de escalares no son registros.
+        assert!(find_records(&json!({"ids": [1, 2, 3, 4]})).is_empty());
+    }
+
+    #[test]
+    fn resumen_con_cifras_exactas_por_nivel() {
+        let rows: Vec<Value> = (0..10)
+            .map(|i| {
+                let level = if i < 7 { "ERROR" } else if i < 9 { "INFO" } else { "" };
+                let msg = if i < 7 { format!("timeout after {i}ms") } else { "FATAL: disk full".to_string() };
+                json!({"ts": 1_760_000_000_000i64 + i, "level": level, "service": if i % 2 == 0 { "api" } else { "db" }, "msg": msg})
+            })
+            .collect();
+        let s = summary(&rows, "cabecera", Some("jsonl:x"), &[], "", &["service"]);
+        assert!(s.contains("service: api=5, db=5"), "{s}");
+        assert!(s.contains("ERROR: 7× timeout after <NUM>ms"), "{s}");
+        // INFO no se lista; la línea sin nivel se dice aparte, con lo que dice su texto.
+        assert!(!s.contains("INFO:"), "{s}");
+        assert!(s.contains("(1 líneas sin nivel de la fuente, aunque su texto dice FATAL=1"), "{s}");
+        assert!(s.contains("Las 10 filas están en chrono (source=jsonl:x)"), "{s}");
+    }
+
+    #[test]
+    fn solo_intercepta_lecturas_completas_de_ficheros_de_datos() {
+        let dir = std::env::temp_dir().join(format!("chrono-hook-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("app.log");
+        std::fs::write(&f, "a\nb\n").unwrap();
+        let rc = json!({});
+        let p = f.to_string_lossy().to_string();
+        assert_eq!(data_file(&rc, &json!({"file_path": p})).map(|(_, n)| n), Some(4));
+        assert!(data_file(&rc, &json!({"file_path": p, "offset": 10})).is_none());
+        assert!(data_file(&rc, &json!({"file_path": p, "limit": 5})).is_none());
+        let md = dir.join("notas.md");
+        std::fs::write(&md, "x").unwrap();
+        assert!(data_file(&rc, &json!({"file_path": md.to_string_lossy()})).is_none());
+        // Con extensiones propias en la config.
+        assert!(data_file(&json!({"extensions": [".md"]}), &json!({"file_path": md.to_string_lossy()})).is_some());
+        // Por debajo de deny_bytes no se niega la lectura.
+        assert!(read_deny(&json!({"read": {}}), &json!({"file_path": p}), &dir).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn salidas_pequenas_de_mcp_pasan_sin_tocar() {
+        let dir = std::env::temp_dir().join(format!("chrono-hook-rec-{}", std::process::id()));
+        let small = json!([{"type": "text", "text": "[{\"a\":1},{\"a\":2}]"}]);
+        assert!(adapter_records(&json!({}), "mcp__x__q", Some(&small), &dir).unwrap().is_none());
+        // Grande pero con pocos registros: tampoco (min_records).
+        let pad = "x".repeat(40_000);
+        let few = json!([{"type": "text", "text": format!("[{{\"msg\":\"{pad}\"}}]")}]);
+        assert!(adapter_records(&json!({}), "mcp__x__q", Some(&few), &dir).unwrap().is_none());
+        assert!(!dir.exists(), "no debe escribir nada si no intercepta");
+    }
+
+    #[test]
     fn verificador_marca_solo_conteos_sin_respaldo() {
         let allowed: std::collections::BTreeSet<i64> = [51, 11, 25, 28, 12, 8, 9, 6573].into_iter().collect();
         let ans = "FATAL 51 (postgres 51), ERROR 11; total graves 62 (51 + 11).\nA las 19:08:17 y el 2026-10-14T22:00:00Z; \
@@ -1387,11 +1467,47 @@ mod tests {
         assert!((now - ago - 3_600_000_000_000).abs() < 2_000_000_000);
     }
 
+    /// Tiempos de la entrada de una tool (los escribe el modelo): nunca panic.
+    #[test]
+    fn tiempos_raros_no_hacen_panic() {
+        for v in [
+            "2026-10-14T22:00:00.12345678é", "2026-10-14T22:00:00.😀Z", "2026-10-14T22:00:00.1é+02:00",
+            "now-9223372036854775807", "now-99999999999d", "now-", "now+1h", "now-0", "nowé", "T", "-", "+", "Z", ".",
+            "2026-10-14T22:00:00+", "2026-10-14T22:00:00+é", "2026-10-14T22:00:00-99:99", "0000-01-01T00:00:00Z",
+            "9999-12-31T23:59:59.999999999Z", "2026-10-14T", "2026-10-14Té",
+        ] {
+            let r = std::panic::catch_unwind(|| to_ns(Some(v), "now"));
+            assert!(r.is_ok(), "panic con {v:?}");
+        }
+        assert!(to_ns(Some("2026-10-14T22:00:00.12345678é"), "now").is_err());
+    }
+
     #[test]
     fn truncado_por_metadatos() {
         let r = json!([{"type": "text", "text": "{\"data\":[],\"metadata\":{\"linesReturned\":100,\"maxLinesAllowed\":100}}"}]);
         assert!(looked_truncated(Some(&r), 100));
         let r = json!([{"type": "text", "text": "{\"data\":[],\"metadata\":{\"linesReturned\":7,\"maxLinesAllowed\":100,\"resultsTruncated\":false}}"}]);
         assert!(!looked_truncated(Some(&r), 100));
+    }
+
+    #[test]
+    fn el_cerrojo_de_loki_no_se_queda_colgado() {
+        let dir = std::env::temp_dir().join(format!("chrono-loki-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("loki.index.lock")).unwrap();
+        let path = dir.join("loki.index.flock");
+        // El directorio que dejó un proceso muerto ya no bloquea.
+        let held = try_lock_file(&path).unwrap().expect("libre");
+        assert!(!dir.join("loki.index.lock").exists());
+        assert!(try_lock_file(&path).unwrap().is_none(), "mientras otro lo tiene, no");
+        drop(held);
+        // Al soltarlo (o morir el proceso), se libera. Otros tests lanzan comandos
+        // en paralelo y entre su `fork` y su `exec` el hijo hereda el descriptor.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while try_lock_file(&path).unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "el cerrojo no se soltó");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

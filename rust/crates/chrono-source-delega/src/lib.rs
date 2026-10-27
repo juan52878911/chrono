@@ -93,9 +93,13 @@ fn parse_offset(s: &str) -> Option<i64> {
         _ => return None,
     };
     let r = s[1..].replace(':', "");
+    if r.len() != 2 && r.len() != 4 || !r.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     let hh: i64 = r.get(0..2)?.parse().ok()?;
     let mm: i64 = r.get(2..4).unwrap_or("00").parse().ok()?;
-    Some(sign * (hh * 3600 + mm * 60))
+    let off = hh * 3600 + mm * 60;
+    (mm < 60 && off <= util::MAX_OFFSET_S).then_some(sign * off)
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -114,7 +118,8 @@ fn parse_mark(v: &str) -> Option<Mark> {
             "mt" => m.mt = val.parse().ok()?,
             "a" => m.audit_off = val.parse().ok()?,
             "p" => m.audit_hash = Some(val.to_string()),
-            "tz" => m.tz = Some(val.parse().ok()?),
+            // Un offset fuera de ±18 h no lo escribe esta fuente: watermark ajeno.
+            "tz" => m.tz = Some(val.parse().ok().filter(|t: &i64| t.abs() <= util::MAX_OFFSET_S)?),
             _ => {}
         }
     }
@@ -139,9 +144,41 @@ fn observed_offset(dirs: &[PathBuf]) -> Option<i64> {
     votes.iter().max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0))).map(|(o, _)| *o)
 }
 
+/// Sal de los ids posicionales de `audit.jsonl` (`delega:audit:<sal>:<byte>`): el
+/// byte de una línea solo es único dentro de su fichero, y dos directorios de estado
+/// indexados como fuentes (dos máquinas, una copia) daban el mismo id a líneas
+/// distintas; con `INSERT OR IGNORE` la segunda se perdía. Los ids de trabajo
+/// (`delega:<trabajo>:…`) no la llevan: el nombre de la carpeta es la identidad
+/// del trabajo (como el `run` de Nod o el sha de git).
+fn audit_salt(source_id: &str) -> String {
+    format!("{:08x}", simhash::fnv1a64(source_id.as_bytes()) >> 32)
+}
+
+const OPTIONS: &[(&str, &str)] = &[
+    ("utc_offset", "offset de la hora local de delega (±hh:mm); sin ella se deduce de los trabajos"),
+    ("forbidden_terms", "fichero de términos a redactar (uno por línea), además del forbidden.txt de cada trabajo"),
+];
+
+fn check_options(cfg: &SourceConfig) -> CoreResult<()> {
+    if let Some(v) = cfg.options.get("utc_offset").filter(|v| !v.trim().is_empty()) {
+        if parse_offset(v).is_none() {
+            return Err(CoreError::Other(format!("utc_offset {v:?} no válido: se espera ±hh:mm (hasta ±18:00) o Z")));
+        }
+    }
+    Ok(())
+}
+
 impl Source for DelegaSource {
     fn kind(&self) -> &str {
         "delega"
+    }
+
+    fn options(&self) -> &'static [(&'static str, &'static str)] {
+        OPTIONS
+    }
+
+    fn validate(&self, cfg: &SourceConfig) -> CoreResult<()> {
+        check_options(cfg)
     }
 
     fn detect(&self, path: &Path) -> i32 {
@@ -163,6 +200,8 @@ impl Source for DelegaSource {
         if !path.is_dir() {
             return Err(CoreError::Other(format!("{} no es un directorio de estado de delega", path.display())));
         }
+        // Un `utc_offset` mal escrito se ignoraba y las horas salían con el deducido.
+        check_options(cfg)?;
         let prev = match &watermark {
             None => None,
             Some(wm) => Some(parse_mark(&wm.value).ok_or_else(|| CoreError::Diverged(wm.value.clone()))?),
@@ -179,7 +218,8 @@ impl Source for DelegaSource {
         let abs = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let source_id = format!("delega:{}", abs.to_string_lossy());
         let names: Vec<String> = dirs.iter().filter_map(|d| d.file_name().and_then(|n| n.to_str()).map(str::to_string)).collect();
-        let ctx = job::Ctx { source_id: &source_id, offset_s, terms: &terms, jobs: &names };
+        let salt = audit_salt(&source_id);
+        let ctx = job::Ctx { source_id: &source_id, audit_salt: &salt, offset_s, terms: &terms, jobs: &names };
 
         let mut events: Vec<Event> = Vec::new();
         let mut stats: BTreeMap<String, String> = BTreeMap::new();

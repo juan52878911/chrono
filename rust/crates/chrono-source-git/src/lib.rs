@@ -25,7 +25,7 @@ mod timeutil;
 
 pub use blame::{blame, file_lines, Blame, BlameCommit};
 pub use branches::{branches, Branch, BranchAuthor, BranchTip};
-pub use gitutil::{blob_lines, commit_exists, git_version, head_sha, is_shallow, ls_tree, Result};
+pub use gitutil::{blob_lines, commit_exists, git_version, head_is_unborn, head_sha, is_shallow, ls_tree, unborn_head, Result};
 pub use show::{show, Show};
 
 use chrono_core::{CoreError, Result as CoreResult, Source, SourceConfig, Watermark};
@@ -70,6 +70,12 @@ impl Source for GitSource {
         }
     }
 
+    fn options(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("rev", "rama o revisión a indexar (p. ej. origin/dev)"),
+        ]
+    }
+
     fn open(
         &self,
         path: &Path,
@@ -89,6 +95,11 @@ impl Source for GitSource {
         // no el HEAD del checkout, que en un repo con worktrees puede ser
         // cualquier rama vieja. Por defecto, HEAD.
         let rev = cfg.options.get("rev").map(String::as_str).filter(|r| !r.trim().is_empty()).unwrap_or("HEAD");
+        // Repo recién creado, sin commits: fuente vacía con watermark vacío (el
+        // `sync` siguiente la lee entera en cuanto haya un commit).
+        if rev == "HEAD" && head_is_unborn(path) {
+            return Ok(Box::new(cursor::EmptyCursor));
+        }
         let head = if rev == "HEAD" {
             head_sha(path).map_err(|e| CoreError::Other(format!("leyendo HEAD: {e}")))?
         } else {

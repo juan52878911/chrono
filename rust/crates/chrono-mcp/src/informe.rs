@@ -28,6 +28,7 @@ fn logs(conn: &rusqlite::Connection, args: &Value, since_epoch: i64) -> Result<V
         kind: sc.kind,
         entity: sc.entity,
         attr: sc.attr,
+        join: sc.join,
         infer_level: false,
         until_epoch: sc.until_epoch,
     };
@@ -98,8 +99,8 @@ fn logs(conn: &rusqlite::Connection, args: &Value, since_epoch: i64) -> Result<V
         by_origin: true,
         ..Default::default()
     };
-    let (eps, common) = chrono_metrics::precede(conn, &o)?;
-    let n_eps = eps.len();
+    let r = chrono_metrics::precede(conn, &o)?;
+    let (eps, common, n_eps) = (&r.episodes, &r.common, r.episodes_total);
     let episodios: Vec<Value> = eps
         .iter()
         .map(|e| {
@@ -122,10 +123,7 @@ fn logs(conn: &rusqlite::Connection, args: &Value, since_epoch: i64) -> Result<V
                    "antes": if antes.is_empty() { Value::Null } else { json!(antes.join(" | ")) }})
         })
         .collect();
-    let comunes: Vec<Value> = common
-        .iter()
-        .map(|c| json!({"before_episodes": format!("{}/{}", c.episodes, n_eps), "level": c.level, "template": c.template}))
-        .collect();
+    let comunes: Vec<Value> = common.iter().map(|c| crate::tools::common_json(c, n_eps)).collect();
     // Consultas siguientes, ya escritas.
     let mut siguientes: Vec<String> = Vec::new();
     for t in graves.iter().take(2) {

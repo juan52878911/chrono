@@ -9,4 +9,4 @@ repository.workspace = true
 [dependencies]
 chrono-core = { path = "../chrono-core" }
 # SQLite estático embebido (bundled compila SQLite 3.46 con FTS5). Sin runtime externo.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }

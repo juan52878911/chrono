@@ -77,7 +77,7 @@ pub fn commit_facts(conn: &Connection, shas: &[String]) -> Result<Vec<CommitFact
         };
         let fix: Option<(String, f64)> = conn
             .query_row(
-                "SELECT label, confidence FROM labels WHERE event_id = ?1 AND task = 'is_fix'",
+                "SELECT label, confidence FROM labels WHERE event_rid = (SELECT rid FROM events WHERE id = ?1) AND task = 'is_fix'",
                 params![sha],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -89,10 +89,10 @@ pub fn commit_facts(conn: &Connection, shas: &[String]) -> Result<Vec<CommitFact
             None => FixCertainty::No,
         };
         let category: String = conn
-            .query_row("SELECT label FROM labels WHERE event_id = ?1 AND task = 'bug_category'", params![sha], |r| r.get(0))
+            .query_row("SELECT label FROM labels WHERE event_rid = (SELECT rid FROM events WHERE id = ?1) AND task = 'bug_category'", params![sha], |r| r.get(0))
             .optional()?
             .unwrap_or_default();
-        let mut stmt = conn.prepare("SELECT target FROM links WHERE event_id = ?1 AND rel IN ('ticket', 'pr') ORDER BY target")?;
+        let mut stmt = conn.prepare("SELECT target FROM links WHERE event_rid = (SELECT rid FROM events WHERE id = ?1) AND rel IN ('ticket', 'pr') ORDER BY target")?;
         let targets: Vec<String> = stmt.query_map(params![sha], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
         let mut tickets = Vec::new();
         for target in targets {
@@ -125,7 +125,7 @@ pub fn co_changes(conn: &Connection, shas: &[String], file: &str, min_commits: i
     let mut stmt = conn.prepare(
         "SELECT en.key FROM touches t
          JOIN entities en ON en.id = t.entity_id
-         JOIN events e ON e.id = t.event_id
+         JOIN events e ON e.rid = t.event_rid
          WHERE e.id = ?1 AND e.kind = 'commit' AND e.is_bulk = 0",
     )?;
     let own_symbols = format!("{file}#");

@@ -19,6 +19,13 @@ This is **the product contract**: which questions chrono answers and their exact
 - **`token_budget`** is explicit: chrono trims to `max_items` and flags `truncated`.
 - **`window`** always present: every metric is relative to a time window.
 - **`manifest`** makes the answer reproducible and citable.
+- **`result.hints`** (optional, first key of `result`, in the user's language): why a result is empty or partial when it is not an error — `top attr:<key>` or `stats <attr>` with a key no event has (or with no numeric values), `hotspots` without a git source, time `correlate` with a single source (suggests `--via`), `session_patterns` without Nod events, events with no time left out of `timeline` (also counted in `result.untimed`). A `--level` no event has, and a flag that does not apply to the command, are warned on stderr. Over MCP, the tools with a header (`top`, `stats`, `timeline`, `events`, `patterns`, `precede`, `informe`) show them, and an unknown `level`, as `⚠` lines (`meta.warnings` with `format=json`); the rest keep `hints` in the result. MCP `top attr:<key>` counts `(resto)` only over events that have the key, and those without it in a separate `(sin valor)` row.
+- Lists that always come whole (`sources`, `phases`, `tickets`, `show`, `bench`) report `max_items = returned` and `truncated: false`.
+- **Nothing is left out without a count.** Fields that say what a result does not cover:
+  - `gaps`: `order` (`to_after_first_from` by default, `any` with `--any-order`), `units`, `covered`, `missing`, `from_without_key` (A events with no value of the key or of `--by`) and `units_without_time` (units whose A events have no time; neither covered nor missing).
+  - `precede`: `episodes_total` and «before x/N» over every episode (`limit` only bounds the returned ones), `precursors_total` (distinct precursors seen; `common_precursors` brings the first 10), `anchors_without_time` (only when > 0) and, with `--join`, `anchors_without_key`. Each common precursor brings `active_episodes` (episodes whose previous window had activity from the template's sources), `expected` and `lift`; the three are `null` with `--join`, or when the template is not in the rollups or they are behind.
+  - `sources`: `stale_dims_events` (only when > 0: events kept with the dims or options from before, because the source could not be re-read whole) and `sync_error` (the last `sync` could not read that source; time and error).
+- `events` lists in time order; `--order desc` (MCP `order=desc`) returns the newest first.
 
 ## Question catalog
 

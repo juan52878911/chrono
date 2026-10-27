@@ -160,13 +160,13 @@ fn vecinos(conn: &Connection, nodo: &str) -> Result<Vec<(String, String)>> {
 
     // Links propios del nodo: (rel, target).
     let propios: Vec<(String, String)> = {
-        let mut stmt = conn.prepare("SELECT rel, target FROM links WHERE event_id = ?1")?;
+        let mut stmt = conn.prepare("SELECT rel, target FROM links WHERE event_rid = (SELECT rid FROM events WHERE id = ?1)")?;
         let rows = stmt.query_map(params![nodo], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect::<std::result::Result<_, _>>()?
     };
 
     let mut mismo_target = conn
-        .prepare("SELECT event_id FROM links WHERE rel = ?1 AND target = ?2 AND event_id != ?3")?;
+        .prepare("SELECT e.id FROM links l JOIN events e ON e.rid = l.event_rid WHERE l.rel = ?1 AND l.target = ?2 AND e.id != ?3")?;
     for (rel, target) in &propios {
         // 1. Target compartido (co-ticket, co-pr, revierten lo mismo).
         let rows = mismo_target.query_map(params![rel, target, nodo], |r| r.get::<_, String>(0))?;
@@ -189,7 +189,7 @@ fn vecinos(conn: &Connection, nodo: &str) -> Result<Vec<(String, String)>> {
         let prefijos: Vec<&str> = (MIN_SHA_PREFIX..40).map(|n| &nodo[..n]).collect();
         let marcas = vec!["?"; prefijos.len()].join(",");
         let mut stmt = conn.prepare(&format!(
-            "SELECT event_id, target FROM links WHERE rel = 'commit' AND target IN ({marcas})"
+            "SELECT e.id, l.target FROM links l JOIN events e ON e.rid = l.event_rid WHERE l.rel = 'commit' AND l.target IN ({marcas})"
         ))?;
         let filas: Vec<(String, String)> = stmt
             .query_map(rusqlite::params_from_iter(prefijos.iter()), |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -202,7 +202,7 @@ fn vecinos(conn: &Connection, nodo: &str) -> Result<Vec<(String, String)>> {
     }
 
     // 2b. Referencia inversa: eventos cuyo link apunta a este nodo.
-    let mut apuntan = conn.prepare("SELECT event_id, rel FROM links WHERE target = ?1")?;
+    let mut apuntan = conn.prepare("SELECT e.id, l.rel FROM links l JOIN events e ON e.rid = l.event_rid WHERE l.target = ?1")?;
     let rows = apuntan.query_map(params![nodo], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
     })?;

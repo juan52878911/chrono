@@ -1,0 +1,106 @@
+{
+  "version": "chrono 0.6.0",
+  "n": 1000000,
+  "binario_bytes": 2427712,
+  "ingesta": {
+    "s": 23.078,
+    "rss_mb": 645.4,
+    "db_bytes": 321425408,
+    "bytes_por_evento": 321.4
+  },
+  "plantillas": 15,
+  "dbstat_mb": {
+    "events": 122.1,
+    "sqlite_autoindex_events_1": 27.8,
+    "idx_events_level": 22.9,
+    "events_fts_data": 20.0,
+    "idx_events_actor": 18.8,
+    "idx_events_srcref_at": 18.3,
+    "touches": 18.2,
+    "idx_events_at": 17.2,
+    "idx_event_dims_ev": 11.3,
+    "idx_touches_ent": 11.2,
+    "events_fts_docsize": 11.1,
+    "event_dims": 11.0
+  },
+  "sync_noop_s": 0.005,
+  "cli": {
+    "informe": {
+      "s": 1.857,
+      "rss_mb": 46.1,
+      "bytes": 5211
+    },
+    "top entity": {
+      "s": 0.018,
+      "rss_mb": 8.9,
+      "bytes": 1644
+    },
+    "top attr:host": {
+      "s": 0.029,
+      "rss_mb": 17.6,
+      "bytes": 860
+    },
+    "top level": {
+      "s": 0.025,
+      "rss_mb": 14.4,
+      "bytes": 576
+    },
+    "patterns --level ERROR,FATAL": {
+      "s": 0.025,
+      "rss_mb": 11.0,
+      "bytes": 2336
+    },
+    "patterns --entity svc-3": {
+      "s": 0.011,
+      "rss_mb": 9.4,
+      "bytes": 2336
+    },
+    "patterns": {
+      "s": 0.013,
+      "rss_mb": 5.6,
+      "bytes": 2352
+    },
+    "timeline --bucket 1h": {
+      "s": 0.007,
+      "rss_mb": 4.8,
+      "bytes": 3763
+    },
+    "timeline --bucket 1h --by level": {
+      "s": 0.045,
+      "rss_mb": 16.2,
+      "bytes": 14314
+    },
+    "precede --grep refused --level ERROR": {
+      "s": 0.208,
+      "rss_mb": 26.4,
+      "bytes": 50534
+    },
+    "precede --level FATAL": {
+      "s": 0.248,
+      "rss_mb": 26.4,
+      "bytes": 1426
+    },
+    "events --level FATAL --limit 50": {
+      "s": 0.19,
+      "rss_mb": 24.5,
+      "bytes": 20744
+    },
+    "search refused": {
+      "s": 0.056,
+      "rss_mb": 23.0,
+      "bytes": 4215
+    }
+  },
+  "mcp": {
+    "tools": 24,
+    "esquemas_bytes": 23078,
+    "respuestas_bytes": {
+      "informe {}": 5210,
+      "top {\"dim\": \"entity\"}": 417,
+      "events {\"level\": \"ERROR\"}": 7168,
+      "precede {\"level\": \"ERROR\", \"grep\": \"refused\"}": 2050,
+      "patterns {\"level\": \"ERROR,FATAL\"}": 992,
+      "timeline {\"by\": \"level\"}": 3876
+    }
+  }
+}

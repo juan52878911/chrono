@@ -21,6 +21,8 @@ Antes de contar con otra herramienta, mira qué hay indexado:
 
 Si la ventana que te piden está dentro, las cifras salen de chrono (sección 2). Si no está,
 cárgalo (sección 1) o, si no puedes, dilo y usa la otra herramienta solo para leer detalle.
+Una fuente con `sync_error` no se pudo leer en el último `sync`: sus cifras pueden ir atrasadas (dilo).
+Si chrono responde que el índice es de otro esquema o que un reindex no terminó: `chrono reindex`.
 
 ## 1. Meterlo en el índice
 
@@ -29,12 +31,28 @@ cárgalo (sección 1) o, si no puedes, dilo y usa la otra herramienta solo para 
   nuevo (el plugin de Claude Code ejecuta `sync` al empezar la sesión).
 - **Fichero**: `chrono add <fichero>`. Detecta JSONL/NDJSON, CSV, syslog/nginx y texto
   (`--as jsonl|csv|textlog|template` para forzarlo).
+- **Muchos ficheros**: `chrono add '<dir>/**/*.jsonl' --as jsonl --name <alias>` (entre comillas) es UNA
+  fuente; `sync` solo relee los ficheros nuevos o cambiados, y `--source <alias>` filtra.
+  Sesiones de Claude Code: `chrono add '~/.claude/projects/**/*.jsonl' --as jsonl --name claude
+  --preset claude-sessions` (una tool = un evento; entidad = la tool, ERROR si falló; sin el input
+  ni el contenido, salvo la primera línea de los errores). Qué precede a un fallo:
+  `precede` con `level=ERROR entity=Bash before_levels=*` (`join=sessionId`: solo lo de la misma sesión).
+- **Relacionar fuentes por clave**: `relations` en `.chrono/config.json` (versión 2) declara de dónde sale
+  una clave en cada fuente (campo, `link:<rel>` o patrón sobre la ruta/el título, p. ej.
+  `{"relations": {"prueba": [{"source": "pruebas", "field": "file", "pattern": "prueba-(\\d+)"}, …]}}`;
+  `chrono config check` la valida). Una dim (`sessionId`) o un link (`ticket`, `tool_use`) ya son claves.
+- **Inventario de una carpeta** (PDF, imágenes, audio…): `chrono add <carpeta> --as dir`: un evento
+  por fichero con tipo, formato, tamaño y fechas; la carpeta es la entidad
+  (`top attr:type`, `stats size --by attr:type`). No lee el contenido.
 - **Salida de un comando**: declárala en `.chrono/config.json` → `commands` y `chrono add cmd:<nombre>`,
   o guárdala en un fichero y añádelo.
 - Fuera de un repo, o para no mezclar: `--db /tmp/analisis/index.db` en cada comando.
 - Si los campos no se detectan solos, en `options` del comando (o `source_options`):
   `time_field`, `message_field`, `level_field`, `entity_field` (el servicio), `kind`, `id_field`,
-  `links` (`commit=sha`), `explode`.
+  `links` (`commit=sha`), `explode`, `level_map` (`true=ERROR`), `where`, `attrs`, `dims` (attrs por los
+  que se agrupa o filtra a menudo, p. ej. `host,container`: indexadas). `chrono config check`
+  valida `.chrono/config.json` y dice qué clave falla y por qué. Cambiar dims u opciones reindexa la
+  fuente en el siguiente `sync`; una dim vale sin prefijo en `top` (`top host` = `top attr:host`).
 
 ## 2. Preguntar
 
@@ -53,13 +71,23 @@ En el CLI son `--since`, `--until`, `--level`… y siempre `--compact`.
 | Qué escupe un servicio | `patterns` entity=product_service | `chrono patterns --entity product_service` |
 | Desde cuándo / picos / incidentes | `timeline` grep="<mensaje>" bucket_secs=600 | `chrono timeline --grep "<mensaje>" --bucket 10m` |
 | Cuántas veces pasó X, cuándo y qué lo precede | `precede` grep="<mensaje de X>" attr=container:<nombre> | `chrono precede --grep "<mensaje>" --attr container:<nombre>` |
-| Qué pasó justo antes de X | `events` entity=postgres until=<ts> limit=30 | `chrono events --entity postgres --until <ts>` |
+| Qué pasó justo antes de X (o lo último que pasó) | `events` entity=postgres until=<ts> order=desc limit=30 | `chrono events --entity postgres --until <ts> --order desc --limit 30` |
 | Una traza o excepción completa | `events` entity=<svc> since=<ts> limit=80 | `chrono events --entity <svc> --since <ts> --limit 80` |
-| Latencias, tamaños, duraciones | `stats` attr=duration_s by=entity | `chrono stats duration_s --by entity` |
+| Latencias, tamaños, duraciones | `stats` attr=duration_s by=entity (filtro clave:valor en where_attr, no en attr) | `chrono stats duration_s --by entity [--attr clave:valor]` |
 | Qué hubo en OTRAS fuentes alrededor | `correlate` id=<evento> delta_secs=1800 | `chrono correlate <id> --delta 30m --kind commit` |
+| Qué comparte una clave con un evento (misma sesión, sha, prueba) | `correlate` id=<evento> via=<clave> | `chrono correlate <id> --via <clave>` |
+| Los eventos de una clave | `events` join=<clave>=<valor> | `chrono events --join <clave>=<valor>` |
+| X sin Y (pruebas sin resultado, sesiones sin commit; solo cubre un Y posterior al primer X, any_order=true para cualquiera) | `gaps` from="<fuente> kind=…" to=<fuente> via=<clave> by=<unidad> | `chrono gaps --from '<fuente> grep=texto con espacios' --to <fuente> --via <clave> --by <unidad> [--until <ts>] [--any-order]` |
 
 Patrones de trabajo:
 - **Cifras**: siempre de `top`/`patterns`/`timeline`, nunca contando líneas de `events` o de Loki.
+- **Vacíos con explicación**: lee `hints` (o las líneas `⚠` de la cabecera MCP) antes de concluir «no hay»:
+  dicen si la attr o el nivel no existen, si `stats` no tiene valores numéricos o si faltan eventos sin tiempo.
+- **`precede`**: `lift` > 1 es que el precursor aparece antes más de lo esperado en las ventanas con
+  actividad de su fuente (`active_episodes`); cerca de 1 o menos es ruido de fondo, aunque salga en muchos
+  episodios. Con `join` no hay lift. `anchors_without_key`/`anchors_without_time` dicen qué no formó episodio.
+- **`gaps`**: `missing` es el hueco; `from_without_key` (sin valor de la clave) y `units_without_time` (sin
+  tiempo para ordenar) quedan fuera de las dos cuentas: cítalos aparte si no son 0.
 - **Causa de una excepción**: `patterns` o `events` con level=ERROR para ubicarla, y después
   `events` del mismo servicio desde ese instante para leer la traza hasta la última línea
   (`AttributeError: …`) y la petición que falló (`DELETE /api/… 500`).
@@ -71,7 +99,9 @@ Patrones de trabajo:
   - infer_level=true sirve para ENCONTRAR (¿hubo un error antes de X?, `events`, `precede` ya lo usa):
     nunca niegues un error solo porque `level` no lo encuentra.
 - **Reinicios/caídas**: primero `precede` con el mensaje de apagado y el contenedor; si un episodio trae
-  dos `origins` (p. ej. un preflight y el principal), sepáralos con `attr=container:<nombre>`. A mano:
+  dos `origins` (p. ej. un preflight y el principal), sepáralos con `attr=container:<nombre>`. Por defecto
+  `precede` da los precursores comunes y la lista de episodios (depth=summary); el detalle de lo que
+  precedió a cada episodio, con depth=full y, si son muchos, limit o since/until. A mano:
   `timeline` con grep del mensaje de apagado exacto (en Postgres,
   `received fast shutdown request`; de arranque, `database system is ready to accept connections`),
   entity del servicio y bucket_secs=60: cada bucket es un reinicio con su hora. Para lo que lo

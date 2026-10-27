@@ -293,7 +293,7 @@ const ATTR_KEYS: &[&str] = &[
 fn load_events(conn: &Connection, since_epoch: i64) -> Result<Vec<Ev>> {
     let cols: Vec<String> = ATTR_KEYS
         .iter()
-        .map(|k| format!("COALESCE(json_extract(attrs, '$.\"{k}\"'), '')"))
+        .map(|k| format!("COALESCE({}, '')", crate::timeline::attr_sql("events", k, &format!("'$.\"{k}\"'"))))
         .collect();
     let sql = format!(
         "SELECT id, kind, at_epoch, {} FROM events
@@ -366,12 +366,12 @@ fn seq_of(id: &str) -> i64 {
 /// Rutas de ficheros editados por cada `tool.call` (touch `edited-file`).
 fn load_edits(conn: &Connection, since_epoch: i64) -> Result<HashMap<String, Vec<String>>> {
     let mut stmt = conn.prepare(
-        "SELECT t.event_id, COALESCE(json_extract(t.attrs, '$.path'), '')
+        "SELECT ev.id, COALESCE(json_extract(t.attrs, '$.path'), '')
          FROM touches t
          JOIN entities e ON e.id = t.entity_id
-         JOIN events ev ON ev.id = t.event_id
+         JOIN events ev ON ev.rid = t.event_rid
          WHERE e.type = 'edited-file' AND ev.kind = 'nod.tool.call' AND ev.at_epoch >= ?1
-         ORDER BY t.event_id, e.key",
+         ORDER BY ev.id, e.key",
     )?;
     let rows = stmt.query_map(params![since_epoch], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
@@ -387,10 +387,10 @@ fn load_edits(conn: &Connection, since_epoch: i64) -> Result<HashMap<String, Vec
 /// Lo que produjo cada `tool.result` (`links` `url`/`file` de la fuente nod).
 fn load_produced(conn: &Connection, since_epoch: i64) -> Result<HashMap<String, Vec<String>>> {
     let mut stmt = conn.prepare(
-        "SELECT l.event_id, l.target FROM links l
-         JOIN events ev ON ev.id = l.event_id
+        "SELECT ev.id, l.target FROM links l
+         JOIN events ev ON ev.rid = l.event_rid
          WHERE ev.kind = 'nod.tool.result' AND l.rel IN ('url', 'file') AND ev.at_epoch >= ?1
-         ORDER BY l.event_id, l.target",
+         ORDER BY ev.id, l.target",
     )?;
     let rows = stmt.query_map(params![since_epoch], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
@@ -610,7 +610,7 @@ impl Ctx<'_> {
                 .unwrap_or(0);
             let mut stmt = self.conn.prepare_cached(
                 "SELECT e.key, MAX(t.added, 0) + MAX(t.deleted, 0) FROM touches t JOIN entities e ON e.id = t.entity_id
-                 WHERE t.event_id = ?1 AND e.type = 'file' ORDER BY e.key",
+                 WHERE t.event_rid = (SELECT rid FROM events WHERE id = ?1) AND e.type = 'file' ORDER BY e.key",
             )?;
             let files: Vec<(String, i64)> = stmt
                 .query_map(params![id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
@@ -709,7 +709,7 @@ impl Ctx<'_> {
                     let mut stmt = self.conn.prepare_cached(
                         "SELECT ev.id, MAX(t.added, 0) + MAX(t.deleted, 0) FROM touches t
                          JOIN entities e ON e.id = t.entity_id
-                         JOIN events ev ON ev.id = t.event_id
+                         JOIN events ev ON ev.rid = t.event_rid
                          WHERE e.key = ?1 AND e.type = 'file' AND ev.kind = 'commit'
                            AND ev.at_epoch > ?2 AND ev.at_epoch <= ?3
                          ORDER BY ev.id",

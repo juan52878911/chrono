@@ -24,6 +24,34 @@ pub fn head_sha(repo: &Path) -> Result<String> {
     run(repo, &["rev-parse", "HEAD"])
 }
 
+/// `true` si HEAD apunta a una rama que aún no tiene commits (`git init` recién
+/// hecho): `rev-parse HEAD` falla ahí, pero el repo es válido y está vacío.
+pub fn head_is_unborn(repo: &Path) -> bool {
+    let ok = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    ok(&["symbolic-ref", "-q", "HEAD"]) && !ok(&["rev-parse", "--verify", "-q", "HEAD"])
+}
+
+/// Con HEAD sin nacer, la rama a la que apunta y cuántas ramas locales tienen
+/// commits (una rama huérfana recién creada en un repo con historia no es un
+/// repo vacío). `None` si HEAD apunta a un commit.
+pub fn unborn_head(repo: &Path) -> Option<(String, usize)> {
+    if !head_is_unborn(repo) {
+        return None;
+    }
+    let branch = run(repo, &["symbolic-ref", "--short", "-q", "HEAD"]).unwrap_or_default();
+    let branches = run(repo, &["for-each-ref", "--format=%(refname)", "refs/heads"]).map_or(0, |o| o.lines().filter(|l| !l.is_empty()).count());
+    Some((branch, branches))
+}
+
 /// Sha del commit al que apunta `rev` (rama, tag, `origin/dev`…).
 pub fn rev_sha(repo: &Path, rev: &str) -> Result<String> {
     run(repo, &["rev-parse", "--verify", &format!("{rev}^{{commit}}")])

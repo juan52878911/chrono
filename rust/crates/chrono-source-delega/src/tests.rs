@@ -242,3 +242,76 @@ fn utilidades_de_tiempo_y_redaccion() {
     assert_eq!(parse_offset("-05:00"), Some(-18000));
     assert_eq!(parse_offset("+0530"), Some(19800));
 }
+
+#[test]
+fn ids_de_audit_unicos_por_fuente() {
+    // Dos directorios de estado con el mismo audit.jsonl: los mismos bytes, otra fuente.
+    let (a, b) = (TempState::new(), TempState::new());
+    let ids = |p: &Path| -> Vec<String> { all(p).into_iter().filter(|e| e.kind.starts_with("delega.audit.")).map(|e| e.id).collect() };
+    let (ia, ib) = (ids(&a.0), ids(&b.0));
+    assert!(!ia.is_empty());
+    assert!(ia.iter().all(|id| id.starts_with("delega:audit:") && id.matches(':').count() == 3), "{ia:?}");
+    assert!(ia.iter().all(|id| !ib.contains(id)), "{ia:?} {ib:?}");
+    // Los de trabajo son la identidad del trabajo: iguales en las dos.
+    let job = |p: &Path| all(p).into_iter().find(|e| e.kind == "delega.job.start").map(|e| e.id).unwrap();
+    assert_eq!(job(&a.0), job(&b.0));
+}
+
+#[test]
+fn opciones_declaradas_y_validadas() {
+    let s = DelegaSource::new();
+    let keys: Vec<&str> = s.options().iter().map(|(k, _)| *k).collect();
+    assert_eq!(keys, vec!["utc_offset", "forbidden_terms"]);
+    let cfg = |v: &str| SourceConfig { options: [("utc_offset".to_string(), v.to_string())].into() };
+    for ok in ["-05:00", "+0530", "Z", "+14", "-18:00"] {
+        assert!(s.validate(&cfg(ok)).is_ok(), "{ok}");
+    }
+    for bad in ["5", "-5:00", "+99:00", "+05:75", "+18:30", "−05:00", "+٠٥:٠٠", "abc"] {
+        assert!(s.validate(&cfg(bad)).is_err(), "{bad}");
+        assert!(open_with(&fixture(), None, &[("utc_offset", bad)]).is_err(), "{bad}");
+    }
+    // Un tz de watermark fuera de rango no es de esta fuente: diverge.
+    let wm = Watermark { kind: "delega".into(), value: "mt:0|a:0|tz:9223372036854775807".into() };
+    assert!(matches!(open_with(&fixture(), Some(wm), &[]).err(), Some(CoreError::Diverged(_))));
+}
+
+#[test]
+fn fechas_imposibles_no_son_fechas() {
+    for bad in ["2026-02-30T10:00:00", "2025-02-29T10:00:00", "-001-01-01T00:00:00", "+999-01-01T00:00:00", "2026-10-26T10:00:00+25:00", "2026-10-26T10:00:00+05:99"] {
+        assert_eq!(util::parse_ts(bad), None, "{bad}");
+    }
+    assert!(util::parse_ts("2024-02-29T10:00:00").is_some());
+    assert_eq!(util::epoch_s_to_ms(f64::NAN), None);
+    assert_eq!(util::epoch_s_to_ms(1e300), None);
+    assert_eq!(util::epoch_s_to_ms(-1e300), None);
+    assert_eq!(util::epoch_s_to_ms(1_793_034_000.5), Some(1_793_034_000_500));
+}
+
+#[test]
+fn entradas_raras_sin_panic() {
+    let t = TempState::new();
+    // Nombre de carpeta con un carácter de varios bytes donde va la fecha.
+    let raro = t.0.join("202é102-122251-1-raro");
+    fs::create_dir_all(&raro).unwrap();
+    fs::write(raro.join("meta"), "PROFILE=x\nEND=1e300\n").unwrap();
+    fs::write(raro.join("brief.md"), "x").unwrap();
+    // Epochs enormes, negativos o NaN en el estado y un resumen con fechas imposibles.
+    let j = t.0.join("20261026-130000-2-extremos");
+    fs::create_dir_all(&j).unwrap();
+    fs::write(j.join("meta"), "END=-1e300\n").unwrap();
+    fs::write(j.join("brief.md"), "x").unwrap();
+    fs::write(j.join("state.json"), r#"{"start": 1e300, "last_event": -1e300, "cost_usd": 1e308, "rc": 1e300}"#).unwrap();
+    fs::write(j.join("summary.json"), r#"{"start": "2026-02-31T10:00:00", "end": "9999-12-31T23:59:59-18:00", "duration_min": 1e308}"#).unwrap();
+    fs::write(j.join("progress.log"), "2026-10-26T13:00:00\tSTART\n\u{0}\t\t\n9999-99-99T99:99:99\tMESSAGE\tx\n").unwrap();
+    fs::write(j.join("rc"), "99999999999999999999999").unwrap();
+    let mut audit = fs::read(t.0.join("audit.jsonl")).unwrap();
+    audit.extend_from_slice("{\"event\":\"end\",\"ts\":\"9999-12-31T23:59:59\",\"job\":\"é\",\"rc\":1e300}\n[1,2]\n\"x\"\n{\"event\":\"x\",\"ts\":\"2026-10-26T10:00:00+99:00\"}\n".as_bytes());
+    fs::write(t.0.join("audit.jsonl"), audit).unwrap();
+    for off in [None, Some("+14:00"), Some("-12:00")] {
+        let opts: Vec<(&str, &str)> = off.map(|o| vec![("utc_offset", o)]).unwrap_or_default();
+        let evs = drain(&mut open_with(&t.0, None, &opts).unwrap());
+        for e in &evs {
+            assert!(util::valid_ms(e.at_epoch).is_some() || e.at_epoch == 0, "{} {}", e.id, e.at_epoch);
+        }
+    }
+}

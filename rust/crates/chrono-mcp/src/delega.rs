@@ -187,7 +187,7 @@ pub fn opts(args: &Value) -> DelegaOpts {
         since_epoch: since_to_epoch(s("since")),
         until_epoch: if s("until").is_empty() { 0 } else { since_to_epoch(s("until")) },
         orchestrators: s("orchestrators").split(',').map(str::trim).filter(|x| !x.is_empty()).map(str::to_string).collect(),
-        stale_ms: n("stale_hours", 6).max(0) * 3600 * 1000,
+        stale_ms: n("stale_hours", 6).max(0).saturating_mul(3_600_000),
         limit: n("limit", 10).max(1) as usize,
     }
 }

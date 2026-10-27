@@ -21,7 +21,7 @@ pub fn main_list(tool: &str) -> Option<(&'static str, i64)> {
     Some(match tool {
         "top" => ("top", 25),
         "patterns" => ("patterns", 25),
-        "events" => ("events", 100),
+        "events" => ("events", 25),
         "timeline" => ("buckets", 500),
         "stats" => ("groups", 25),
         "precede" => ("episodes", 50),
@@ -68,13 +68,7 @@ pub fn canonical(tool: &str, args: &Value) -> String {
 /// `(total que casa, primera y última fecha de las fuentes consultadas)`.
 pub fn coverage(conn: &Connection, args: &Value, since_epoch: i64) -> (i64, Option<(i64, String, i64, String)>) {
     let scope = crate::tools::scope_from(args);
-    let (filters, extra) = scope.sql_public(2);
-    let sql = format!("SELECT COUNT(*) FROM events e WHERE e.at_epoch > 0 AND (?1 = 0 OR e.at_epoch >= ?1) {filters}");
-    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&since_epoch];
-    for p in &extra {
-        bound.push(p);
-    }
-    let total: i64 = conn.query_row(&sql, rusqlite::params_from_iter(bound), |r| r.get(0)).unwrap_or(0);
+    let total = chrono_metrics::count_events(conn, since_epoch, &scope).unwrap_or(0);
     // Cobertura: solo por fuente (lo que hay), sin los demás filtros (lo que se busca).
     let src = chrono_metrics::EventScope { source: scope.source, ..Default::default() };
     let (sf, sx) = src.sql_public(1);
@@ -113,14 +107,36 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// Argumentos con los que se cuenta el `total`. En `stats`, `attr` es el
+/// atributo numérico y no el filtro `clave:valor` (que no casaba nada y daba
+/// `total=0` con grupos): cuenta los eventos que tienen ese atributo.
+fn count_args(tool: &str, args: &Value) -> Value {
+    if tool != "stats" {
+        return args.clone();
+    }
+    // Y el filtro `where_attr`, si lo hay, junto a él.
+    let mut a = crate::tools::stats_filters(args);
+    if let Some(k) = args.get("attr").and_then(Value::as_str) {
+        let attr = match a.get("attr").and_then(Value::as_str).filter(|w| !w.trim().is_empty()) {
+            Some(w) => format!("{k}:*,{w}"),
+            None => format!("{k}:*"),
+        };
+        a["attr"] = json!(attr);
+    }
+    a
+}
+
 /// Cabecera (texto y objeto `meta`) de una respuesta.
 pub fn header(conn: &Connection, tool: &str, args: &Value, result: &Value) -> (String, Value) {
     let since = args.get("since").and_then(Value::as_str).unwrap_or("");
     let until = args.get("until").and_then(Value::as_str).unwrap_or("");
     let since_epoch = since_to_epoch(since);
+    let count_args = count_args(tool, args);
+    let args_q = args;
+    let args = &count_args;
     let (total, cov) = coverage(conn, args, since_epoch);
     let (list, default_limit) = main_list(tool).unwrap_or(("", 0));
-    let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(default_limit);
+    let limit = crate::tools::arg_i64(args, "limit", default_limit);
     let returned = result.get(list).and_then(Value::as_array).map(|a| a.len() as i64);
     let truncated = matches!(returned, Some(n) if limit > 0 && n >= limit);
     let mut warn = Vec::new();
@@ -158,7 +174,7 @@ pub fn header(conn: &Connection, tool: &str, args: &Value, result: &Value) -> (S
         ));
     }
     let idx = index_hash(conn);
-    let q = canonical(tool, args);
+    let q = canonical(tool, args_q);
     let cov_s = cov.as_ref().map(|(_, a, _, b)| format!("{a}..{b}")).unwrap_or_else(|| "-".into());
     let mut text = format!(
         "[chrono {tool}] total={total_s} coverage={cov_s} truncated={} index={idx} q=\"{q}\"",
@@ -169,6 +185,39 @@ pub fn header(conn: &Connection, tool: &str, args: &Value, result: &Value) -> (S
     }
     let meta = json!({"total": total, "coverage": cov_s, "truncated": truncated, "index": idx, "q": q, "warnings": warn});
     (text, meta)
+}
+
+/// Nivel de detalle de la respuesta (`depth`): `counts` deja solo las cifras
+/// (cada lista se cambia por su longitud), `summary` quita las sub-tablas de
+/// cada fila (los `preceding` de cada episodio de `precede`) y `full` lo deja
+/// todo. Se aplica DESPUÉS de la cabecera, así que `total` y `truncated`
+/// siguen hablando del resultado completo.
+pub fn apply_depth(result: &mut Value, depth: &str) {
+    let Some(o) = result.as_object_mut() else { return };
+    match depth {
+        "counts" => {
+            for v in o.values_mut() {
+                if let Some(a) = v.as_array() {
+                    *v = json!(a.len());
+                }
+            }
+        }
+        "summary" => {
+            for v in o.values_mut() {
+                for row in v.as_array_mut().into_iter().flatten() {
+                    if let Some(r) = row.as_object_mut() {
+                        r.retain(|_, c| !c.is_array() && !c.is_object());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `depth` por defecto: `summary` donde las filas llevan sub-tablas, `full` en el resto.
+pub fn default_depth(tool: &str) -> &'static str {
+    if tool == "precede" { "summary" } else { "full" }
 }
 
 /// Ajustes por herramienta sobre el resultado antes de pintarlo.
@@ -308,6 +357,20 @@ fn render_table(k: &str, rows: &[Value], indent: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn depth_recorta_sin_tocar_las_cifras() {
+        let full = json!({"episodes_total": 2, "episodes": [{"start": "a", "preceding": [{"x": 1}]}, {"start": "b", "preceding": []}]});
+        let mut s = full.clone();
+        apply_depth(&mut s, "summary");
+        assert_eq!(s, json!({"episodes_total": 2, "episodes": [{"start": "a"}, {"start": "b"}]}));
+        let mut c = full.clone();
+        apply_depth(&mut c, "counts");
+        assert_eq!(c, json!({"episodes_total": 2, "episodes": 2}));
+        let mut f = full.clone();
+        apply_depth(&mut f, "full");
+        assert_eq!(f, full);
+    }
 
     #[test]
     fn consulta_canonica_ordenada_y_sin_format() {
