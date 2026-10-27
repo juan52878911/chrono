@@ -808,13 +808,26 @@ pub fn precede(
     if r.anchors_without_time > 0 {
         result = result.set("anchors_without_time", Json::Int(r.anchors_without_time as i64));
     }
-    let result = result
+    let mut result = result
         .set("precursors_total", Json::Int(r.precursors_total as i64))
+        .set("lift_base", Json::str(r.lift_base.as_str()));
+    // Con clave, la población de la base: valores con episodio y eventos leídos.
+    if let chrono_metrics::LiftBase::KeyWindows { units, events, templated } = &r.lift_base {
+        result = result
+            .set("lift_base_units", Json::Int(*units as i64))
+            .set("lift_base_events", Json::Int(*events as i64))
+            .set("lift_base_templated", Json::Int(*templated as i64));
+    }
+    let hints = match &r.lift_base {
+        chrono_metrics::LiftBase::None(m) => vec![t(m.en.clone(), m.es.clone())],
+        _ => Vec::new(),
+    };
+    let result = result
         .set("gap_ms", Json::Int(o.gap_ms))
         .set("window_ms", Json::Int(o.window_ms))
         .set("common_precursors", Json::Arr(commons))
         .set("episodes", Json::Arr(episodes));
-    envelope(store, "precede", w, max, n, result)
+    envelope(store, "precede", w, max, n, with_hints(result, hints))
 }
 
 /// Serializa un `EventRef` de `correlate` a JSON.

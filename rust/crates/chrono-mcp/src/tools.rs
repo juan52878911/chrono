@@ -435,6 +435,16 @@ fn run_tool(store: &chrono_store::Store, name: &str, args: &Value) -> Result<Val
             if r.anchors_without_time > 0 {
                 out["anchors_without_time"] = json!(r.anchors_without_time);
             }
+            out["lift_base"] = json!(r.lift_base.as_str());
+            match &r.lift_base {
+                chrono_metrics::LiftBase::KeyWindows { units, events, templated } => {
+                    out["lift_base_units"] = json!(units);
+                    out["lift_base_events"] = json!(events);
+                    out["lift_base_templated"] = json!(templated);
+                }
+                chrono_metrics::LiftBase::None(m) => out["hints"] = json!([m.es]),
+                chrono_metrics::LiftBase::ActiveWindows => {}
+            }
             if o.join.is_some() {
                 out["anchors_without_key"] = json!(r.anchors_without_key);
             }
