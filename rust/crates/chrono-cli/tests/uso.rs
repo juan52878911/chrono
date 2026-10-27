@@ -136,6 +136,46 @@ fn sources_y_phases_no_se_dan_por_truncadas() {
     }
 }
 
+/// `truncated` es exacto: con `--limit` igual a lo que hay no se da por
+/// truncado (antes, `returned >= max_items` sí), con uno menos sí.
+#[test]
+fn truncated_exacto_con_limit_igual_a_lo_que_hay() {
+    let d = indice("truncated");
+    // (comando, argumentos, lista del resultado)
+    let casos: [(&str, &[&str], &str); 6] = [
+        ("events", &[], "events"),
+        ("top", &["level"], "top"),
+        ("patterns", &[], "patterns"),
+        ("timeline", &["--bucket", "10m"], "buckets"),
+        ("search", &["evento"], "results"),
+        ("precede", &["--level", "ERROR", "--gap", "1s"], "episodes"),
+    ];
+    for (cmd, args, list) in casos {
+        let q = |limit: &str| -> serde_json::Value {
+            let mut a: Vec<&str> = vec![cmd];
+            a.extend_from_slice(args);
+            a.extend_from_slice(&["--limit", limit]);
+            let (ok, out, err) = run(&d.0, &a);
+            assert!(ok, "{cmd}: {err}");
+            serde_json::from_str(&out).unwrap_or_else(|e| panic!("{cmd}: {e}: {out}"))
+        };
+        let todo = q("1000");
+        let n = todo["result"][list].as_array().unwrap_or_else(|| panic!("{cmd}: sin {list}: {todo}")).len();
+        if n == 0 {
+            continue;
+        }
+        assert_eq!(todo["token_budget"]["truncated"], false, "{cmd}: {todo}");
+        let justo = q(&n.to_string());
+        assert_eq!(justo["token_budget"]["returned"], n, "{cmd}: {justo}");
+        assert_eq!(justo["token_budget"]["truncated"], false, "{cmd}: exactamente {n} no es truncado: {justo}");
+        if n > 1 {
+            let menos = q(&(n - 1).to_string());
+            assert_eq!(menos["result"][list].as_array().unwrap().len(), n - 1, "{cmd}: {menos}");
+            assert_eq!(menos["token_budget"]["truncated"], true, "{cmd}: {menos}");
+        }
+    }
+}
+
 /// Índice con un log de 3 líneas con tiempo (con `ms` y `region`) y una sin tiempo.
 fn indice_attrs(tag: &str) -> TempDir {
     let p = std::env::temp_dir().join(format!("chrono-uso-{tag}-{}", std::process::id()));

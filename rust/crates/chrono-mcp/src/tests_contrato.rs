@@ -90,6 +90,40 @@ fn cabecera_cuadra_con_lo_devuelto_en_todas_las_herramientas() {
         assert_eq!(total, esperado(&v), "{tool}: total no cuadra con lo devuelto: {v}");
         assert_eq!(v["meta"]["truncated"], false, "{tool}: {v}");
     }
+    // `truncated` es exacto: con `limit` igual a lo que hay, no; con uno menos,
+    // sí (antes, «devolvió el tope» lo daba por truncado con exactamente `limit`).
+    let listas: Vec<(&str, Value, &str)> = vec![
+        ("top", json!({"dim": "level"}), "top"),
+        ("patterns", json!({}), "patterns"),
+        ("events", json!({}), "events"),
+        ("timeline", json!({"bucket_secs": 600}), "buckets"),
+        ("stats", json!({"attr": "dur", "by": "attr:cwd"}), "groups"),
+        ("precede", json!({"level": "ERROR", "gap_secs": 60}), "episodes"),
+    ];
+    for def in crate::tools::tool_defs() {
+        let name = def["name"].as_str().unwrap();
+        if crate::contract::main_list(name).is_some() && name != "informe" {
+            assert!(listas.iter().any(|(t, _, _)| *t == name), "falta {name} en la prueba de truncated");
+        }
+    }
+    // Sin las filas que añade la cabecera de `top` («(resto)», «(sin valor)»).
+    let len = |v: &Value, list: &str| v[list].as_array().map(|a| a.iter().filter(|x| !x["value"].as_str().is_some_and(|s| s.starts_with('('))).count());
+    for (tool, args, list) in listas {
+        let with_limit = |limit: usize| {
+            let mut a = args.clone();
+            a["limit"] = json!(limit);
+            call(&store, tool, a)
+        };
+        let n = len(&with_limit(1000), list).unwrap_or_else(|| panic!("{tool}: sin {list}"));
+        assert!(n > 1, "{tool}: el caso necesita más de un elemento");
+        let justo = with_limit(n);
+        assert_eq!(len(&justo, list), Some(n), "{tool}: {justo}");
+        assert_eq!(justo["meta"]["truncated"], false, "{tool}: exactamente {n} no es truncado: {justo}");
+        assert!(justo.get("_more").is_none(), "{tool}: la marca interna no sale: {justo}");
+        let menos = with_limit(n - 1);
+        assert_eq!(len(&menos, list), Some(n - 1), "{tool}: {menos}");
+        assert_eq!(menos["meta"]["truncated"], true, "{tool}: {menos}");
+    }
     // Con filtros, el total sigue siendo el de lo que casa.
     let v = call(&store, "stats", json!({"attr": "dur", "level": "ERROR"}));
     assert_eq!(v["meta"]["total"].as_i64(), Some(sum(&v, "groups", "count")), "{v}");

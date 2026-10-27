@@ -85,7 +85,8 @@ Patrones de trabajo:
   dicen si la attr o el nivel no existen, si `stats` no tiene valores numéricos o si faltan eventos sin tiempo.
 - **`precede`**: `lift` > 1 es que el precursor aparece antes más de lo esperado en las ventanas con
   actividad de su fuente (`active_episodes`); cerca de 1 o menos es ruido de fondo, aunque salga en muchos
-  episodios. Con `join` no hay lift. `anchors_without_key`/`anchors_without_time` dicen qué no formó episodio.
+  episodios. Con `join` la base son las ventanas de la misma clave (`lift_base: key_windows`: la misma
+  sesión o traza, solo las que tienen episodio). `anchors_without_key`/`anchors_without_time` dicen qué no formó episodio.
 - **`gaps`**: `missing` es el hueco; `from_without_key` (sin valor de la clave) y `units_without_time` (sin
   tiempo para ordenar) quedan fuera de las dos cuentas: cítalos aparte si no son 0.
 - **Causa de una excepción**: `patterns` o `events` con level=ERROR para ubicarla, y después
