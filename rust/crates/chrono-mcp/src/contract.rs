@@ -72,8 +72,11 @@ pub fn coverage(conn: &Connection, args: &Value, since_epoch: i64) -> (i64, Opti
     // Cobertura: solo por fuente (lo que hay), sin los demás filtros (lo que se busca).
     let src = chrono_metrics::EventScope { source: scope.source, ..Default::default() };
     let (sf, sx) = src.sql_public(1);
+    // Dos subconsultas: con MIN y MAX en la misma, SQLite no usa el atajo del
+    // índice y recorre `idx_events_at` entero en cada respuesta (2,5 s a 5M).
     let cov_sql = format!(
-        "SELECT MIN(e.at_epoch), MAX(e.at_epoch) FROM events e WHERE e.at_epoch > 0 {sf}"
+        "SELECT (SELECT MIN(e.at_epoch) FROM events e WHERE e.at_epoch > 0 {sf}),
+                (SELECT MAX(e.at_epoch) FROM events e WHERE e.at_epoch > 0 {sf})"
     );
     let bound2: Vec<&dyn rusqlite::ToSql> = sx.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
     let cov = conn
