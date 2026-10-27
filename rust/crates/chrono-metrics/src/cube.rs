@@ -26,6 +26,8 @@ pub(crate) enum Dim {
     Entity,
     /// Plantilla Drain-light del título.
     Template,
+    /// Valor de la dim pedida a [`attr_cube`] (`attr_rollups`).
+    Attr,
 }
 
 /// `(valores de las dims, bucket)` → `(cuenta, último rid)`. El bucket es 0 sin `bucket_ms`.
@@ -57,6 +59,30 @@ pub(crate) fn any_kind_other_than(conn: &Connection, kind: &str) -> Result<bool>
 /// `timeline`). Sin `bucket_ms` cuenta también los eventos sin tiempo cuando
 /// `since` es 0, como `top`/`patterns`. `None`: el cubo no puede responder.
 pub(crate) fn cube(conn: &Connection, since: i64, scope: &EventScope, dims: &[Dim], bucket_ms: Option<i64>) -> Result<Option<Cells>> {
+    cube_in(conn, since, scope, dims, bucket_ms, None)
+}
+
+/// Eventos de `scope` desde `since` por valor de la dim `key`, de `attr_rollups`
+/// (como `top`: con los sin tiempo cuando `since` es 0). Un evento con varios
+/// valores cuenta en cada uno, como en `event_dims`. `None` si no puede
+/// responder (filtros que el cubo no tiene, rollups atrasados o la clave fuera de
+/// `meta.attr_rollup_keys`).
+pub(crate) fn attr_cube(conn: &Connection, since: i64, scope: &EventScope, key: &str) -> Result<Option<BTreeMap<String, i64>>> {
+    let covered: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = 'attr_rollup_keys'", [], |r| r.get(0)).optional()?;
+    if !covered.is_some_and(|c| c.split(',').any(|k| k == key)) {
+        return Ok(None);
+    }
+    Ok(cube_in(conn, since, scope, &[Dim::Attr], None, Some(key))?.map(|cells| cells.into_iter().map(|((mut k, _), (n, _))| (k.remove(0), n)).collect()))
+}
+
+/// [`cube`] sobre `dim_rollups` o, con `attr`, sobre `attr_rollups` y los
+/// valores de esa clave.
+fn cube_in(conn: &Connection, since: i64, scope: &EventScope, dims: &[Dim], bucket_ms: Option<i64>, attr: Option<&str>) -> Result<Option<Cells>> {
+    // `attr_rollups` no tiene plantilla; `dim_rollups`, ninguna dim.
+    if dims.contains(&Dim::Template) && attr.is_some() || dims.contains(&Dim::Attr) && attr.is_none() {
+        return Ok(None);
+    }
+    let table = if attr.is_some() { "attr_rollups" } else { "dim_rollups" };
     let nonempty = |v: Option<&str>| v.is_some_and(|s| !s.trim().is_empty());
     if nonempty(scope.grep) || nonempty(scope.attr) || nonempty(scope.join) || since < 0 {
         return Ok(None);
@@ -102,6 +128,10 @@ pub(crate) fn cube(conn: &Connection, since: i64, scope: &EventScope, dims: &[Di
             }
         }
     }
+    if let Some(k) = attr {
+        let p = bind(k.to_string(), &mut binds);
+        conds.push(format!("r.dim_id IN (SELECT id FROM dim_values WHERE key = {p})"));
+    }
     // El filtro de entidad va aparte: la comprobación de multi-touch no lo lleva.
     let entity_cond = scope.entity.filter(|e| !e.trim().is_empty()).map(|en| {
         let p = bind(crate::timeline::comma_list(en, false), &mut binds);
@@ -126,7 +156,7 @@ pub(crate) fn cube(conn: &Connection, since: i64, scope: &EventScope, dims: &[Di
     // si cae en el alcance de una consulta por entidad, solo `events` sabe contarlo.
     if by_entity || entity_cond.is_some() {
         let multi: bool = conn.query_row(
-            &format!("SELECT EXISTS (SELECT 1 FROM dim_rollups r WHERE r.entity_id = -1 AND {base_where})"),
+            &format!("SELECT EXISTS (SELECT 1 FROM {table} r WHERE r.entity_id = -1 AND {base_where})"),
             // El parámetro de la entidad es el último: este chequeo no lo usa.
             rusqlite::params_from_iter(binds[..binds.len() - usize::from(entity_cond.is_some())].iter()),
             |r| r.get(0),
@@ -152,6 +182,7 @@ pub(crate) fn cube(conn: &Connection, since: i64, scope: &EventScope, dims: &[Di
             Dim::Kind => "r.kind",
             Dim::Entity => "en.key",
             Dim::Template => "tp.template",
+            Dim::Attr => "av.value",
         })
         .collect();
     let mut select: Vec<String> = exprs.iter().map(|e| e.to_string()).collect();
@@ -167,6 +198,9 @@ pub(crate) fn cube(conn: &Connection, since: i64, scope: &EventScope, dims: &[Di
     if by_entity {
         joins.push_str(" JOIN entities en ON en.id = r.entity_id");
     }
+    if attr.is_some() {
+        joins.push_str(" JOIN dim_values av ON av.id = r.dim_id");
+    }
     // Un literal en GROUP BY sería un índice de columna: se agrupa solo por expresiones.
     let group: Vec<&String> = select.iter().filter(|e| e.as_str() != "0").collect();
     let group_by = if group.is_empty() {
@@ -175,8 +209,9 @@ pub(crate) fn cube(conn: &Connection, since: i64, scope: &EventScope, dims: &[Di
         format!(" GROUP BY {}", group.iter().map(|e| e.as_str()).collect::<Vec<_>>().join(", "))
     };
     let sql = format!(
-        "SELECT {}, SUM(r.count), MAX(r.last_rid) FROM dim_rollups r{joins} WHERE {where_}{group_by} HAVING COUNT(*) > 0",
-        select.join(", ")
+        "SELECT {}, SUM(r.count), {} FROM {table} r{joins} WHERE {where_}{group_by} HAVING COUNT(*) > 0",
+        select.join(", "),
+        if attr.is_some() { "0" } else { "MAX(r.last_rid)" }
     );
     let n = dims.len();
     {
@@ -204,15 +239,26 @@ pub(crate) fn cube(conn: &Connection, since: i64, scope: &EventScope, dims: &[Di
             ""
         };
         let entity_col = if by_entity { "en.key" } else { "''" };
+        // Con `attr`, una fila por valor de la clave (el parámetro va tras los del alcance).
+        let attr_join = if attr.is_some() {
+            format!(" JOIN event_dims ed ON ed.event_rid = e.rid JOIN dim_values av ON av.id = ed.dim_id AND av.key = ?{}", 3 + extra.len())
+        } else {
+            String::new()
+        };
+        let attr_col = if attr.is_some() { "av.value" } else { "''" };
         let sql = format!(
-            "SELECT e.rid, e.kind, e.level, {}, e.title, e.at_epoch, {entity_col}
-             FROM events e{entity_join}
+            "SELECT e.rid, e.kind, e.level, {}, e.title, e.at_epoch, {entity_col}, {attr_col}
+             FROM events e{entity_join}{attr_join}
              WHERE e.at_epoch > 0 AND e.at_epoch >= ?1 AND e.at_epoch < ?2 {filters}",
             crate::timeline::level_expr("e", true)
         );
+        let key = attr.unwrap_or_default().to_string();
         let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&lo, &hi];
         for p in &extra {
             bound.push(p);
+        }
+        if attr.is_some() {
+            bound.push(&key);
         }
         let mut stmt = conn.prepare(&sql)?;
         let mut rows = stmt.query(rusqlite::params_from_iter(bound))?;
@@ -227,6 +273,7 @@ pub(crate) fn cube(conn: &Connection, since: i64, scope: &EventScope, dims: &[Di
                     Dim::LevelInf => r.get(3)?,
                     Dim::Template => chrono_core::templatize(&r.get::<_, String>(4)?),
                     Dim::Entity => r.get(6)?,
+                    Dim::Attr => r.get(7)?,
                 });
             }
             let bucket = bucket_ms.map_or(0, |b| at - at.rem_euclid(b));

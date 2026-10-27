@@ -63,13 +63,16 @@ fn top_sql_with(from_clause: &str, value_expr: &str, filters: &str) -> String {
 }
 
 /// SQL de `top attr:<clave>` (parámetros: ?1 path JSON, ?2 since, ?3 limit,
-/// ?4 clave, y los del alcance desde ?5).
-fn attr_top_sql(scope: &crate::EventScope, since_epoch: i64, key: &str) -> (String, Vec<String>) {
+/// ?4 clave, y los del alcance desde ?5). Sin `with_dims`, solo lo del JSON
+/// (lo de las dims sale entonces de `attr_rollups`).
+fn attr_top_sql(scope: &crate::EventScope, since_epoch: i64, key: &str, with_dims: bool) -> (String, Vec<String>) {
     // v6: los eventos con la clave como dim, por `event_dims` (sin filtros ni
     // ventana, sin tocar `events`); el resto, del JSON de las fuentes que la
     // tienen en `attrs`. Un evento la lleva en un sitio o en el otro, nunca en los dos.
     let unfiltered = scope.is_empty() && since_epoch == 0;
-    let from_dims = if unfiltered {
+    let from_dims = if !with_dims {
+        "SELECT NULL AS value, 0 AS n WHERE 0".to_string()
+    } else if unfiltered {
         // Cuenta por valor sobre la clave primaria de `event_dims` (dim_id, rid).
         "SELECT v.value AS value, (SELECT COUNT(*) FROM event_dims d WHERE d.dim_id = v.id) AS n
          FROM dim_values v WHERE v.key = ?4"
@@ -205,7 +208,27 @@ pub fn top_filtered(conn: &Connection, dim: &str, since_epoch: i64, f: &TopFilte
             return Err(format!("top: invalid attr key: {key:?}").into());
         }
         let path = format!("$.{key}");
-        let (sql, extra) = attr_top_sql(&scope, since_epoch, key);
+        // Lo de las dims, del cubo si puede; lo del JSON (fuentes con la clave en
+        // `attrs`), de `events` como siempre, y se suman por valor.
+        if let Some(mut counts) = crate::cube::attr_cube(conn, since_epoch, &scope, key)? {
+            let (sql, extra) = attr_top_sql(&scope, since_epoch, key, false);
+            let no_limit = -1i64;
+            let key_s = key.to_string();
+            let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&path, &since_epoch, &no_limit, &key_s];
+            for p in &extra {
+                bound.push(p);
+            }
+            let mut stmt = conn.prepare(&sql)?;
+            for row in stmt.query_map(rusqlite::params_from_iter(bound), map)? {
+                let t = row?;
+                *counts.entry(t.value).or_insert(0) += t.count;
+            }
+            let mut v: Vec<TopValue> = counts.into_iter().filter(|(value, n)| !value.is_empty() && *n > 0).map(|(value, count)| TopValue { value, count }).collect();
+            v.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
+            v.truncate(limit.max(0) as usize);
+            return Ok(v);
+        }
+        let (sql, extra) = attr_top_sql(&scope, since_epoch, key, true);
         let key_s = key.to_string();
         let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&path, &since_epoch, &limit, &key_s];
         for p in &extra {
@@ -650,7 +673,7 @@ mod tests_p3 {
         let n: i64 = with_dims.conn().query_row("SELECT COUNT(*) FROM events WHERE attrs LIKE '%host%'", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 60);
         // `top attr:host` sin filtros: event_dims y solo las fuentes con `host` en attrs.
-        let (sql, _) = attr_top_sql(&crate::EventScope::default(), 0, "host");
+        let (sql, _) = attr_top_sql(&crate::EventScope::default(), 0, "host", true);
         let eqp = format!("EXPLAIN QUERY PLAN {sql}");
         let mut stmt = with_dims.conn().prepare(&eqp).unwrap();
         let p: Vec<String> = stmt
@@ -670,6 +693,88 @@ mod tests_p3 {
         with_dims.delete_source_events("jsonl:/b").unwrap();
         let t = top_filtered(with_dims.conn(), "attr:dur", 0, &TopFilter::default(), 20).unwrap();
         assert!(t.is_empty(), "{t:?}");
+    }
+
+    /// `top attr:<dim>` desde `attr_rollups` da lo mismo que uniendo `event_dims`
+    /// con `events`: ventanas que parten buckets, eventos sin tiempo, nivel
+    /// deducido, entidad (con un evento de dos touches, que obliga a `events`),
+    /// fuente, kind y una clave que además va en el JSON de otra fuente.
+    #[test]
+    fn top_attr_del_cubo_da_lo_mismo_que_events() {
+        let db = TempDb::new("attrcubo");
+        let mut store = Store::open(db.path()).unwrap();
+        for src in ["jsonl:/a", "jsonl:/b"] {
+            let mut w = store.writer().unwrap();
+            if src == "jsonl:/a" {
+                w.set_dims(vec!["host".into(), "zona".into()]);
+            }
+            for i in 0..240i64 {
+                // Cada 47 s, unos 3 h y 8 buckets de 10 min; algunos sin tiempo.
+                let at = if i % 37 == 0 { 0 } else { 1_000_000 + i * 47_000 };
+                let mut e = mk(&format!("{src}-{i}"), ["ERROR", "INFO", "WARN", ""][(i % 4) as usize], at, "");
+                e.source_id = src.to_string();
+                e.kind = if i % 6 == 0 { "tool_use".into() } else { "log".into() };
+                if i % 4 == 3 {
+                    e.attrs.insert("level_inferred".into(), "ERROR".into());
+                }
+                e.attrs.insert("host".into(), format!("h{}", i % 5));
+                if i % 3 > 0 {
+                    e.attrs.insert("zona".into(), format!("z{}", i % 2));
+                }
+                e.touches = vec![chrono_core::Touch { entity: format!("svc-{}", i % 3), entity_type: "service".into(), weight: 1, ..Default::default() }];
+                if src == "jsonl:/b" && i == 200 {
+                    e.touches.push(chrono_core::Touch { entity: "svc-1".into(), entity_type: "service".into(), weight: 1, ..Default::default() });
+                }
+                w.add_event(&e).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        let q = |s: &Store| -> Vec<String> {
+            let c = s.conn();
+            let mut out = Vec::new();
+            let since_until = [(0, 0), (1_000_000 + 30 * 47_000, 0), (0, 1_000_000 + 150 * 47_000), (1_234_567, 7_654_321)];
+            type Filtro<'a> = (Option<&'a str>, Option<&'a str>, Option<&'a str>, Option<&'a str>, bool);
+            let filtros: [Filtro; 7] = [
+                (None, None, None, None, false),
+                (Some("ERROR"), None, None, None, false),
+                (Some("ERROR,warn"), None, None, None, true),
+                (None, Some("tool*"), None, None, false),
+                (None, None, Some("svc-2"), None, false),
+                (None, None, Some("svc-1"), Some("jsonl:/b"), false),
+                (Some("INFO"), Some("log"), None, Some("jsonl:/a"), false),
+            ];
+            for (since, until) in since_until {
+                for (level, kind, entity, source, infer_level) in filtros {
+                    let f = TopFilter { level, kind, entity, source, infer_level, until_epoch: until, ..Default::default() };
+                    for dim in ["attr:host", "attr:zona", "zona"] {
+                        out.push(format!("{dim} {since} {until} {level:?} {kind:?} {entity:?} {source:?} {:?}", top_filtered(c, dim, since, &f, 3).unwrap()));
+                    }
+                }
+            }
+            out
+        };
+        let sin_cubo = q(&store);
+        store.build_rollups(60_000).unwrap();
+        assert_eq!(store.meta("attr_rollup_keys").unwrap().as_deref(), Some("host,zona"));
+        let scope = crate::EventScope::default();
+        assert!(crate::cube::attr_cube(store.conn(), 0, &scope, "host").unwrap().is_some(), "el cubo responde");
+        let con_cubo = q(&store);
+        for (a, b) in sin_cubo.iter().zip(&con_cubo) {
+            assert_eq!(a, b);
+        }
+        // Un evento nuevo sin rollups: el cubo deja de responder hasta el sync.
+        let mut w = store.writer().unwrap();
+        w.set_dims(vec!["host".into(), "zona".into()]);
+        let mut e = mk("nuevo", "ERROR", 2_000_000, "");
+        e.source_id = "jsonl:/a".into();
+        e.attrs.insert("host".into(), "h9".into());
+        w.add_event(&e).unwrap();
+        w.commit().unwrap();
+        assert!(crate::cube::attr_cube(store.conn(), 0, &scope, "host").unwrap().is_none());
+        let antes_sync = q(&store);
+        store.build_rollups_sync(60_000).unwrap();
+        assert!(crate::cube::attr_cube(store.conn(), 0, &scope, "host").unwrap().is_some());
+        assert_eq!(q(&store), antes_sync);
     }
 
     #[test]

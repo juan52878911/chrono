@@ -36,6 +36,32 @@ pub const SCHEMA_VERSION: i64 = 7;
 /// a 1M eventos de logs deja ~10^4-10^5 filas. Va también a `meta.dim_rollup_bucket_ms`.
 pub const DIM_ROLLUP_BUCKET_MS: i64 = 600_000;
 
+/// `attr_rollups`: las dims de las fuentes como cubo, para `top attr:<k>` con
+/// filtros de nivel/kind/entidad/fuente/ventana sin unir `event_dims` con
+/// `events`. Lo mismo que `dim_rollups` sin plantilla y con el valor de la dim
+/// (`dim_values.id`): un evento con la dim cuenta una vez por valor, como en
+/// `event_dims`. Mismo watermark (`rollup_max_rowid`) y mismo bucket. Solo
+/// cubre las claves de `meta.attr_rollup_keys`, que fija el build completo (un
+/// índice anterior no la tiene hasta su próximo build completo: `reindex`, o
+/// `add` de una fuente ya indexada). No va en `schema.sql`: la crea el build,
+/// también en los índices v7 que ya existían.
+pub(crate) const ATTR_ROLLUPS_SQL: &str = "CREATE TABLE IF NOT EXISTS attr_rollups (
+    dim_id       INTEGER NOT NULL,
+    source_ref   INTEGER NOT NULL,
+    kind         TEXT NOT NULL,
+    level        TEXT NOT NULL,
+    level_inf    TEXT NOT NULL,
+    entity_id    INTEGER NOT NULL,
+    bucket_epoch INTEGER NOT NULL,
+    count        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (dim_id, source_ref, kind, level, level_inf, entity_id, bucket_epoch)
+) WITHOUT ROWID;";
+
+/// Una clave entra en `attr_rollups` si tiene a lo sumo tantos valores: las de
+/// pocos valores (host, contenedor, rama, cwd) son las que se agrupan; una de
+/// ids (traza, sesión a millones) daría una fila por evento y no ahorra nada.
+pub const ATTR_ROLLUP_MAX_VALUES: i64 = 10_000;
+
 /// Error de `chrono-store`: envuelve I/O y errores de `rusqlite` sin exigir un
 /// tipo concreto a los llamadores (CLI, `chrono-metrics`...).
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;

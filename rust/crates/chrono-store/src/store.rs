@@ -317,7 +317,8 @@ impl Store {
         let n = self.count_source_events(source_id, None)?;
         self.delete_source_events(source_id)?;
         let tx = self.conn.unchecked_transaction()?;
-        for table in ["rollups", "dim_rollups", "attr_keys", "source_dims"] {
+        tx.execute_batch(crate::ATTR_ROLLUPS_SQL)?;
+        for table in ["rollups", "dim_rollups", "attr_rollups", "attr_keys", "source_dims"] {
             tx.execute(&format!("DELETE FROM {table} WHERE source_ref = (SELECT ref FROM sources WHERE id = ?1)"), params![source_id])?;
         }
         for table in ["templates", "markers"] {
@@ -459,7 +460,9 @@ impl Store {
     pub fn reset(&mut self) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(BUMP_RID_HWM, [])?;
+        tx.execute_batch(crate::ATTR_ROLLUPS_SQL)?;
         for table in [
+            "attr_rollups",
             "touches",
             "event_links",
             "link_targets",
@@ -606,7 +609,32 @@ impl Store {
         type DimKey = (i64, String, String, String, String, i64, i64);
         let mut agg: BTreeMap<(i64, String, i64), (i64, i64)> = BTreeMap::new();
         let mut dagg: BTreeMap<DimKey, (i64, i64)> = BTreeMap::new();
+        // `attr_rollups`: (dim_id, fuente, kind, nivel, nivel efectivo, entidad,
+        // bucket) -> cuenta. En un build completo se eligen las claves; en uno
+        // incremental, las de entonces (sin ellas, el índice no las tiene).
+        let attr_keys: Option<Vec<String>> = if reset {
+            let mut st = self.conn.prepare("SELECT key FROM dim_values GROUP BY key HAVING COUNT(*) <= ?1 ORDER BY key")?;
+            let keys = st.query_map(params![crate::ATTR_ROLLUP_MAX_VALUES], |r| r.get::<_, String>(0))?;
+            Some(keys.collect::<rusqlite::Result<_>>()?)
+        } else {
+            self.meta("attr_rollup_keys")?.map(|v| v.split(',').filter(|k| !k.is_empty()).map(str::to_string).collect())
+        };
+        let attr_dims: std::collections::HashSet<i64> = match &attr_keys {
+            Some(keys) if !keys.is_empty() => {
+                let mut st = self.conn.prepare("SELECT id FROM dim_values WHERE instr(?1, ',' || key || ',') > 0")?;
+                let ids = st.query_map(params![format!(",{},", keys.join(","))], |r| r.get::<_, i64>(0))?;
+                ids.collect::<rusqlite::Result<_>>()?
+            }
+            _ => Default::default(),
+        };
+        type AttrKey = (i64, i64, String, String, String, i64, i64);
+        let mut aagg: BTreeMap<AttrKey, i64> = BTreeMap::new();
         {
+            // Las dims de cada evento, en el mismo orden de rid que el recorrido.
+            let mut dims_stmt = self.conn.prepare("SELECT event_rid, dim_id FROM event_dims WHERE event_rid > ?1 ORDER BY event_rid")?;
+            let mut dims_rows = if attr_dims.is_empty() { None } else { Some(dims_stmt.query(params![since_rowid])?) };
+            let mut next_dim: Option<(i64, i64)> = None;
+            let mut ev_dims: Vec<i64> = Vec::new();
             // ORDER BY e.rid conserva el determinismo del last_rid. El LEFT JOIN
             // cuenta los touches del evento.
             let mut stmt = self.conn.prepare(
@@ -637,6 +665,29 @@ impl Store {
                     _ => -1,
                 };
                 let dbucket = if at_epoch <= 0 { -1 } else { at_epoch - at_epoch.rem_euclid(drb) };
+                if let Some(rows) = dims_rows.as_mut() {
+                    ev_dims.clear();
+                    loop {
+                        if next_dim.is_none() {
+                            next_dim = match rows.next()? {
+                                Some(r) => Some((r.get(0)?, r.get(1)?)),
+                                None => break,
+                            };
+                        }
+                        match next_dim {
+                            Some((er, d)) if er <= rid => {
+                                if er == rid && attr_dims.contains(&d) {
+                                    ev_dims.push(d);
+                                }
+                                next_dim = None;
+                            }
+                            _ => break,
+                        }
+                    }
+                    for &d in &ev_dims {
+                        *aagg.entry((d, source_ref, kind.clone(), level.clone(), level_inf.clone(), entity, dbucket)).or_insert(0) += 1;
+                    }
+                }
                 let d = dagg.entry((source_ref, template.clone(), kind, level, level_inf, entity, dbucket)).or_insert((0, 0));
                 d.0 += 1;
                 d.1 = rid;
@@ -711,6 +762,26 @@ impl Store {
                 let id = tpl(source_id, template, &mut n_templates)?;
                 ins_dim.execute(params![source_ref, id, kind, level, level_inf, entity, bucket, count, last_rid])?;
             }
+        }
+        if let Some(keys) = &attr_keys {
+            tx.execute_batch(crate::ATTR_ROLLUPS_SQL)?;
+            if reset {
+                tx.execute("DELETE FROM attr_rollups", [])?;
+            }
+            let mut ins_attr = tx.prepare(
+                "INSERT INTO attr_rollups(dim_id, source_ref, kind, level, level_inf, entity_id, bucket_epoch, count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(dim_id, source_ref, kind, level, level_inf, entity_id, bucket_epoch) DO UPDATE SET
+                    count = count + excluded.count",
+            )?;
+            for ((dim, source_ref, kind, level, level_inf, entity, bucket), count) in &aagg {
+                ins_attr.execute(params![dim, source_ref, kind, level, level_inf, entity, bucket, count])?;
+            }
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES ('attr_rollup_keys', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![keys.join(",")],
+            )?;
         }
         // Watermark al tope actual: el próximo sync parte de aquí.
         let max_rowid: i64 =
