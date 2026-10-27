@@ -253,9 +253,11 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
     };
     let pre_sql = format!(
         "SELECT e.id, e.at_epoch, e.title, {level_sql}, {entity} FROM events e
-         WHERE e.at_epoch >= ?1 AND e.at_epoch < ?2 {pf} {same_key}
+         WHERE e.at_epoch >= ?1 AND e.at_epoch < ?2 {pf}{pre} {same_key}
          ORDER BY e.at_epoch ASC, e.id ASC",
-        entity = entity_sql()
+        entity = entity_sql(),
+        // Por nivel: solo las filas de esos niveles (y las sin nivel), no toda la ventana.
+        pre = level_prefilter(conn, &pre_scope)?
     );
     let mut pre = conn.prepare(&pre_sql)?;
     // Sin clave, un barrido: cada evento de la unión de ventanas se lee y se
@@ -357,12 +359,12 @@ pub fn precede(conn: &Connection, o: &PrecedeOpts) -> Result<Preceded> {
     Ok(Preceded { episodes, episodes_total, common: commons, anchors_without_key, anchors_without_time: anchors_without_time as usize, precursors_total })
 }
 
-/// Condición de más para las anclas con nivel: el filtro de nivel (`UPPER` del
-/// nivel, o del deducido) no puede usar `idx_events_level` y recorría `events`
-/// entero (el FATAL de `informe`). Esto dice lo mismo en forma de índice: los
-/// niveles de la fuente que en mayúsculas están en la lista y, con
-/// `infer_level`, los sin nivel. Es un superconjunto (el filtro de siempre sigue
-/// ahí), así que las anclas son las mismas. `UPPER` de SQLite solo pasa ASCII.
+/// Condición de más para las anclas y los precursores con nivel: el filtro de
+/// nivel (`UPPER` del nivel, o del deducido) no puede usar `idx_events_level` y
+/// se leía `events` entero o toda la ventana (el FATAL de `informe`). Esto dice
+/// lo mismo en forma de índice: los niveles de la fuente que en mayúsculas están
+/// en la lista y, con `infer_level`, los sin nivel. Es un superconjunto (el
+/// filtro de siempre sigue ahí): mismas filas. `UPPER` de SQLite solo pasa ASCII.
 fn level_prefilter(conn: &Connection, scope: &EventScope) -> Result<String> {
     let Some(l) = scope.level.filter(|l| !l.trim().is_empty()) else { return Ok(String::new()) };
     let want = crate::timeline::comma_list(l, true);
